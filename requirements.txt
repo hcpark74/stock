@@ -1,0 +1,25 @@
+# HTTP 클라이언트 (비동기)
+httpx==0.27.2
+
+# WebSocket 클라이언트
+websockets==13.1
+
+# 비동기 스케줄러
+APScheduler==3.10.4
+
+# 환경변수 관리
+python-dotenv==1.0.1
+
+# NTP 시각 동기화 검증
+ntplib==0.4.0
+
+# 비동기 SQLite
+aiosqlite==0.20.0
+
+# Web UI
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+
+# 테스트
+pytest==8.3.4
+pytest-asyncio==0.24.0

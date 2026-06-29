@@ -1,0 +1,465 @@
+<title>DAILY 1 — 갭업 모니터링</title>
+<style>
+:root{
+  --g:#131722;--s:#1e222d;--s2:#2a2e39;--bd:#2a2e39;
+  --tx:#d1d4dc;--mu:#787b86;--br:#f7a600;
+  --up:#26a69a;--dn:#ef5350;--bl:#2962ff;
+  --mn:'Roboto Mono','Courier New',monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+html,body{height:100%;overflow:hidden;}
+body{background:var(--g);color:var(--tx);font-family:-apple-system,'Segoe UI',system-ui,sans-serif;font-size:12px;display:flex;flex-direction:column;height:100vh;}
+
+/* ── TOP BAR ── */
+.tb{height:36px;background:var(--s);border-bottom:1px solid var(--bd);display:flex;align-items:stretch;flex-shrink:0;overflow:hidden;}
+.tb-cell{display:flex;align-items:center;padding:0 12px;gap:7px;border-right:1px solid var(--bd);white-space:nowrap;flex-shrink:0;}
+.tb-logo{height:18px;filter:invert(1);mix-blend-mode:screen;}
+.tb-brand{font-size:11px;font-weight:700;letter-spacing:.1em;}
+.tb-sym{font-family:var(--mn);font-size:12px;font-weight:700;}
+.tb-sname{font-size:11px;color:var(--mu);}
+.tb-tabs{display:flex;align-items:stretch;height:100%;}
+.ttab{display:flex;align-items:center;padding:0 14px;height:100%;font-size:11px;color:var(--mu);background:transparent;border:none;border-bottom:2px solid transparent;cursor:pointer;transition:color .1s;margin-bottom:-1px;white-space:nowrap;}
+.ttab:hover{color:var(--tx);background:rgba(255,255,255,.03);}
+.ttab.on{color:var(--tx);border-bottom-color:var(--bl);}
+.tb-gap{flex:1;}
+.tb-si{display:flex;align-items:center;gap:5px;padding:0 10px;border-left:1px solid var(--bd);font-family:var(--mn);font-size:10px;color:var(--mu);flex-shrink:0;}
+.dot{width:5px;height:5px;border-radius:50%;background:var(--up);flex-shrink:0;}
+.dot.w{background:var(--br);}
+.dot.e{background:var(--dn);}
+.dot.off{background:var(--s2);outline:1px solid var(--bd);}
+.tb-paper{display:flex;align-items:center;padding:0 12px;border-left:1px solid var(--bd);background:rgba(247,166,0,.07);font-family:var(--mn);font-size:10px;color:var(--br);letter-spacing:.08em;flex-shrink:0;}
+.tb-clk{display:flex;align-items:center;padding:0 12px;border-left:1px solid var(--bd);font-family:var(--mn);font-size:11px;color:var(--mu);flex-shrink:0;}
+
+/* ── MIDDLE ── */
+.mid{display:flex;flex:1;min-height:0;}
+
+/* Left strip */
+.lstrip{width:40px;flex-shrink:0;background:var(--s);border-right:1px solid var(--bd);display:flex;flex-direction:column;align-items:center;padding:8px 0;gap:2px;}
+.li{width:34px;height:30px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;border-radius:2px;cursor:default;font-size:8px;letter-spacing:.03em;}
+.li-dot{width:6px;height:6px;border-radius:50%;}
+.li.ok{color:var(--up);}  .li.ok .li-dot{background:var(--up);}
+.li.warn{color:var(--br);} .li.warn .li-dot{background:var(--br);}
+.li.err{color:var(--dn);}  .li.err .li-dot{background:var(--dn);}
+.li-sep{width:22px;height:1px;background:var(--bd);margin:3px 0;}
+
+/* Main */
+.main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden;}
+.sc{display:none;flex:1;min-height:0;}
+.sc.on{display:flex;}
+
+/* ── TODAY ── */
+.sc-today{flex-direction:row;}
+.t-left{flex:1;overflow-y:auto;min-width:0;position:relative;background:var(--g);}
+.t-right{width:252px;flex-shrink:0;background:var(--s);border-left:1px solid var(--bd);display:flex;flex-direction:column;}
+
+.wm{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:200px;opacity:.022;filter:invert(1);pointer-events:none;user-select:none;z-index:0;}
+
+.arc-strip{border-bottom:1px solid var(--bd);display:flex;flex-direction:column;align-items:center;padding:14px 0 8px;position:relative;z-index:1;}
+.arc-row{display:flex;justify-content:space-between;width:280px;margin-top:5px;}
+.a-lbl{font-family:var(--mn);font-size:10px;color:var(--mu);}
+.a-sub{font-size:9px;color:var(--mu);opacity:.6;margin-top:1px;}
+
+.state-strip{display:flex;align-items:center;gap:8px;padding:7px 16px;border-bottom:1px solid var(--bd);position:relative;z-index:1;}
+.st-badge{font-family:var(--mn);font-size:10px;padding:1px 7px;background:rgba(247,166,0,.1);color:var(--br);border:1px solid rgba(247,166,0,.22);letter-spacing:.05em;}
+.st-tk{font-size:13px;font-weight:700;font-family:var(--mn);}
+.st-name{font-size:11px;color:var(--mu);}
+.tv-pills{display:flex;gap:4px;margin-left:auto;}
+.tv-sell{padding:2px 9px;background:rgba(239,83,80,.15);color:var(--dn);font-family:var(--mn);font-size:10px;font-weight:700;letter-spacing:.04em;border:1px solid rgba(239,83,80,.3);}
+.tv-buy{padding:2px 9px;background:rgba(38,166,154,.15);color:var(--up);font-family:var(--mn);font-size:10px;font-weight:700;letter-spacing:.04em;border:1px solid rgba(38,166,154,.3);}
+
+.pos-wrap{padding:12px 16px;position:relative;z-index:1;}
+.pgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px 14px;}
+.plbl{font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px;}
+.pval{font-family:var(--mn);font-size:14px;font-weight:600;}
+.pval .u{font-size:9px;color:var(--mu);font-weight:400;}
+.pup{color:var(--up);}
+.pdn{color:var(--dn);}
+.pdiv{height:1px;background:var(--bd);margin:10px 0;}
+.flags{display:flex;flex-wrap:wrap;gap:7px;}
+.flag{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--mu);}
+.flag.on{color:var(--tx);}
+
+/* Event log panel */
+.ev-hdr{height:30px;padding:0 12px;display:flex;align-items:center;border-bottom:1px solid var(--bd);font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:.08em;flex-shrink:0;}
+.ev-scroll{overflow-y:auto;flex:1;}
+.ev{display:grid;grid-template-columns:50px 1fr;gap:3px;padding:7px 12px;border-bottom:1px solid var(--bd);}
+.ev:last-child{border-bottom:none;}
+.ev:first-child{border-left:2px solid var(--up);padding-left:10px;}
+.ev-t{font-family:var(--mn);font-size:9px;color:var(--mu);padding-top:1px;}
+.ev-n{font-size:11px;font-weight:500;margin-bottom:1px;}
+.ev-d{font-family:var(--mn);font-size:9px;color:var(--mu);}
+.ev.hi .ev-n{color:var(--up);}
+.ev.acc .ev-n{color:var(--br);}
+.ev-cur{display:inline-block;color:var(--up);animation:blink 1s step-end infinite;}
+@keyframes blink{50%{opacity:0;}}
+
+/* ── HISTORY ── */
+.sc-hist{flex-direction:column;}
+.hist-inner{padding:16px 20px;overflow-y:auto;flex:1;}
+.scards{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px;}
+.sc2{background:var(--s);border:1px solid var(--bd);padding:12px 14px;}
+.sc2-lbl{font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;}
+.sc2-val{font-family:var(--mn);font-size:20px;font-weight:700;}
+.frow{display:flex;gap:4px;margin-bottom:10px;flex-wrap:wrap;}
+.fp{padding:2px 8px;border:1px solid var(--bd);font-size:10px;color:var(--mu);cursor:pointer;background:transparent;transition:all .1s;}
+.fp:hover{border-color:var(--mu);color:var(--tx);}
+.fp.on{background:rgba(41,98,255,.1);border-color:rgba(41,98,255,.35);color:var(--tx);}
+.tbl-wrap{overflow-x:auto;}
+table{width:100%;border-collapse:collapse;}
+th{font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:.03em;text-align:left;padding:5px 10px;border-bottom:1px solid var(--bd);white-space:nowrap;font-weight:400;}
+td{padding:6px 10px;border-bottom:1px solid var(--bd);font-family:var(--mn);font-size:11px;}
+tr:hover td{background:var(--s2);}
+.badge{display:inline-block;padding:1px 6px;font-size:9px;letter-spacing:.03em;}
+.b-tr{background:rgba(38,166,154,.12);color:var(--up);}
+.b-hs{background:rgba(239,83,80,.12);color:var(--dn);}
+.b-to{background:rgba(120,123,134,.1);color:var(--mu);}
+.b-op{background:rgba(41,98,255,.1);color:#7b9ef9;border:1px solid rgba(41,98,255,.2);}
+
+/* ── STATS ── */
+.sc-stats{flex-direction:column;}
+.stats-inner{padding:16px 20px;overflow-y:auto;flex:1;display:grid;grid-template-columns:220px 1fr;gap:10px;align-content:start;}
+.scard{background:var(--s);border:1px solid var(--bd);padding:14px;}
+.scard.full{grid-column:1/-1;}
+.card-ttl{font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:.07em;margin-bottom:12px;}
+.donut-wr{position:relative;display:inline-block;}
+.donut-ctr{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;}
+.d-pct{font-family:var(--mn);font-size:22px;font-weight:700;color:var(--up);line-height:1;}
+.d-lbl{font-size:9px;color:var(--mu);margin-top:2px;}
+.dleg{display:flex;gap:10px;margin-top:8px;}
+.dleg-i{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--mu);}
+.dleg-dot{width:7px;height:7px;}
+.mgrid{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;}
+.mcell{padding:9px;border:1px solid var(--bd);text-align:center;}
+.mname{font-size:10px;color:var(--mu);margin-bottom:3px;}
+.mpnl{font-family:var(--mn);font-size:13px;font-weight:600;}
+.mtr{font-size:9px;color:var(--mu);margin-top:2px;}
+
+/* ── BOTTOM BAR ── */
+.btm{height:28px;flex-shrink:0;background:var(--s);border-top:1px solid var(--bd);display:flex;align-items:center;font-family:var(--mn);font-size:10px;color:var(--mu);overflow:hidden;}
+.b-seg{display:flex;align-items:center;gap:5px;padding:0 12px;height:100%;border-right:1px solid var(--bd);white-space:nowrap;flex-shrink:0;}
+.b-seg.right{border-right:none;margin-left:auto;border-left:1px solid var(--bd);}
+.b-done{color:var(--mu);}
+.b-active{color:var(--br);}
+.b-dim{color:var(--s2);}
+.b-arr{color:var(--bd);margin:0 2px;}
+</style>
+
+<!-- TOP BAR -->
+<div class="tb">
+  <div class="tb-cell">
+    <img src="daily1.webp" class="tb-logo" alt="">
+    <span class="tb-brand">DAILY 1</span>
+  </div>
+  <div class="tb-cell" style="cursor:pointer;">
+    <span class="tb-sym">005930</span>
+    <span class="tb-sname">삼성전자</span>
+  </div>
+  <div class="tb-tabs">
+    <button class="ttab on"  onclick="go('today',this)">오늘</button>
+    <button class="ttab"     onclick="go('history',this)">이력</button>
+    <button class="ttab"     onclick="go('stats',this)">통계</button>
+  </div>
+  <div class="tb-gap"></div>
+  <div class="tb-si"><span class="dot"></span>KIS</div>
+  <div class="tb-si"><span class="dot"></span>WS</div>
+  <div class="tb-si"><span class="dot w"></span>NTP +268ms</div>
+  <div class="tb-paper">PAPER</div>
+  <div class="tb-clk" id="clk">09:15:23 KST</div>
+</div>
+
+<!-- MIDDLE -->
+<div class="mid">
+
+  <!-- Left icon strip -->
+  <div class="lstrip">
+    <div class="li ok" title="KIS API 정상"><div class="li-dot"></div>KIS</div>
+    <div class="li ok" title="WebSocket 연결됨"><div class="li-dot"></div>WS</div>
+    <div class="li warn" title="NTP +268ms WARN"><div class="li-dot"></div>NTP</div>
+    <div class="li-sep"></div>
+  </div>
+
+  <!-- Main content -->
+  <div class="main">
+
+    <!-- ══ TODAY ══ -->
+    <div id="sc-today" class="sc sc-today on">
+      <div class="t-left">
+        <img src="daily1.webp" class="wm" alt="">
+
+        <div class="arc-strip">
+          <canvas id="arc" width="280" height="145"></canvas>
+          <div class="arc-row">
+            <div><div class="a-lbl">08:40</div><div class="a-sub">장전 시작</div></div>
+            <div style="text-align:center"><div class="a-lbl" style="color:var(--br)">09:15 현재</div><div class="a-sub">35 / 80분 경과</div></div>
+            <div style="text-align:right"><div class="a-lbl">10:00</div><div class="a-sub">타임아웃</div></div>
+          </div>
+        </div>
+
+        <div class="state-strip">
+          <span class="st-badge">보유중</span>
+          <span class="st-tk">005930</span>
+          <span class="st-name">삼성전자</span>
+          <div class="tv-pills">
+            <span class="tv-sell">매도</span>
+            <span class="tv-buy">+1.84%</span>
+          </div>
+        </div>
+
+        <div class="pos-wrap">
+          <div class="pgrid">
+            <div><div class="plbl">진입가</div><div class="pval">75,800<span class="u">원</span></div></div>
+            <div><div class="plbl">현재가</div><div class="pval pup">77,200<span class="u">원</span></div></div>
+            <div><div class="plbl">평가손익</div><div class="pval pup">+1.84%</div></div>
+            <div><div class="plbl">최고가</div><div class="pval">77,750<span class="u">원</span></div></div>
+            <div><div class="plbl">잔여수량</div><div class="pval">107<span class="u">주</span></div></div>
+            <div><div class="plbl">투입금액</div><div class="pval">9.49M<span class="u">원</span></div></div>
+          </div>
+          <div class="pdiv"></div>
+          <div class="flags">
+            <div class="flag on"><span class="dot"></span>피라미딩 완료</div>
+            <div class="flag on"><span class="dot" style="background:#22d3ee"></span>Step Trailing 활성</div>
+            <div class="flag on"><span class="dot" style="background:var(--br)"></span>최고 스텝 +2.5%</div>
+            <div class="flag"><span class="dot off"></span>Hard Stop 74,284원</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right event panel -->
+      <div class="t-right">
+        <div class="ev-hdr">이벤트 로그</div>
+        <div class="ev-scroll">
+          <div class="ev"><div class="ev-t">09:15:01</div><div><div class="ev-n">틱 수신<span class="ev-cur">▌</span></div><div class="ev-d">77,200원 · WebSocket</div></div></div>
+          <div class="ev hi"><div class="ev-t">09:05:22</div><div><div class="ev-n">Step Trailing 활성</div><div class="ev-d">+2.5% 스텝 도달 · stop→74,284원</div></div></div>
+          <div class="ev"><div class="ev-t">09:00:12</div><div><div class="ev-n">피라미딩 체결</div><div class="ev-d">18주 @ 76,100원</div></div></div>
+          <div class="ev acc"><div class="ev-t">08:59:52</div><div><div class="ev-n">진입 체결 → HOLDING</div><div class="ev-d">89주 @ 75,800원</div></div></div>
+          <div class="ev"><div class="ev-t">08:58:02</div><div><div class="ev-n">F2 종목 잠금</div><div class="ev-d">005930 · 갭 +4.28%</div></div></div>
+          <div class="ev"><div class="ev-t">08:40:00</div><div><div class="ev-n">F1 필터 완료</div><div class="ev-d">3종목 통과 · 유동성 1위 선택</div></div></div>
+          <div class="ev"><div class="ev-t">08:30:11</div><div><div class="ev-n">NTP 동기화</div><div class="ev-d">+268ms WARN · time.bora.net</div></div></div>
+          <div class="ev"><div class="ev-t">08:30:00</div><div><div class="ev-n">KIS 토큰 갱신</div><div class="ev-d">만료 23:59 · OAuth2</div></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ HISTORY ══ -->
+    <div id="sc-history" class="sc sc-hist">
+      <div class="hist-inner">
+        <div class="scards">
+          <div class="sc2"><div class="sc2-lbl">총 거래</div><div class="sc2-val" style="color:var(--br)">11</div></div>
+          <div class="sc2"><div class="sc2-lbl">승률</div><div class="sc2-val pup">70.0%</div></div>
+          <div class="sc2"><div class="sc2-lbl">평균 손익</div><div class="sc2-val pup">+0.85%</div></div>
+          <div class="sc2"><div class="sc2-lbl">최대 손실</div><div class="sc2-val pdn">−2.35%</div></div>
+        </div>
+        <div class="frow">
+          <button class="fp on">전체</button>
+          <button class="fp">이번 달</button>
+          <button class="fp">TRAILING</button>
+          <button class="fp">HARD_STOP</button>
+          <button class="fp">TIMEOUT</button>
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr>
+              <th>날짜</th><th>종목</th><th>진입가</th><th>청산가</th>
+              <th>손익</th><th>Step Trail</th><th>피라미딩</th><th>청산 사유</th>
+            </tr></thead>
+            <tbody>
+              <tr><td>20260623</td><td>005930 <span style="color:var(--mu);font-size:10px">삼성전자</span></td><td>75,800</td><td style="color:var(--mu)">—</td><td class="pup">+1.84%</td><td class="pup">✓</td><td class="pup">✓</td><td><span class="badge b-op">진행 중</span></td></tr>
+              <tr><td>20260620</td><td>000660 <span style="color:var(--mu);font-size:10px">SK하이닉스</span></td><td>185,000</td><td>189,200</td><td class="pup">+2.27%</td><td class="pup">✓</td><td style="color:var(--mu)">—</td><td><span class="badge b-tr">TRAILING</span></td></tr>
+              <tr><td>20260619</td><td>035420 <span style="color:var(--mu);font-size:10px">NAVER</span></td><td>342,000</td><td>335,200</td><td class="pdn">−1.99%</td><td style="color:var(--mu)">—</td><td style="color:var(--mu)">—</td><td><span class="badge b-hs">HARD_STOP</span></td></tr>
+              <tr><td>20260618</td><td>005380 <span style="color:var(--mu);font-size:10px">현대차</span></td><td>23,500</td><td>24,150</td><td class="pup">+2.77%</td><td class="pup">✓</td><td class="pup">✓</td><td><span class="badge b-tr">TRAILING</span></td></tr>
+              <tr><td>20260617</td><td>000270 <span style="color:var(--mu);font-size:10px">기아</span></td><td>42,800</td><td>43,400</td><td class="pup">+1.40%</td><td style="color:var(--mu)">—</td><td style="color:var(--mu)">—</td><td><span class="badge b-to">TIMEOUT</span></td></tr>
+              <tr><td>20260613</td><td>028260 <span style="color:var(--mu);font-size:10px">삼성물산</span></td><td>192,000</td><td>195,800</td><td class="pup">+1.98%</td><td class="pup">✓</td><td style="color:var(--mu)">—</td><td><span class="badge b-tr">TRAILING</span></td></tr>
+              <tr><td>20260612</td><td>000660 <span style="color:var(--mu);font-size:10px">SK하이닉스</span></td><td>178,500</td><td>174,300</td><td class="pdn">−2.35%</td><td style="color:var(--mu)">—</td><td style="color:var(--mu)">—</td><td><span class="badge b-hs">HARD_STOP</span></td></tr>
+              <tr><td>20260611</td><td>035720 <span style="color:var(--mu);font-size:10px">카카오</span></td><td>438,000</td><td>444,500</td><td class="pup">+1.48%</td><td style="color:var(--mu)">—</td><td style="color:var(--mu)">—</td><td><span class="badge b-to">TIMEOUT</span></td></tr>
+              <tr><td>20260610</td><td>000270 <span style="color:var(--mu);font-size:10px">기아</span></td><td>41,200</td><td>42,100</td><td class="pup">+2.18%</td><td class="pup">✓</td><td style="color:var(--mu)">—</td><td><span class="badge b-tr">TRAILING</span></td></tr>
+              <tr><td>20260609</td><td>005380 <span style="color:var(--mu);font-size:10px">현대차</span></td><td>24,200</td><td>23,900</td><td class="pdn">−1.24%</td><td style="color:var(--mu)">—</td><td style="color:var(--mu)">—</td><td><span class="badge b-hs">HARD_STOP</span></td></tr>
+              <tr><td>20260605</td><td>003550 <span style="color:var(--mu);font-size:10px">LG</span></td><td>93,000</td><td>95,100</td><td class="pup">+2.26%</td><td class="pup">✓</td><td style="color:var(--mu)">—</td><td><span class="badge b-tr">TRAILING</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ STATS ══ -->
+    <div id="sc-stats" class="sc sc-stats">
+      <div class="stats-inner">
+        <div class="scard">
+          <div class="card-ttl">승률 (10거래일)</div>
+          <div class="donut-wr">
+            <canvas id="donut" width="192" height="192"></canvas>
+            <div class="donut-ctr">
+              <div class="d-pct">70%</div>
+              <div class="d-lbl">7승 3패</div>
+            </div>
+          </div>
+          <div class="dleg">
+            <div class="dleg-i"><div class="dleg-dot" style="background:var(--up)"></div>승 (7)</div>
+            <div class="dleg-i"><div class="dleg-dot" style="background:var(--s2)"></div>패 (3)</div>
+          </div>
+        </div>
+        <div class="scard">
+          <div class="card-ttl">청산 사유별 평균 손익</div>
+          <canvas id="bar" width="420" height="192"></canvas>
+        </div>
+        <div class="scard full">
+          <div class="card-ttl">월별 누적 손익</div>
+          <div class="mgrid">
+            <div class="mcell"><div class="mname">2026.01</div><div class="mpnl pdn">−1.23%</div><div class="mtr">4거래</div></div>
+            <div class="mcell"><div class="mname">2026.02</div><div class="mpnl pup">+3.85%</div><div class="mtr">6거래</div></div>
+            <div class="mcell"><div class="mname">2026.03</div><div class="mpnl pup">+5.14%</div><div class="mtr">8거래</div></div>
+            <div class="mcell"><div class="mname">2026.04</div><div class="mpnl pup">+2.40%</div><div class="mtr">7거래</div></div>
+            <div class="mcell"><div class="mname">2026.05</div><div class="mpnl pdn">−0.87%</div><div class="mtr">9거래</div></div>
+            <div class="mcell"><div class="mname">2026.06</div><div class="mpnl pup">+4.13%</div><div class="mtr">11거래</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /main -->
+</div><!-- /mid -->
+
+<!-- BOTTOM BAR -->
+<div class="btm">
+  <div class="b-seg">
+    <span class="dot" style="background:var(--br)"></span>
+    <span style="color:var(--tx)">PAPER TRADING</span>
+  </div>
+  <div class="b-seg">
+    <span class="b-done">F1 스캔</span><span class="b-arr">›</span>
+    <span class="b-done">F2 잠금</span><span class="b-arr">›</span>
+    <span class="b-active">F3 진입</span><span class="b-arr">›</span>
+    <span class="b-active">F4 Step Trailing</span><span class="b-arr">›</span>
+    <span class="b-dim">F5 타임아웃</span>
+  </div>
+  <div class="b-seg right">
+    <span>08:40</span>
+    <span class="b-arr" style="letter-spacing:-1px">──────</span>
+    <span style="color:var(--br)">09:15</span>
+    <span class="b-arr" style="letter-spacing:-1px">──────────</span>
+    <span>10:00</span>
+  </div>
+</div>
+
+<script>
+function go(id, btn) {
+  document.querySelectorAll('.sc').forEach(s => s.classList.remove('on'));
+  document.querySelectorAll('.ttab').forEach(b => b.classList.remove('on'));
+  document.getElementById('sc-' + id).classList.add('on');
+  btn.classList.add('on');
+  if (id === 'stats') { drawDonut(); drawBar(); }
+}
+
+(function tick() {
+  const now = new Date();
+  const kst = new Date(now.getTime() + 9*3600*1000);
+  const p = n => String(n).padStart(2,'0');
+  document.getElementById('clk').textContent =
+    p(kst.getUTCHours())+':'+p(kst.getUTCMinutes())+':'+p(kst.getUTCSeconds())+' KST';
+  setTimeout(tick, 1000);
+})();
+
+(function drawArc() {
+  const c = document.getElementById('arc');
+  if (!c) return;
+  const ctx = c.getContext('2d');
+  const cx=140, cy=5, r=130;
+  ctx.clearRect(0,0,280,145);
+  const prog = 0.4375;
+
+  ctx.beginPath(); ctx.arc(cx,cy,r,Math.PI,0,true);
+  ctx.strokeStyle='#2a2e39'; ctx.lineWidth=10; ctx.lineCap='round'; ctx.stroke();
+
+  ctx.beginPath(); ctx.arc(cx,cy,r,Math.PI,Math.PI*(1-prog),true);
+  ctx.strokeStyle='rgba(247,166,0,.08)'; ctx.lineWidth=22; ctx.lineCap='round'; ctx.stroke();
+
+  ctx.beginPath(); ctx.arc(cx,cy,r,Math.PI,Math.PI*(1-prog),true);
+  ctx.strokeStyle='#f7a600'; ctx.lineWidth=10; ctx.lineCap='round'; ctx.stroke();
+
+  function innerLabel(p, txt) {
+    const a = Math.PI*(1-p), ri=r-22;
+    const x=cx+ri*Math.cos(a), y=cy+ri*Math.sin(a);
+    ctx.fillStyle='#363a45'; ctx.font='9px Courier New,monospace';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(txt, x, y);
+  }
+  innerLabel(0.25,'09:00'); innerLabel(0.50,'09:20'); innerLabel(0.75,'09:40');
+
+  function evDot(p, color, lbl) {
+    const a=Math.PI*(1-p), x=cx+r*Math.cos(a), y=cy+r*Math.sin(a);
+    ctx.beginPath(); ctx.arc(x,y,5,0,Math.PI*2);
+    ctx.fillStyle=color; ctx.fill();
+    if (lbl) {
+      ctx.fillStyle=color; ctx.font='9px Courier New,monospace';
+      ctx.textAlign='center'; ctx.textBaseline='top';
+      ctx.fillText(lbl, x, y+9);
+    }
+  }
+  evDot(0.248,'#f7a600','진입');
+  evDot(0.317,'#22d3ee','Step↑');
+
+  const ca=Math.PI*(1-prog), cx2=cx+r*Math.cos(ca), cy2=cy+r*Math.sin(ca);
+  ctx.beginPath(); ctx.arc(cx2,cy2,9,0,Math.PI*2);
+  ctx.fillStyle='rgba(247,166,0,.15)'; ctx.fill();
+  ctx.beginPath(); ctx.arc(cx2,cy2,4.5,0,Math.PI*2);
+  ctx.fillStyle='#f7a600'; ctx.fill();
+})();
+
+function drawDonut() {
+  const c = document.getElementById('donut');
+  if (!c) return;
+  const ctx=c.getContext('2d'), cx=96, cy=96, r=72, inner=48;
+  ctx.clearRect(0,0,192,192);
+  const winA=0.70*2*Math.PI;
+  ctx.beginPath(); ctx.moveTo(cx,cy);
+  ctx.arc(cx,cy,r,-Math.PI/2,-Math.PI/2+winA);
+  ctx.closePath(); ctx.fillStyle='#26a69a'; ctx.fill();
+  ctx.beginPath(); ctx.moveTo(cx,cy);
+  ctx.arc(cx,cy,r,-Math.PI/2+winA,-Math.PI/2+2*Math.PI);
+  ctx.closePath(); ctx.fillStyle='#2a2e39'; ctx.fill();
+  ctx.beginPath(); ctx.arc(cx,cy,inner,0,2*Math.PI);
+  ctx.fillStyle='#1e222d'; ctx.fill();
+}
+
+function drawBar() {
+  const c = document.getElementById('bar');
+  if (!c) return;
+  const ctx=c.getContext('2d');
+  ctx.clearRect(0,0,420,192);
+  const pad={t:24,r:20,b:48,l:48};
+  const W=420, H=192, cW=W-pad.l-pad.r, cH=H-pad.t-pad.b, maxA=2.5;
+  const zY=pad.t+cH*(maxA/(2*maxA));
+
+  ctx.beginPath(); ctx.moveTo(pad.l,zY); ctx.lineTo(W-pad.r,zY);
+  ctx.strokeStyle='#363a45'; ctx.lineWidth=1; ctx.stroke();
+
+  const data=[
+    {lbl:'TRAILING', val:1.82, color:'#26a69a', n:5},
+    {lbl:'TIMEOUT',  val:1.44, color:'#787b86', n:2},
+    {lbl:'HARD_STOP',val:-2.17,color:'#ef5350', n:2},
+  ];
+  const slot=cW/data.length, bW=slot*0.38;
+
+  data.forEach((d,i)=>{
+    const x=pad.l+i*slot+(slot-bW)/2;
+    const bH=Math.abs(d.val)/(2*maxA)*cH;
+    const y=d.val>=0? zY-bH : zY;
+    ctx.fillStyle=d.color+'18'; ctx.fillRect(x,y,bW,bH);
+    ctx.fillStyle=d.color;
+    ctx.fillRect(x, d.val>=0?zY-3:zY, bW, 3);
+    ctx.font='bold 12px Courier New,monospace'; ctx.textAlign='center';
+    ctx.fillStyle=d.color;
+    ctx.fillText((d.val>=0?'+':'')+d.val+'%', x+bW/2, d.val>=0? y-8 : y+bH+13);
+    ctx.font='9px Courier New,monospace'; ctx.fillStyle='#787b86';
+    ctx.fillText(d.lbl, x+bW/2, H-pad.b+13);
+    ctx.fillText('('+d.n+'건)', x+bW/2, H-pad.b+25);
+  });
+
+  ctx.textAlign='right'; ctx.font='9px Courier New,monospace'; ctx.fillStyle='#787b86';
+  [2,1,0,-1,-2].forEach(v=>{
+    const yp=pad.t+(maxA-v)/(2*maxA)*cH;
+    ctx.fillText((v>0?'+':'')+v+'%', pad.l-6, yp+3);
+    ctx.beginPath(); ctx.moveTo(pad.l,yp); ctx.lineTo(pad.l+cW,yp);
+    ctx.strokeStyle='#363a4540'; ctx.lineWidth=1; ctx.stroke();
+  });
+}
+</script>

@@ -1,0 +1,17 @@
+-r requirements.txt
+
+# 테스트 프레임워크
+pytest==8.3.5
+pytest-asyncio==0.24.0
+
+# HTTP mock (KIS API 테스트용)
+respx==0.21.1
+
+# mock 유틸
+pytest-mock==3.14.0
+
+# 코드 스타일 / 린트
+ruff==0.4.10
+
+# 타입 검사
+mypy==1.10.1
