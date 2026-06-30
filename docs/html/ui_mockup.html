@@ -21,6 +21,8 @@ body{background:var(--g);color:var(--tx);font-family:-apple-system,'Segoe UI',sy
 .ttab{display:flex;align-items:center;padding:0 14px;height:100%;font-size:11px;color:var(--mu);background:transparent;border:none;border-bottom:2px solid transparent;cursor:pointer;transition:color .1s;margin-bottom:-1px;white-space:nowrap;}
 .ttab:hover{color:var(--tx);background:rgba(255,255,255,.03);}
 .ttab.on{color:var(--tx);border-bottom-color:var(--bl);}
+.tb-tabs{display:none;}
+.tb-console{display:flex;align-items:center;padding:0 12px;border-right:1px solid var(--bd);font-size:11px;color:var(--mu);white-space:nowrap;}
 .tb-gap{flex:1;}
 .tb-si{display:flex;align-items:center;gap:5px;padding:0 10px;border-left:1px solid var(--bd);font-family:var(--mn);font-size:10px;color:var(--mu);flex-shrink:0;}
 .dot{width:5px;height:5px;border-radius:50%;background:var(--up);flex-shrink:0;}
@@ -33,14 +35,18 @@ body{background:var(--g);color:var(--tx);font-family:-apple-system,'Segoe UI',sy
 /* ── MIDDLE ── */
 .mid{display:flex;flex:1;min-height:0;}
 
-/* Left strip */
-.lstrip{width:40px;flex-shrink:0;background:var(--s);border-right:1px solid var(--bd);display:flex;flex-direction:column;align-items:center;padding:8px 0;gap:2px;}
-.li{width:34px;height:30px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;border-radius:2px;cursor:default;font-size:8px;letter-spacing:.03em;}
-.li-dot{width:6px;height:6px;border-radius:50%;}
-.li.ok{color:var(--up);}  .li.ok .li-dot{background:var(--up);}
-.li.warn{color:var(--br);} .li.warn .li-dot{background:var(--br);}
-.li.err{color:var(--dn);}  .li.err .li-dot{background:var(--dn);}
-.li-sep{width:22px;height:1px;background:var(--bd);margin:3px 0;}
+/* Left menu */
+.lstrip{width:66px;flex-shrink:0;background:var(--s);border-right:1px solid var(--bd);display:flex;flex-direction:column;align-items:stretch;padding:6px 4px;gap:2px;}
+.li{height:42px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;border-radius:3px;cursor:pointer;font-size:9px;letter-spacing:.02em;color:var(--mu);border:1px solid transparent;background:transparent;}
+.li:hover{color:var(--tx);background:rgba(255,255,255,.03);}
+.li.on{color:var(--tx);background:rgba(41,98,255,.1);border-color:rgba(41,98,255,.28);}
+.li-dot{width:6px;height:6px;border-radius:50%;background:var(--mu);}
+.li.on .li-dot{background:var(--bl);}
+.li.ok .li-dot{background:var(--up);}
+.li.warn .li-dot{background:var(--br);}
+.li.err .li-dot{background:var(--dn);}
+.li-sep{height:1px;background:var(--bd);margin:4px 6px;}
+.lstrip>.li:not(.menu-item),.lstrip>.li-sep.legacy,.lstrip>.li-sep:last-child{display:none;}
 
 /* Main */
 .main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden;}
@@ -67,6 +73,51 @@ body{background:var(--g);color:var(--tx);font-family:-apple-system,'Segoe UI',sy
 .tv-sell{padding:2px 9px;background:rgba(239,83,80,.15);color:var(--dn);font-family:var(--mn);font-size:10px;font-weight:700;letter-spacing:.04em;border:1px solid rgba(239,83,80,.3);}
 .tv-buy{padding:2px 9px;background:rgba(38,166,154,.15);color:var(--up);font-family:var(--mn);font-size:10px;font-weight:700;letter-spacing:.04em;border:1px solid rgba(38,166,154,.3);}
 
+.asset-strip{min-height:34px;display:flex;align-items:center;gap:12px;padding:0 16px;border-bottom:1px solid var(--bd);position:relative;z-index:1;background:rgba(255,255,255,.012);overflow:hidden;}
+.asset-cell{min-width:0;display:flex;align-items:center;gap:4px;white-space:nowrap;}
+.asset-cell.push{margin-left:auto;}
+.asset-k{font-size:9px;color:var(--mu);text-transform:uppercase;letter-spacing:.04em;}
+.asset-v{font-family:var(--mn);font-size:12px;font-weight:700;}
+.asset-v.sm{font-size:12px;}
+.asset-v.up{color:var(--up);}
+.asset-v.dn{color:var(--dn);}
+.asset-v .u{font-size:9px;color:var(--mu);font-weight:400;}
+.asset-sub{font-family:var(--mn);font-size:9px;color:var(--mu);}
+
+.f1-panel{padding:10px 16px 12px;border-bottom:1px solid var(--bd);position:relative;z-index:1;background:linear-gradient(180deg,rgba(41,98,255,.035),rgba(41,98,255,0));}
+.f1-head{display:flex;align-items:center;gap:8px;margin-bottom:9px;}
+.f1-title{font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:.08em;}
+.f1-state{font-family:var(--mn);font-size:10px;color:var(--up);padding:1px 7px;border:1px solid rgba(38,166,154,.28);background:rgba(38,166,154,.1);}
+.f1-meta{margin-left:auto;font-family:var(--mn);font-size:10px;color:var(--mu);}
+.f1-steps{display:grid;grid-template-columns:repeat(5,1fr);gap:4px;margin-bottom:9px;}
+.f1-step{min-width:0;border:1px solid var(--bd);background:rgba(255,255,255,.015);padding:6px 7px;}
+.f1-step.done{border-color:rgba(38,166,154,.28);background:rgba(38,166,154,.055);}
+.f1-step.active{border-color:rgba(247,166,0,.35);background:rgba(247,166,0,.07);}
+.f1-step.fail{border-color:rgba(239,83,80,.32);background:rgba(239,83,80,.06);}
+.f1-step-top{display:flex;align-items:center;gap:5px;font-size:9px;color:var(--mu);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.f1-step.done .f1-step-top{color:var(--up);}
+.f1-step.active .f1-step-top{color:var(--br);}
+.f1-step.fail .f1-step-top{color:var(--dn);}
+.f1-step-val{font-family:var(--mn);font-size:13px;font-weight:700;margin-top:3px;}
+.f1-dot{width:5px;height:5px;border-radius:50%;background:var(--mu);flex-shrink:0;}
+.f1-step.done .f1-dot{background:var(--up);}
+.f1-step.active .f1-dot{background:var(--br);}
+.f1-step.fail .f1-dot{background:var(--dn);}
+.f1-grid{display:grid;grid-template-columns:1.1fr 1.1fr 1.1fr 1.3fr;gap:8px 12px;margin-bottom:9px;}
+.f1-k{font-size:9px;color:var(--mu);text-transform:uppercase;letter-spacing:.04em;margin-bottom:1px;}
+.f1-v{font-family:var(--mn);font-size:13px;font-weight:600;}
+.f1-v.up{color:var(--up);}
+.f1-v.br{color:var(--br);}
+.f1-table{border:1px solid var(--bd);overflow:hidden;}
+.f1-row{display:grid;grid-template-columns:62px 1fr 62px 70px 62px 76px 60px;align-items:center;border-bottom:1px solid var(--bd);min-height:26px;}
+.f1-row:last-child{border-bottom:none;}
+.f1-row.h{background:rgba(255,255,255,.025);color:var(--mu);font-size:9px;text-transform:uppercase;letter-spacing:.04em;}
+.f1-cell{padding:5px 7px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mn);font-size:10px;}
+.f1-cell.name{font-family:-apple-system,'Segoe UI',system-ui,sans-serif;}
+.f1-pass{color:var(--up);}
+.f1-drop{color:var(--mu);}
+.f1-src{color:#7b9ef9;}
+
 .pos-wrap{padding:12px 16px;position:relative;z-index:1;}
 .pgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px 14px;}
 .plbl{font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px;}
@@ -92,6 +143,11 @@ body{background:var(--g);color:var(--tx);font-family:-apple-system,'Segoe UI',sy
 .ev.acc .ev-n{color:var(--br);}
 .ev-cur{display:inline-block;color:var(--up);animation:blink 1s step-end infinite;}
 @keyframes blink{50%{opacity:0;}}
+
+@media (max-width:980px){
+  .asset-strip{flex-wrap:wrap;height:auto;padding:7px 16px;gap:6px 12px;}
+  .asset-cell.push{margin-left:0;}
+}
 
 /* ── HISTORY ── */
 .sc-hist{flex-direction:column;}
@@ -159,6 +215,7 @@ tr:hover td{background:var(--s2);}
     <button class="ttab"     onclick="go('history',this)">이력</button>
     <button class="ttab"     onclick="go('stats',this)">통계</button>
   </div>
+  <div class="tb-console">자동매매 콘솔</div>
   <div class="tb-gap"></div>
   <div class="tb-si"><span class="dot"></span>KIS</div>
   <div class="tb-si"><span class="dot"></span>WS</div>
@@ -172,6 +229,15 @@ tr:hover td{background:var(--s2);}
 
   <!-- Left icon strip -->
   <div class="lstrip">
+    <div class="li menu-item on" title="오늘" onclick="go('today',this)"><div class="li-dot"></div>오늘</div>
+    <div class="li menu-item ok" title="종목선정" onclick="go('selection',this)"><div class="li-dot"></div>선정</div>
+    <div class="li menu-item" title="자산" onclick="go('assets',this)"><div class="li-dot"></div>자산</div>
+    <div class="li menu-item" title="주문" onclick="go('orders',this)"><div class="li-dot"></div>주문</div>
+    <div class="li-sep"></div>
+    <div class="li menu-item" title="이력" onclick="go('history',this)"><div class="li-dot"></div>이력</div>
+    <div class="li menu-item" title="통계" onclick="go('stats',this)"><div class="li-dot"></div>통계</div>
+    <div class="li menu-item" title="설정" onclick="go('settings',this)"><div class="li-dot"></div>설정</div>
+    <div class="li-sep legacy"></div>
     <div class="li ok" title="KIS API 정상"><div class="li-dot"></div>KIS</div>
     <div class="li ok" title="WebSocket 연결됨"><div class="li-dot"></div>WS</div>
     <div class="li warn" title="NTP +268ms WARN"><div class="li-dot"></div>NTP</div>
@@ -202,6 +268,87 @@ tr:hover td{background:var(--s2);}
           <div class="tv-pills">
             <span class="tv-sell">매도</span>
             <span class="tv-buy">+1.84%</span>
+          </div>
+        </div>
+
+        <div class="asset-strip">
+          <div class="asset-cell">
+            <div class="asset-k">총평가금액</div>
+            <div class="asset-v">9,987,445<span class="u">원</span></div>
+          </div>
+          <div class="asset-cell">
+            <div class="asset-k">예수금</div>
+            <div class="asset-v sm">492,845<span class="u">원</span></div>
+          </div>
+          <div class="asset-cell">
+            <div class="asset-k">보유</div>
+            <div class="asset-v sm">1종목</div>
+          </div>
+          <div class="asset-cell">
+            <div class="asset-k">당일손익</div>
+            <div class="asset-v sm up">+174,600<span class="u">원</span></div>
+          </div>
+          <div class="asset-cell push">
+            <div class="asset-k">가용주문</div>
+            <div class="asset-v sm">492K<span class="u">원</span></div>
+            <div class="asset-sub">자산 메뉴에서 상세</div>
+          </div>
+        </div>
+
+        <div class="f1-panel">
+          <div class="f1-head">
+            <div class="f1-title">F1 스캔</div>
+            <div class="f1-state">완료</div>
+            <div class="f1-meta">08:40:00 시작 · 1회 시도 · 08:40:07 저장</div>
+          </div>
+
+          <div class="f1-steps">
+            <div class="f1-step done">
+              <div class="f1-step-top"><span class="f1-dot"></span>Ranking 조회</div>
+              <div class="f1-step-val">10</div>
+            </div>
+            <div class="f1-step done">
+              <div class="f1-step-top"><span class="f1-dot"></span>예상체결 보강</div>
+              <div class="f1-step-val">4</div>
+            </div>
+            <div class="f1-step done">
+              <div class="f1-step-top"><span class="f1-dot"></span>Gap 3~7%</div>
+              <div class="f1-step-val">1</div>
+            </div>
+            <div class="f1-step active">
+              <div class="f1-step-top"><span class="f1-dot"></span>유동성 정렬</div>
+              <div class="f1-step-val">1</div>
+            </div>
+            <div class="f1-step done">
+              <div class="f1-step-top"><span class="f1-dot"></span>후보 확정</div>
+              <div class="f1-step-val">126640</div>
+            </div>
+          </div>
+
+          <div class="f1-grid">
+            <div><div class="f1-k">최종 후보</div><div class="f1-v up">126640 화신정공</div></div>
+            <div><div class="f1-k">최종 갭</div><div class="f1-v up">+5.48%</div></div>
+            <div><div class="f1-k">예상체결 대금</div><div class="f1-v">17.4억</div></div>
+            <div><div class="f1-k">구간 보정</div><div class="f1-v br">CORE 1 · HIGH 0</div></div>
+          </div>
+
+          <div class="f1-table">
+            <div class="f1-row h">
+              <div class="f1-cell">종목</div><div class="f1-cell">이름</div><div class="f1-cell">최종갭</div>
+              <div class="f1-cell">구간</div><div class="f1-cell">등락률</div><div class="f1-cell">예상체결</div><div class="f1-cell">판정</div>
+            </div>
+            <div class="f1-row">
+              <div class="f1-cell">126640</div><div class="f1-cell name">화신정공</div><div class="f1-cell f1-pass">+5.48%</div>
+              <div class="f1-cell f1-src">CORE_GAP</div><div class="f1-cell">+2.41%</div><div class="f1-cell">+5.48%</div><div class="f1-cell f1-pass">통과</div>
+            </div>
+            <div class="f1-row">
+              <div class="f1-cell">006340</div><div class="f1-cell name">대원전선</div><div class="f1-cell">+8.98%</div>
+              <div class="f1-cell">HIGH_GAP</div><div class="f1-cell">+2.24%</div><div class="f1-cell">+8.98%</div><div class="f1-cell f1-drop">VI근접</div>
+            </div>
+            <div class="f1-row">
+              <div class="f1-cell">005930</div><div class="f1-cell name">삼성전자</div><div class="f1-cell">+1.08%</div>
+              <div class="f1-cell">LOW_GAP</div><div class="f1-cell">+1.08%</div><div class="f1-cell">0.00%</div><div class="f1-cell f1-drop">갭미달</div>
+            </div>
           </div>
         </div>
 
@@ -241,6 +388,90 @@ tr:hover td{background:var(--s2);}
     </div>
 
     <!-- ══ HISTORY ══ -->
+    <!-- SELECTION -->
+    <div id="sc-selection" class="sc sc-hist">
+      <div class="hist-inner">
+        <div class="scards">
+          <div class="sc2"><div class="sc2-lbl">종목선정 F1</div><div class="sc2-val">완료</div></div>
+          <div class="sc2"><div class="sc2-lbl">Ranking 후보</div><div class="sc2-val" style="color:var(--br)">10</div></div>
+          <div class="sc2"><div class="sc2-lbl">예상체결 보강</div><div class="sc2-val">4</div></div>
+          <div class="sc2"><div class="sc2-lbl">최종 후보</div><div class="sc2-val pup">126640</div></div>
+        </div>
+        <div class="frow">
+          <button class="fp on">전체</button>
+          <button class="fp">통과</button>
+          <button class="fp">갭미달</button>
+          <button class="fp">HIGH 제외</button>
+          <button class="fp">유동성 부족</button>
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>종목</th><th>이름</th><th>최종갭</th><th>구간</th><th>예상체결</th><th>대금</th><th>판정</th><th>사유</th></tr></thead>
+            <tbody>
+              <tr><td>126640</td><td>화신정공</td><td class="pup">+5.48%</td><td>CORE_GAP</td><td>+5.48%</td><td>17.4억</td><td><span class="badge b-tr">통과</span></td><td>핵심 갭 구간</td></tr>
+              <tr><td>006340</td><td>대원전선</td><td>+8.98%</td><td>HIGH_GAP</td><td>+8.98%</td><td>8.1억</td><td><span class="badge b-to">제외</span></td><td>VI 근접 또는 대금 부족</td></tr>
+              <tr><td>005930</td><td>삼성전자</td><td>+1.08%</td><td>LOW_GAP</td><td>0.00%</td><td>3.2억</td><td><span class="badge b-to">제외</span></td><td>갭미달</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ASSETS -->
+    <div id="sc-assets" class="sc sc-hist">
+      <div class="hist-inner">
+        <div class="scards">
+          <div class="sc2"><div class="sc2-lbl">총평가금액</div><div class="sc2-val">9,987,445</div></div>
+          <div class="sc2"><div class="sc2-lbl">예수금</div><div class="sc2-val" style="color:var(--br)">492,845</div></div>
+          <div class="sc2"><div class="sc2-lbl">유가평가</div><div class="sc2-val">9.49M</div></div>
+          <div class="sc2"><div class="sc2-lbl">당일손익</div><div class="sc2-val pup">+1.84%</div></div>
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>구분</th><th>금액</th><th>비중</th><th>상태</th></tr></thead>
+            <tbody>
+              <tr><td>예수금</td><td>492,845</td><td>4.9%</td><td><span class="badge b-op">주문가능</span></td></tr>
+              <tr><td>삼성전자 107주</td><td>9,494,600</td><td>95.1%</td><td><span class="badge b-tr">보유중</span></td></tr>
+              <tr><td>평가손익</td><td class="pup">+174,600</td><td class="pup">+1.84%</td><td><span class="badge b-tr">양호</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ORDERS -->
+    <div id="sc-orders" class="sc sc-hist">
+      <div class="hist-inner">
+        <div class="scards">
+          <div class="sc2"><div class="sc2-lbl">미체결</div><div class="sc2-val">0</div></div>
+          <div class="sc2"><div class="sc2-lbl">금일매수</div><div class="sc2-val">9.49M</div></div>
+          <div class="sc2"><div class="sc2-lbl">금일매도</div><div class="sc2-val">0</div></div>
+          <div class="sc2"><div class="sc2-lbl">주문가능</div><div class="sc2-val" style="color:var(--br)">492K</div></div>
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>시간</th><th>종목</th><th>구분</th><th>수량</th><th>가격</th><th>상태</th></tr></thead>
+            <tbody>
+              <tr><td>08:59:52</td><td>005930 삼성전자</td><td>매수</td><td>89</td><td>75,800</td><td><span class="badge b-tr">체결</span></td></tr>
+              <tr><td>09:00:12</td><td>005930 삼성전자</td><td>피라미딩</td><td>18</td><td>76,100</td><td><span class="badge b-tr">체결</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- SETTINGS -->
+    <div id="sc-settings" class="sc sc-hist">
+      <div class="hist-inner">
+        <div class="scards">
+          <div class="sc2"><div class="sc2-lbl">계좌 모드</div><div class="sc2-val" style="color:var(--br)">PAPER</div></div>
+          <div class="sc2"><div class="sc2-lbl">F1 갭 구간</div><div class="sc2-val">3~10%</div></div>
+          <div class="sc2"><div class="sc2-lbl">HIGH 조건</div><div class="sc2-val">20억</div></div>
+          <div class="sc2"><div class="sc2-lbl">자동매매</div><div class="sc2-val pup">ON</div></div>
+        </div>
+      </div>
+    </div>
+
     <div id="sc-history" class="sc sc-hist">
       <div class="hist-inner">
         <div class="scards">
@@ -344,8 +575,10 @@ tr:hover td{background:var(--s2);}
 function go(id, btn) {
   document.querySelectorAll('.sc').forEach(s => s.classList.remove('on'));
   document.querySelectorAll('.ttab').forEach(b => b.classList.remove('on'));
-  document.getElementById('sc-' + id).classList.add('on');
-  btn.classList.add('on');
+  document.querySelectorAll('.menu-item').forEach(b => b.classList.remove('on'));
+  const screen = document.getElementById('sc-' + id) || document.getElementById('sc-today');
+  screen.classList.add('on');
+  if (btn) btn.classList.add('on');
   if (id === 'stats') { drawDonut(); drawBar(); }
 }
 

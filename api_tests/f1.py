@@ -1,10 +1,12 @@
-"""F1 장전 필터 테스트 — KIS 등락률 순위 API (FHPST01710000).
+"""F1 premarket filter smoke test.
 
-장전 08:30~09:00 이외 시간에도 실행 가능 (시가 기준 등락률로 조회됨).
-갭 필터(3~7%)는 API 파라미터로 서버측에서 선적용.
+Runs the same candidate flow as the production F1 module, but without touching
+DB/state: ranking API -> expected execution enrichment -> gap filter ->
+liquidity top 10%.
 
   python api_tests/f1.py
 """
+
 import asyncio
 import sys
 from pathlib import Path
@@ -14,8 +16,8 @@ import api_tests._helper as h
 
 
 async def run() -> tuple[bool, list[dict]]:
-    """(성공여부, 유동성 필터 통과 candidates) 반환."""
-    h.header("F1. 장전 필터  API=FHPST01710000  KOSPI+KOSDAQ")
+    """Return (ok, liquidity-filtered candidates)."""
+    h.header("F1. premarket filter  ranking + expected execution")
 
     from src.api import auth
     import src.modules.f1_filter as mod
@@ -24,36 +26,54 @@ async def run() -> tuple[bool, list[dict]]:
         h.fail("token")
         return False, []
 
-    # 원시 API 호출 (갭 필터는 API 서버측 적용)
     try:
         raw = await mod._fetch_all_premarket()
     except Exception as e:
         h.fail("_fetch_all_premarket", repr(e))
         return False, []
 
-    print(f"  등락률 API 응답: {len(raw)}종목"
-          f"  (갭 {mod.GAP_MIN*100:.0f}%~{mod.GAP_MAX*100:.0f}% 적용)")
-    for c in raw[:5]:
-        print(f"    {c['ticker']}  gap={c['gap_pct']*100:+.2f}%"
-              f"  expected={c['expected_price']:>8,.0f}원"
-              f"  avg5d={c['avg_amount_5d']/1e8:.1f}억")
-    if len(raw) > 5:
-        print(f"    ... 외 {len(raw)-5}종목")
+    gap_filtered = mod._filter_by_gap(raw)
+    gap_filtered.sort(key=lambda c: c.get("avg_amount_5d", 0.0), reverse=True)
+    threshold = max(1, int(len(gap_filtered) * mod.LIQUIDITY_TOP_PCT)) if gap_filtered else 0
+    candidates = gap_filtered[:threshold]
 
-    # 유동성 필터 (run() 내부 로직 재현 — DB/state 없이)
-    raw.sort(key=lambda c: c.get("avg_amount_5d", 0.0), reverse=True)
-    threshold = max(1, int(len(raw) * mod.LIQUIDITY_TOP_PCT)) if raw else 0
-    candidates = raw[:threshold]
+    print(
+        f"  raw candidates: {len(raw)}"
+        f"  gap pass({mod.GAP_MIN*100:.0f}~{mod.GAP_MAX*100:.0f}%): {len(gap_filtered)}"
+        f"  liquidity pass: {len(candidates)}"
+    )
+    print()
+    print("  ticker  gap(final) band          reason             rank_gap  exp_gap   price      qty      amount")
+    print("  " + "-" * 112)
+    for c in raw[:20]:
+        exp_gap = c.get("expected_api_gap_pct")
+        print(
+            f"  {c['ticker']:<6}"
+            f"  {c['gap_pct']*100:>+8.2f}%"
+            f"  {c.get('gap_band',''):<12}"
+            f"  {c.get('gap_reason',''):<18}"
+            f"  {c.get('ranking_gap_pct',0)*100:>+8.2f}%"
+            f"  {(exp_gap * 100) if exp_gap is not None else 0:>+7.2f}%"
+            f"  {c['expected_price']:>8,.0f}"
+            f"  {c.get('expected_qty',0):>7,d}"
+            f"  {c.get('expected_amount',0)/1e8:>8.1f}억"
+        )
+    if len(raw) > 20:
+        print(f"  ... plus {len(raw)-20} rows")
 
-    print(f"\n  유동성 상위 {mod.LIQUIDITY_TOP_PCT*100:.0f}% 통과: {len(candidates)}종목")
+    print(f"\n  liquidity top {mod.LIQUIDITY_TOP_PCT*100:.0f}% after gap filter")
+    if not candidates:
+        print("    (none)")
     for c in candidates:
-        print(f"    {c['ticker']}  gap={c['gap_pct']*100:+.2f}%"
-              f"  expected={c['expected_price']:>8,.0f}원")
+        print(
+            f"    {c['ticker']} gap={c['gap_pct']*100:+.2f}%"
+            f" band={c.get('gap_band')}"
+            f" price={c['expected_price']:,.0f}"
+            f" qty={c.get('expected_qty',0):,}"
+            f" amount={c.get('expected_amount',0)/1e8:.1f}억"
+        )
 
-    if not raw:
-        print("  (결과 없음 — 장전 시간 이외 또는 해당 갭 범위 종목 없음)")
-
-    h.ok("f1_filter", f"raw={len(raw)}, 통과={len(candidates)}")
+    h.ok("f1_filter", f"raw={len(raw)}, gap={len(gap_filtered)}, pass={len(candidates)}")
     return True, candidates
 
 
