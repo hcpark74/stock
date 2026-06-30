@@ -10,6 +10,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+if os.getenv("DRY_RUN", "0") == "1":
+    os.environ["LOG_DIR"] = os.getenv("DRY_RUN_LOG_DIR", "data/dry_run/logs")
+    os.environ["STATE_DIR"] = os.getenv("DRY_RUN_STATE_DIR", "data/dry_run/state")
+    os.environ["DB_DIR"] = os.getenv("DRY_RUN_DB_DIR", "data/dry_run/db")
+
 import uvicorn  # noqa: E402
 
 from src import db, notifier, state  # noqa: E402
@@ -88,7 +93,8 @@ async def _run_catchup() -> None:
     09:00 이후엔 F3 진입 마감이 지났으므로 catchup 불가.
     """
     await _ensure_trading_day()
-    force = os.getenv("FORCE_CATCHUP", "0") == "1"
+    dry_run = os.getenv("DRY_RUN", "0") == "1"
+    force = dry_run or os.getenv("FORCE_CATCHUP", "0") == "1"
 
     now = datetime.now(KST)
     f1_sched         = now.replace(hour=F1_H,                minute=F1_M,               second=0,    microsecond=0)
@@ -168,14 +174,19 @@ def _clear_pid() -> None:
 # ── 메인 ─────────────────────────────────────────────────────────────
 
 async def main() -> None:
+    dry_run = os.getenv("DRY_RUN", "0") == "1"
     logger.setup(LOG_DIR)
     _write_pid()
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     await db.init(DB_PATH)
     await _ensure_trading_day()
 
-    await auth.load_or_refresh()
-    time_sync.check_ntp(NTP_SERVERS)
+    if dry_run:
+        logger.log("DRY_RUN_START", level="WARN",
+                   message="DRY_RUN=1: external auth, NTP, orders, and WebSocket are simulated")
+    else:
+        await auth.load_or_refresh()
+        time_sync.check_ntp(NTP_SERVERS)
     await _recover_state()
     await _run_catchup()
 
@@ -183,7 +194,9 @@ async def main() -> None:
     f4_task = asyncio.create_task(f4_tracking.run(), name="f4_tracking")
 
     # Telegram 알림 워커
-    notifier_task = asyncio.create_task(notifier.worker(), name="notifier")
+    notifier_task = None
+    if not dry_run:
+        notifier_task = asyncio.create_task(notifier.worker(), name="notifier")
 
     # Web UI 서버 (포트 8080)
     ui_port = int(os.getenv("UI_PORT", "8080"))
@@ -193,28 +206,33 @@ async def main() -> None:
     uvi.install_signal_handlers = lambda: None  # uvicorn의 시그널 핸들러 비활성화
     ui_task = asyncio.create_task(uvi.serve(), name="ui_server")
 
-    scheduler = build(
-        token_refresh=job_token_refresh,
-        ntp_check=job_ntp_check,
-        f1=job_f1,
-        f2=job_f2,
-        f3=job_f3,
-        f5_precheck=job_f5_precheck,
-        f5_exec=job_f5_exec,
-    )
-    scheduler.start()
+    scheduler = None
+    if not dry_run:
+        scheduler = build(
+            token_refresh=job_token_refresh,
+            ntp_check=job_ntp_check,
+            f1=job_f1,
+            f2=job_f2,
+            f3=job_f3,
+            f5_precheck=job_f5_precheck,
+            f5_exec=job_f5_exec,
+        )
+        scheduler.start()
 
     try:
         await asyncio.Event().wait()
     finally:
-        scheduler.shutdown(wait=False)
+        if scheduler is not None:
+            scheduler.shutdown(wait=False)
         uvi.should_exit = True          # uvicorn graceful 종료 신호
         with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
             await asyncio.wait_for(ui_task, timeout=2.0)
-        for task in (f4_task, notifier_task):
+        tasks = [task for task in (f4_task, notifier_task) if task is not None]
+        for task in tasks:
             task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.gather(f4_task, notifier_task)
+        if tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.gather(*tasks)
         await db.close()
         _clear_pid()
 

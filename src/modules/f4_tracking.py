@@ -38,6 +38,10 @@ async def run() -> None:
     ticker = s.target_ticker
     spike_filter = SpikeFilter()
 
+    if os.getenv("DRY_RUN", "0") == "1":
+        await _run_dry_ticks(ticker, spike_filter)
+        return
+
     live.ws_connected = False
 
     async def on_tick(tick: dict) -> None:
@@ -101,14 +105,17 @@ async def _execute_close(price: float, reason: str) -> None:
 
     sell_id = ""
     exit_price = price
-    try:
-        sell_resp = await _send_sell(s.target_ticker, qty, mode)
-        sell_id = sell_resp.get("output", {}).get("ODNO", "")
-        fill = await _poll_fill(sell_id, timeout_sec=30)
-        if fill:
-            exit_price = fill["fill_price"]
-    except Exception as e:
-        log("F4_SELL_ERROR", level="CRIT", ticker=s.target_ticker, error=repr(e))
+    if os.getenv("DRY_RUN", "0") == "1":
+        sell_id = f"DRY-SELL-{datetime.now(KST).strftime('%H%M%S')}"
+    else:
+        try:
+            sell_resp = await _send_sell(s.target_ticker, qty, mode)
+            sell_id = sell_resp.get("output", {}).get("ODNO", "")
+            fill = await _poll_fill(sell_id, timeout_sec=30)
+            if fill:
+                exit_price = fill["fill_price"]
+        except Exception as e:
+            log("F4_SELL_ERROR", level="CRIT", ticker=s.target_ticker, error=repr(e))
 
     pnl_pct = round((exit_price / entry - 1) * 100, 2) if entry else 0.0
 
@@ -136,6 +143,36 @@ async def _execute_close(price: float, reason: str) -> None:
     )
     await state.persist(os.getenv("STATE_DIR", "data/state"),
                         datetime.now(KST).strftime("%Y%m%d"))
+
+
+async def _run_dry_ticks(ticker: str, spike_filter: SpikeFilter) -> None:
+    s = state.get()
+    entry = float(s.entry_price or os.getenv("DRY_RUN_ENTRY_PRICE", "10300"))
+    delay = float(os.getenv("DRY_RUN_STEP_DELAY", "0.2"))
+    prices = [
+        entry,
+        round(entry * 1.026),
+        round(entry * 1.032),
+        round(entry * 1.010),
+    ]
+
+    live.ws_connected = True
+    log("DRY_RUN_F4_START", level="WARN", ticker=ticker, entry_price=entry, prices=prices)
+    for price in prices:
+        if state.get().position_status != "HOLDING":
+            break
+        live.push_tick(price)
+        log("DRY_RUN_TICK", level="INFO", ticker=ticker, price=price)
+        await _process_tick(price, spike_filter)
+        await asyncio.sleep(delay)
+    live.ws_connected = False
+    log(
+        "DRY_RUN_F4_DONE",
+        level="WARN",
+        ticker=ticker,
+        position_status=state.get().position_status,
+        close_reason=state.get().close_reason,
+    )
 
 
 async def _send_sell(ticker: str, qty: int, mode: str) -> dict:
@@ -189,5 +226,4 @@ async def _poll_fill(order_id: str, timeout_sec: int = 30) -> dict | None:
             pass
         await asyncio.sleep(1)
     return None
-
 

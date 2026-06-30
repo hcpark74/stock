@@ -14,12 +14,12 @@ from starlette.responses import StreamingResponse
 
 from src import db, live, state
 from src.modules.f4_tracking import HARD_STOP_RATIO, STEP_TRAIL
-from src.modules.f1_filter import GAP_MAX, GAP_MIN, LIQUIDITY_TOP_PCT
+from src.modules.f1_filter import F1_SNAPSHOT_DIR, GAP_MAX, GAP_MIN, select_liquidity_candidates
 
 KST = ZoneInfo("Asia/Seoul")
 _MODE = os.getenv("KIS_MODE", "PAPER")
 _LOG_DIR = Path(os.getenv("LOG_DIR", "data/logs"))
-_F1_SNAPSHOT_DIR = Path(os.getenv("F1_SNAPSHOT_DIR", "data/f1_snapshots"))
+_F1_SNAPSHOT_DIR = Path(F1_SNAPSHOT_DIR)
 _HTML_DIR = Path(__file__).parent.parent.parent / "docs" / "html"
 
 app = FastAPI(title="Daily1 Trading UI", docs_url=None, redoc_url=None)
@@ -100,6 +100,8 @@ def _f1_status_from_logs(logs: list[dict]) -> tuple[str, dict | None]:
             status = "DONE"
         elif event == "NO_TARGET":
             status = "NO_TARGET"
+        # F1_SNAPSHOT_SAVED is a weak completion signal. It should only mark
+        # DONE when no fetch/filter/done/no-target event has been seen yet.
         elif event == "F1_SNAPSHOT_SAVED" and status == "IDLE":
             status = "DONE"
     return status, last_event
@@ -113,9 +115,11 @@ def _f1_verdict(candidate: dict) -> str:
         "GAP_BELOW_2": "갭미달",
         "GAP_BELOW_CORE": "약한갭",
         "HIGH_GAP_AMOUNT_LOW": "대금부족",
+        "HIGH_GAP_VI_UNKNOWN": "VI미확인",
         "HIGH_GAP_VI_NEAR": "VI근접",
         "EXTREME_GAP_RISK": "초고갭",
         "GAP_TOO_HIGH": "갭과열",
+        "NEGATIVE_GAP": "음수갭",
     }
     return labels.get(str(reason), "통과" if candidate.get("gap_allowed") else "제외")
 
@@ -129,9 +133,7 @@ def _f1_allowed(candidate: dict) -> bool:
 
 def _f1_summary_from_rows(rows: list[dict]) -> dict:
     gap_pass = [c for c in rows if _f1_allowed(c)]
-    gap_pass.sort(key=lambda c: float(c.get("avg_amount_5d") or 0), reverse=True)
-    threshold = max(1, int(len(gap_pass) * LIQUIDITY_TOP_PCT)) if gap_pass else 0
-    selected = gap_pass[:threshold]
+    selected = select_liquidity_candidates(gap_pass)
 
     expected_valid = [
         c for c in rows

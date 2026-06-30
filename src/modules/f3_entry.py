@@ -44,6 +44,10 @@ async def run(force: bool = False) -> None:
     ticker = s.target_ticker
     mode = os.getenv("KIS_MODE", "PAPER")
 
+    if os.getenv("DRY_RUN", "0") == "1":
+        await _run_dry_entry(ticker)
+        return
+
     # ── [08:59:40] 갭 재검증 ─────────────────────────────────────────
     expected_price, prev_close = await _fetch_expected_price(ticker)
     if prev_close and expected_price:
@@ -187,6 +191,33 @@ async def _sleep_until(h: int, m: int, s: int) -> None:
     delta = (target - now).total_seconds()
     if delta > 0:
         await asyncio.sleep(delta)
+
+
+async def _run_dry_entry(ticker: str) -> None:
+    expected_price = float(os.getenv("DRY_RUN_EXPECTED_PRICE", "10300"))
+    fill_price = float(os.getenv("DRY_RUN_ENTRY_PRICE", str(expected_price)))
+    fill_qty = int(os.getenv("DRY_RUN_ENTRY_QTY", "10"))
+    order_id = f"DRY-{datetime.now(KST).strftime('%H%M%S')}"
+
+    if not await state.set_entering():
+        log("DRY_RUN_F3_SKIPPED", level="WARN", ticker=ticker, reason="STATE_NOT_IDLE")
+        return
+
+    await asyncio.sleep(float(os.getenv("DRY_RUN_STEP_DELAY", "0.2")))
+    await state.set_holding(fill_price, fill_qty, order_id)
+    await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
+
+    log(
+        "DRY_RUN_ENTRY_EXECUTED",
+        level="WARN",
+        ticker=ticker,
+        order_id=order_id,
+        order_price=expected_price,
+        order_qty=fill_qty,
+        fill_price=fill_price,
+        fill_qty=fill_qty,
+        fill_latency_ms=0,
+    )
 
 
 async def _fetch_expected_price(ticker: str) -> tuple[float, float]:

@@ -40,6 +40,7 @@ EVENT_LABELS = {
     "F1_EXPECTED_COMPARE": "F1 예상체결 비교(F1 Expected Compare)",
     "F1_SNAPSHOT_SAVED": "F1 후보 스냅샷 저장(F1 Snapshot Saved)",
     "F1_SNAPSHOT_SAVE_ERROR": "F1 후보 스냅샷 저장 오류(F1 Snapshot Save Error)",
+    "F1_SNAPSHOT_ROTATE_ERROR": "F1 후보 스냅샷 정리 오류(F1 Snapshot Rotate Error)",
     "NO_TARGET": "대상 종목 없음(No Target)",
     "F2_SKIPPED": "F2 종목 잠금 생략(F2 Skipped)",
     "VI_FILTER_ALL_EXCLUDED": "VI 필터 전부 제외(VI Filter All Excluded)",

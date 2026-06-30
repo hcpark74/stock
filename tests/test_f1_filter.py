@@ -1,6 +1,8 @@
 """F1 갭 필터 경계값 유닛 테스트."""
+import asyncio
 import json
 import os
+import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -74,6 +76,14 @@ async def test_gap_2_9_pct_excluded():
     assert _state_mod.get().day_skip is True
 
 
+async def test_negative_gap_is_classified_explicitly():
+    """Negative gaps should not be mixed into LOW_GAP/GAP_BELOW_2."""
+    candidate = _classified_candidate(-0.05)
+    assert candidate["gap_band"] == "NEGATIVE_GAP"
+    assert candidate["gap_reason"] == "NEGATIVE_GAP"
+    assert candidate["gap_allowed"] is False
+
+
 async def test_gap_7_0_pct_allowed_when_high_gap_conditions_pass():
     """정확히 7.0%(GAP_MAX) → HIGH_GAP 조건 충족 시 통과."""
     result = await _run([_classified_candidate(GAP_MAX, amount=3e9, vi_gap=0.02)])
@@ -103,6 +113,7 @@ async def test_high_gap_excluded_when_vi_unknown():
     """7~10% high gap is excluded when VI proximity cannot be calculated."""
     result = await _run([_classified_candidate(0.08, amount=3e9, vi_gap=None)])
     assert result == []
+    assert _classified_candidate(0.08, amount=3e9, vi_gap=None)["gap_reason"] == "HIGH_GAP_VI_UNKNOWN"
 
 
 async def test_extreme_gap_excluded():
@@ -198,6 +209,25 @@ async def test_parse_candidate_passes_market_to_expected_quote():
     assert result["market"] == "Q"
 
 
+async def test_parse_candidate_preserves_unrounded_prev_close_for_replay():
+    """Snapshot rows should preserve the exact prev_close used to calculate vi_gap."""
+    item = {
+        "mksc_shrn_iscd": "005930",
+        "hts_kor_isnm": "삼성전자",
+        "prdy_ctrt": "3.70",
+        "stck_prpr": "12345",
+        "avrg_vol": "1000",
+        "acml_tr_pbmn": "10000000",
+        "acml_vol": "1000",
+    }
+
+    with patch("src.modules.f1_filter._fetch_expected_quote", new_callable=AsyncMock, return_value=None):
+        result = await f1_mod._parse_candidate(item)
+
+    assert result["prev_close"] == pytest.approx(12345 / 1.037)
+    assert result["prev_close"] != round(result["prev_close"])
+
+
 async def test_fetch_expected_quote_uses_given_market_code():
     """Expected quote API should not hardcode KOSPI for KOSDAQ tickers."""
     async def fake_get(*args, **kwargs):
@@ -234,6 +264,50 @@ async def test_fetch_all_premarket_requests_high_gap_band_from_api():
     assert seen_rates == ["10.0", "10.0"]
 
 
+async def test_fetch_all_premarket_enriches_expected_quotes_with_limited_concurrency(monkeypatch):
+    """Expected quote enrichment should be concurrent without exceeding the configured slot count."""
+    monkeypatch.setattr(f1_mod, "F1_EXPECTED_QUOTE_CONCURRENCY", 3)
+    active = 0
+    max_active = 0
+
+    async def fake_get(*args, **kwargs):
+        market = kwargs["params"]["fid_cond_mrkt_div_code"]
+        if market == "Q":
+            return {"rt_cd": "0", "output": []}
+        return {
+            "rt_cd": "0",
+            "output": [
+                {
+                    "mksc_shrn_iscd": f"{i:06d}",
+                    "hts_kor_isnm": f"TEST{i}",
+                    "prdy_ctrt": "4.00",
+                    "stck_prpr": "10000",
+                    "avrg_vol": "1000",
+                    "acml_tr_pbmn": "10000000",
+                    "acml_vol": "1000",
+                }
+                for i in range(1, 10)
+            ],
+        }
+
+    async def fake_quote(ticker, market):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return None
+
+    with (
+        patch("src.api.kis_rest.get", new=fake_get),
+        patch("src.modules.f1_filter._fetch_expected_quote", new=fake_quote),
+    ):
+        result = await _fetch_all_premarket()
+
+    assert len(result) == 9
+    assert 1 < max_active <= 3
+
+
 def test_save_candidate_snapshot_rotates_old_files(tmp_path, monkeypatch):
     """F1 snapshots keep only the newest configured files."""
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
@@ -244,7 +318,7 @@ def test_save_candidate_snapshot_rotates_old_files(tmp_path, monkeypatch):
     for i in range(3):
         old = tmp_path / f"20260101_00000{i}.jsonl"
         old.write_text(json.dumps({"ticker": f"OLD{i}"}) + "\n", encoding="utf-8")
-        old_mtime = 1000 + i
+        old_mtime = time.time() - (10 - i)
         old.touch()
         os.utime(old, (old_mtime, old_mtime))
 

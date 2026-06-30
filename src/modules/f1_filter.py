@@ -26,6 +26,7 @@ F1_DEADLINE_M = 58
 F1_RETRY_INTERVAL_SEC = int(os.getenv("F1_RETRY_INTERVAL_SEC", "30"))
 F1_SNAPSHOT_DIR = os.getenv("F1_SNAPSHOT_DIR", "data/f1_snapshots")
 F1_SNAPSHOT_KEEP = int(os.getenv("F1_SNAPSHOT_KEEP", "20"))
+F1_EXPECTED_QUOTE_CONCURRENCY = int(os.getenv("F1_EXPECTED_QUOTE_CONCURRENCY", "8"))
 
 _EXCLUDED_PRODUCT_KEYWORDS = (
     "ETF",
@@ -51,6 +52,11 @@ async def run() -> list[dict]:
     Fetch premarket candidates, apply the gap/liquidity filters, and retry until
     the F2 deadline if the KIS premarket fields are not ready yet.
     """
+    if os.getenv("DRY_RUN", "0") == "1":
+        result = [_dry_run_candidate()]
+        log("DRY_RUN_F1_DONE", level="WARN", total_candidates=len(result), passed=len(result))
+        return result
+
     s = state.get()
     if s.day_skip:
         return []
@@ -107,9 +113,7 @@ async def run() -> list[dict]:
         await asyncio.sleep(sleep_sec)
 
     total = len(gap_filtered)
-    gap_filtered.sort(key=lambda c: c.get("avg_amount_5d", 0.0), reverse=True)
-    threshold = max(1, int(total * LIQUIDITY_TOP_PCT))
-    result = gap_filtered[:threshold]
+    result = select_liquidity_candidates(gap_filtered)
 
     log("F1_DONE", level="INFO", total_candidates=total, passed=len(result))
     return result
@@ -123,11 +127,25 @@ def _is_gap_candidate(candidate: dict) -> bool:
     return candidate.get("gap_allowed") is True
 
 
+def select_liquidity_candidates(candidates: list[dict]) -> list[dict]:
+    if not candidates:
+        return []
+    sorted_candidates = sorted(
+        candidates,
+        key=lambda c: c.get("avg_amount_5d", 0.0),
+        reverse=True,
+    )
+    threshold = max(1, int(len(sorted_candidates) * LIQUIDITY_TOP_PCT))
+    return sorted_candidates[:threshold]
+
+
 def _classify_gap_candidate(candidate: dict) -> dict:
     gap = candidate.get("gap_pct", 0.0)
     amount = candidate.get("expected_amount", 0.0)
     vi_gap = candidate.get("vi_gap")
 
+    if gap < 0:
+        return {"gap_band": "NEGATIVE_GAP", "gap_allowed": False, "gap_reason": "NEGATIVE_GAP"}
     if gap < 0.020:
         return {"gap_band": "LOW_GAP", "gap_allowed": False, "gap_reason": "GAP_BELOW_2"}
     if gap < GAP_MIN:
@@ -214,21 +232,10 @@ async def _fetch_all_premarket() -> list[dict]:
             continue
 
         output = resp.get("output", [])
-        parsed_count = 0
-        zero_gap_count = 0
-
-        for item in output:
-            try:
-                candidate = await _parse_candidate(item, market)
-            except (KeyError, ValueError, ZeroDivisionError):
-                continue
-
-            if candidate is None:
-                continue
-            parsed_count += 1
-            if abs(candidate.get("gap_pct", 0.0)) < 0.000001:
-                zero_gap_count += 1
-            results.append(candidate)
+        candidates = await _parse_candidates_concurrently(output, market)
+        parsed_count = len(candidates)
+        zero_gap_count = sum(1 for c in candidates if abs(c.get("gap_pct", 0.0)) < 0.000001)
+        results.extend(candidates)
 
         log(
             "F1_FETCH_DONE",
@@ -245,6 +252,21 @@ async def _fetch_all_premarket() -> list[dict]:
     _log_expected_comparison(results)
     _save_candidate_snapshot(results)
     return results
+
+
+async def _parse_candidates_concurrently(items: list[dict], market: str) -> list[dict]:
+    concurrency = max(1, F1_EXPECTED_QUOTE_CONCURRENCY)
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def parse_one(item: dict) -> dict | None:
+        async with semaphore:
+            try:
+                return await _parse_candidate(item, market)
+            except (KeyError, ValueError, ZeroDivisionError):
+                return None
+
+    parsed = await asyncio.gather(*(parse_one(item) for item in items))
+    return [candidate for candidate in parsed if candidate is not None]
 
 
 async def _parse_candidate(item: dict, market: str = "J") -> dict | None:
@@ -284,7 +306,7 @@ async def _parse_candidate(item: dict, market: str = "J") -> dict | None:
         "name": name,
         "market": market,
         "expected_price": expected_price,
-        "prev_close": round(prev_close),
+        "prev_close": prev_close,
         "gap_pct": final_gap_pct / 100,
         "gap_source": gap_source,
         "avg_amount_5d": avrg_vol * ranking_price,
@@ -420,6 +442,8 @@ def _to_int(value: object) -> int:
 def _calc_vi_gap(expected_price: float, prev_close: float) -> float | None:
     if expected_price <= 0 or prev_close <= 0:
         return None
+    # Assumes the standard +/-10% static VI band. Some KOSDAQ names can use
+    # +/-15%; model that explicitly before using this helper for those cases.
     static_vi_upper = prev_close * 1.10
     return (static_vi_upper - expected_price) / expected_price
 
@@ -431,3 +455,34 @@ def _is_common_stock_candidate(ticker: str | None, name: str = "") -> bool:
 
     upper_name = name.upper()
     return not any(keyword in upper_name for keyword in _EXCLUDED_PRODUCT_KEYWORDS)
+
+
+def _dry_run_candidate() -> dict:
+    prev_close = float(os.getenv("DRY_RUN_PREV_CLOSE", "10000"))
+    expected_price = float(os.getenv("DRY_RUN_EXPECTED_PRICE", "10300"))
+    expected_qty = int(os.getenv("DRY_RUN_EXPECTED_QTY", "500000"))
+    gap_pct = (expected_price / prev_close) - 1
+    candidate = {
+        "ticker": os.getenv("DRY_RUN_TICKER", "005930"),
+        "name": "DRY RUN",
+        "market": "J",
+        "expected_price": expected_price,
+        "prev_close": prev_close,
+        "gap_pct": gap_pct,
+        "gap_source": "dry_run",
+        "avg_amount_5d": expected_price * expected_qty,
+        "expected_amount": expected_price * expected_qty,
+        "expected_qty": expected_qty,
+        "ranking_gap_pct": gap_pct,
+        "ranking_price": expected_price,
+        "ranking_qty": expected_qty,
+        "ranking_amount": expected_price * expected_qty,
+        "expected_api_gap_pct": gap_pct,
+        "expected_api_price": expected_price,
+        "expected_api_qty": expected_qty,
+        "expected_api_amount": expected_price * expected_qty,
+        "vi_gap": ((prev_close * 1.10) - expected_price) / expected_price,
+        "buy_sell_ratio": 2.0,
+    }
+    candidate.update(_classify_gap_candidate(candidate))
+    return candidate
