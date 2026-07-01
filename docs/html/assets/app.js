@@ -31,7 +31,10 @@ function go(id, btn) {
     if(menu) menu.classList.add('on');
   }
   if (id==='selection') loadF1();
-  if (id==='assets') renderAssets(_lastStatus);
+  if (id==='assets') {
+    renderAssets(_lastStatus);
+    loadAssets(false);
+  }
   if (id==='history') loadHistory();
   if (id==='stats')   loadStats();
 }
@@ -116,8 +119,11 @@ function drawArc(prog) {
 
 // ── Status 업데이트 ───────────────────────────────────────────────────────
 let _lastStatus = null;
+let _lastAssets = null;
 
 function applyStatus(d) {
+  if(d.assets) _lastAssets = d.assets;
+  if(_lastAssets && !d.assets) d.assets = _lastAssets;
   _lastStatus = d;
 
   // 탑바 심볼
@@ -315,16 +321,33 @@ function renderSelection(d) {
   $('sel-selected').textContent = d?.selected?.ticker || '—';
 
   const rows = d?.candidates || [];
+  const processRows = d?.selection_process || [];
   if(!rows.length) {
-    $('sel-tbody').innerHTML = '<tr><td colspan="8" class="empty">F1 후보 스냅샷 없음</td></tr>';
+    $('sel-tbody').innerHTML = '<tr><td colspan="10" class="empty">F1 후보 스냅샷 없음</td></tr>';
     return;
   }
-  $('sel-tbody').innerHTML = rows.map(c=>{
+  const stepByKey = Object.fromEntries(processRows.map(step => [step.key, step]));
+  const picked = key => new Set((stepByKey[key]?.tickers || []).map(String));
+  const selectedTickers = picked('f1');
+  const lockedTickers = picked('f2');
+  const finalTickers = picked('f3');
+  const badgeHtml = ticker => {
+    const key = String(ticker || '');
+    const badges = [];
+    if(selectedTickers.has(key)) badges.push('<span class="badge b-op">선정</span>');
+    if(lockedTickers.has(key)) badges.push('<span class="badge b-tr">잠금</span>');
+    if(finalTickers.has(key)) badges.push('<span class="badge b-hs">최종</span>');
+    return badges.length ? `<div class="sel-badges">${badges.join('')}</div>` : '—';
+  };
+  const candidateHtml = rows.map(c=>{
+    const isFinal = finalTickers.has(String(c.ticker || ''));
     const verdict = c.verdict || '';
     const pass = c.gap_allowed === true || verdict === '통과' || verdict === '고갭통과';
     const band = c.gap_band || ((c.gap_source || '').startsWith('expected') ? '예상체결' : '등락률');
     const amount = c.expected_amount || c.avg_amount_5d || null;
-    return `<tr>
+    const avgAmount = c.avg_amount_5d || null;
+    return `<tr class="${isFinal ? 'sel-final-row' : ''}">
+      <td class="sel-state-cell">${badgeHtml(c.ticker)}</td>
       <td>${esc(c.ticker)}</td>
       <td>${esc(c.name || TICKER_NAMES[c.ticker] || '')}</td>
       <td class="${pass?'pup':''}">${fmtPct(pctFromRatio(c.gap_pct))}</td>
@@ -332,52 +355,60 @@ function renderSelection(d) {
       <td>${fmtPct(pctFromRatio(c.ranking_gap_pct))}</td>
       <td>${c.expected_api_gap_pct==null ? '—' : fmtPct(pctFromRatio(c.expected_api_gap_pct))}</td>
       <td>${amount ? (Number(amount)/1e8).toFixed(1)+'억' : '—'}</td>
+      <td>${avgAmount ? (Number(avgAmount)/1e8).toFixed(1)+'억' : '—'}</td>
       <td><span class="badge ${pass?'b-tr':'b-to'}">${esc(verdict || (pass?'통과':'제외'))}</span></td>
     </tr>`;
   }).join('');
+  $('sel-tbody').innerHTML = candidateHtml;
 }
 
 function positionAssetValues(d) {
-  if(!d) return {stockValue:null, pnlAmount:null, total:null, holdings:0};
+  if(!d) return {stockValue:null, pnlAmount:null, total:null, cash:null, buyable:null, holdings:0};
+  const assets = d.assets || _lastAssets || {};
   const qty = Number(d.remaining_qty || 0);
   const cur = Number(d.current_price || 0);
   const entry = Number(d.entry_price || 0);
-  const stockValue = qty > 0 && cur > 0 ? qty * cur : null;
-  const pnlAmount = qty > 0 && cur > 0 && entry > 0 ? (cur - entry) * qty : null;
+  const stockValue = assets.stock_value != null ? Number(assets.stock_value) : (qty > 0 && cur > 0 ? qty * cur : null);
+  const pnlAmount = assets.pnl_amount != null ? Number(assets.pnl_amount) : (qty > 0 && cur > 0 && entry > 0 ? (cur - entry) * qty : null);
   return {
     stockValue,
     pnlAmount,
-    total: stockValue,
-    holdings: qty > 0 && d.ticker ? 1 : 0,
+    total: assets.total_asset != null ? Number(assets.total_asset) : stockValue,
+    cash: assets.cash != null ? Number(assets.cash) : null,
+    buyable: assets.buyable_cash != null ? Number(assets.buyable_cash) : null,
+    holdings: assets.holdings_count != null ? Number(assets.holdings_count) : (qty > 0 && d.ticker ? 1 : 0),
   };
 }
 
 function renderAssetSummary(d) {
   const v = positionAssetValues(d);
   $('as-total').innerHTML = v.total == null ? '—' : fmtWon(v.total);
-  $('as-cash').textContent = '연동대기';
+  $('as-cash').innerHTML = v.cash == null ? '—' : fmtWon(v.cash);
   $('as-holdings').textContent = `${v.holdings}종목`;
   const pnl = $('as-pnl');
   pnl.innerHTML = v.pnlAmount == null ? '—' : fmtWon(v.pnlAmount);
   pnl.className = 'asset-v ' + (v.pnlAmount == null ? '' : v.pnlAmount >= 0 ? 'up' : 'dn');
-  $('as-buyable').textContent = '연동대기';
-  $('order-buyable').textContent = '연동대기';
+  $('as-buyable').innerHTML = v.buyable == null ? '—' : fmtWon(v.buyable);
+  $('order-buyable').textContent = v.buyable == null ? '—' : fmtM(v.buyable);
 }
 
 function renderAssets(d) {
   if(!$('asset-tbody')) return;
   const v = positionAssetValues(d);
   $('asset-total').textContent = v.total == null ? '—' : fmt(v.total);
-  $('asset-cash').textContent = '연동대기';
+  $('asset-cash').textContent = v.cash == null ? '—' : fmt(v.cash);
   $('asset-stock').textContent = v.stockValue == null ? '—' : fmtM(v.stockValue);
   $('asset-pnl').textContent = v.pnlAmount == null ? '—' : fmt(v.pnlAmount);
   $('asset-pnl').className = 'sc2-val ' + (v.pnlAmount == null ? '' : v.pnlAmount >= 0 ? 'pup' : 'pdn');
 
   const rows = [];
-  rows.push(`<tr><td>예수금</td><td>연동대기</td><td>—</td><td><span class="badge b-to">API 대기</span></td></tr>`);
+  rows.push(`<tr><td>예수금</td><td>${v.cash == null ? '—' : fmt(v.cash)}</td><td>—</td><td><span class="badge ${v.cash == null ? 'b-to' : 'b-op'}">${v.cash == null ? 'API 대기' : '연동'}</span></td></tr>`);
+  rows.push(`<tr><td>가용주문</td><td>${v.buyable == null ? '—' : fmt(v.buyable)}</td><td>—</td><td><span class="badge ${v.buyable == null ? 'b-to' : 'b-op'}">${v.buyable == null ? 'API 대기' : '주문가능'}</span></td></tr>`);
   if(v.holdings && d?.ticker) {
     rows.push(`<tr><td>${esc(d.ticker)} ${esc(TICKER_NAMES[d.ticker] || '')}</td><td>${fmt(v.stockValue)}</td><td>—</td><td><span class="badge b-tr">보유중</span></td></tr>`);
     rows.push(`<tr><td>평가손익</td><td class="${v.pnlAmount >= 0 ? 'pup' : 'pdn'}">${fmt(v.pnlAmount)}</td><td>${fmtPct(d.pnl_pct)}</td><td><span class="badge ${v.pnlAmount >= 0 ? 'b-tr' : 'b-hs'}">${v.pnlAmount >= 0 ? '수익' : '손실'}</span></td></tr>`);
+  } else if(v.holdings) {
+    rows.push(`<tr><td>보유종목</td><td>${fmt(v.holdings)}종목</td><td>—</td><td><span class="badge b-tr">보유중</span></td></tr>`);
   } else {
     rows.push('<tr><td>보유종목</td><td>0</td><td>0%</td><td><span class="badge b-to">대기중</span></td></tr>');
   }
@@ -611,6 +642,51 @@ async function loadStatus() {
     if(!r.ok) return;
     applyStatus(await r.json());
   } catch(e){}
+}
+
+async function loadAssets(refresh) {
+  const btn = $('asset-refresh');
+  const meta = $('asset-updated');
+  try {
+    if(refresh && btn) {
+      btn.disabled = true;
+      btn.textContent = '조회중';
+    }
+    let r = await fetch('/api/assets' + (refresh ? '?refresh=1' : ''));
+    let d = null;
+    let missingAssetApi = false;
+    if(r.status === 404) {
+      missingAssetApi = true;
+      r = await fetch('/api/status');
+      if(!r.ok) throw new Error('asset api missing');
+      d = await r.json();
+      if(meta) meta.textContent = '자산 API 미반영: 서버 재시작 필요';
+    } else {
+      if(!r.ok) throw new Error('asset api failed');
+      d = await r.json();
+    }
+    if(d.assets) {
+      _lastAssets = d.assets;
+      _lastStatus = _lastStatus || {};
+      _lastStatus.assets = d.assets;
+      renderAssetSummary(_lastStatus);
+      renderAssets(_lastStatus);
+      if(meta && !missingAssetApi) meta.textContent = '최근 조회 ' + new Date().toLocaleTimeString('ko-KR', {hour12:false});
+    } else if(meta) {
+      meta.textContent = refresh ? '자산 응답 없음' : '자산 조회 대기';
+    }
+  } catch(e) {
+    if(meta) meta.textContent = '자산 조회 실패';
+  } finally {
+    if(btn) {
+      btn.disabled = false;
+      btn.textContent = '↻ 새로고침';
+    }
+  }
+}
+
+function refreshAssets() {
+  loadAssets(true);
 }
 
 async function loadLogs() {

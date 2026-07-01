@@ -198,9 +198,10 @@ async def main() -> None:
     if not dry_run:
         notifier_task = asyncio.create_task(notifier.worker(), name="notifier")
 
-    # Web UI 서버 (포트 8080)
+    # Web UI exposes account assets; bind to localhost unless explicitly opened.
     ui_port = int(os.getenv("UI_PORT", "8080"))
-    config = uvicorn.Config(server.app, host="0.0.0.0", port=ui_port,
+    ui_host = os.getenv("UI_HOST", "127.0.0.1")
+    config = uvicorn.Config(server.app, host=ui_host, port=ui_port,
                             log_level="warning", loop="none")
     uvi = uvicorn.Server(config)
     uvi.install_signal_handlers = lambda: None  # uvicorn의 시그널 핸들러 비활성화

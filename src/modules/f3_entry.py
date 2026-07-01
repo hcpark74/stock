@@ -661,19 +661,7 @@ async def _fetch_available_cash() -> float:
     resp = await kis_rest.get(
         "/uapi/domestic-stock/v1/trading/inquire-balance",
         tr_id=_BAL_TR[mode],
-        params={
-            "CANO": os.getenv("KIS_ACCT_NO", ""),
-            "ACNT_PRDT_CD": os.getenv("KIS_ACCT_CD", "01"),
-            "AFHR_FLPR_YN": "N",
-            "OFL_YN": "",
-            "INQR_DVSN": "01",
-            "UNPR_DVSN": "01",
-            "FUND_STTL_ICLD_YN": "N",
-            "FNCG_AMT_AUTO_RDPT_YN": "N",
-            "PRCS_DVSN": "01",
-            "CTX_AREA_FK100": "",
-            "CTX_AREA_NK100": "",
-        },
+        params=kis_rest.balance_inquiry_params(),
     )
     summary = (resp.get("output2") or [{}])[0]
     return float(summary.get("dnca_tot_amt") or 0)

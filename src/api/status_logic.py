@@ -3,6 +3,73 @@
 from src.modules.f1_filter import GAP_MAX, GAP_MIN, select_liquidity_candidates
 
 
+def _required_balance_float(source: dict, field: str) -> float:
+    value = source.get(field)
+    if value is None or value == "":
+        raise RuntimeError(f"KIS balance response missing field {field}")
+    try:
+        return float(str(value).replace(",", ""))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"KIS balance response invalid field {field}={value!r}") from exc
+
+
+def parse_asset_snapshot_response(resp: dict) -> dict:
+    rt_cd = resp.get("rt_cd")
+    if rt_cd not in (None, "0", 0):
+        raise RuntimeError(
+            f"KIS balance error rt_cd={rt_cd} msg_cd={resp.get('msg_cd')} msg1={resp.get('msg1')}"
+        )
+
+    output2 = resp.get("output2")
+    if not isinstance(output2, list) or not output2:
+        raise RuntimeError("KIS balance response missing output2")
+    output1 = resp.get("output1") or []
+    if not isinstance(output1, list):
+        raise RuntimeError("KIS balance response output1 is not a list")
+    if any(not isinstance(item, dict) for item in output1):
+        raise RuntimeError("KIS balance response output1 item is not an object")
+
+    summary = output2[0]
+    if not isinstance(summary, dict):
+        raise RuntimeError("KIS balance response output2[0] is not an object")
+
+    holdings = [item for item in output1 if int(_required_balance_float(item, "hldg_qty")) > 0]
+    cash = _required_balance_float(summary, "dnca_tot_amt")
+    buyable = _required_balance_float(summary, "ord_psbl_cash")
+    stock_value = _required_balance_float(summary, "scts_evlu_amt")
+    total = _required_balance_float(summary, "tot_evlu_amt")
+    pnl = _required_balance_float(summary, "evlu_pfls_smtl_amt")
+    return {
+        "cash": cash,
+        "buyable_cash": buyable,
+        "stock_value": stock_value,
+        "total_asset": total,
+        "pnl_amount": pnl,
+        "holdings_count": len(holdings),
+        "source": "KIS",
+    }
+
+
+def f3_detail_from_event(event: dict | None) -> str:
+    if not event:
+        return "최종 1개 매수"
+    if event.get("event") == "F3_FINAL_PICK":
+        return f"{event.get('valid_count')} / {event.get('checked_count')} 재검증"
+
+    reason = event.get("reason")
+    labels = {
+        "BELOW_MIN": "갭 하한 미달",
+        "ABOVE_MAX": "갭 상한 초과",
+        "GAP_CHANGED": "진입 전 갭 변동",
+        "PRICE_UNAVAILABLE": "예상가 조회 실패",
+        "INSUFFICIENT_BALANCE": "주문가능금액 부족",
+        "QTY_ZERO": "주문 수량 0",
+        "NO_ENTRY_CANDIDATE": "진입 가능 후보 없음",
+        "STATE_NOT_IDLE": "진입 가능 상태 아님",
+    }
+    return labels.get(str(reason), str(reason) if reason else "최종 1개 매수")
+
+
 def pipeline_from_logs(logs: list[dict], position_status: str) -> dict:
     stage = 0
     failed = False
@@ -130,6 +197,7 @@ def f1_summary_from_rows(rows: list[dict]) -> dict:
         "extreme_gap": sum(1 for c in rows if c.get("gap_band") == "EXTREME_GAP"),
         "liquidity_pass": len(selected),
         "selected": selected[0] if selected else None,
+        "selected_tickers": [c.get("ticker") for c in selected if c.get("ticker")],
         "candidates": [
             {**c, "verdict": f1_verdict(c)}
             for c in display_rows[:50]

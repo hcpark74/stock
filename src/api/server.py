@@ -13,9 +13,12 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
 from src import db, live, state
+from src.api import kis_rest
 from src.api.status_logic import (
     f1_summary_from_rows as _f1_summary_from_rows,
     f1_verdict as _f1_verdict,
+    f3_detail_from_event as _f3_detail_from_event,
+    parse_asset_snapshot_response as _parse_asset_snapshot_response,
     pipeline_from_logs as _pipeline_from_logs,
     sort_f1_candidates_for_display as _sort_f1_candidates_for_display,
 )
@@ -28,6 +31,11 @@ _LOG_DIR = Path(os.getenv("LOG_DIR", "data/logs"))
 _F1_SNAPSHOT_DIR = Path(F1_SNAPSHOT_DIR)
 _HTML_DIR = Path(__file__).parent.parent.parent / "docs" / "html"
 _STATUS_LOG_LIMIT = 50
+_ASSET_CACHE_TTL_SEC = float(os.getenv("ASSET_CACHE_TTL_SEC", "60"))
+_ASSET_CACHE: dict | None = None
+_ASSET_CACHE_AT: float = 0.0
+_ASSET_CACHE_LOCK = asyncio.Lock()
+_BAL_TR = {"REAL": "TTTC8434R", "PAPER": "VTTC8434R"}
 
 app = FastAPI(title="Daily1 Trading UI", docs_url=None, redoc_url=None)
 
@@ -114,12 +122,109 @@ def _f1_status_from_logs(logs: list[dict]) -> tuple[str, dict | None]:
     return status, last_event
 
 
+def _selection_process_from_logs(summary: dict, logs: list[dict]) -> list[dict]:
+    selected = summary.get("selected") or {}
+    f1_ticker = selected.get("ticker")
+    f1_count = summary.get("liquidity_pass") or summary.get("gap_pass") or 0
+    candidate_tickers = {str(c.get("ticker")) for c in summary.get("candidates", []) if c.get("ticker")}
+    steps = [{
+        "key": "f1",
+        "phase": "F1 선정",
+        "tickers": summary.get("selected_tickers") or ([f1_ticker] if f1_ticker else []),
+        "ticker": f1_ticker,
+        "name": selected.get("name"),
+        "gap_pct": selected.get("gap_pct"),
+        "expected_amount": selected.get("expected_amount"),
+        "status": "완료" if f1_ticker else "대기",
+        "detail": f"{f1_count}개 후보",
+    }]
+
+    f2_event = next((e for e in reversed(logs) if e.get("event") == "TARGET_LOCKED"), None)
+    f2_tickers = []
+    if f2_event:
+        f2_tickers = list(f2_event.get("target_tickers") or [])
+        if not f2_tickers and f2_event.get("ticker"):
+            f2_tickers = [f2_event.get("ticker")]
+        if candidate_tickers and not (set(map(str, f2_tickers)) & candidate_tickers):
+            f2_event = None
+            f2_tickers = []
+    steps.append({
+        "key": "f2",
+        "phase": "F2 선정",
+        "tickers": f2_tickers,
+        "ticker": f2_event.get("ticker") if f2_event else None,
+        "gap_pct": (float(f2_event.get("gap_pct")) / 100) if f2_event and f2_event.get("gap_pct") is not None else None,
+        "expected_price": f2_event.get("expected_price") if f2_event else None,
+        "expected_amount": f2_event.get("expected_amount") if f2_event else None,
+        "status": "잠금" if f2_event else "대기",
+        "detail": ", ".join(str(t) for t in f2_tickers) if f2_tickers else "최대 3개 lock",
+    })
+
+    f3_events = {"F3_FINAL_PICK", "ENTRY_ORDER_SENT", "ENTRY_EXECUTED", "F3_ENTRY_BLOCKED", "F3_SKIPPED", "GAP_CHANGED"}
+    f3_event = next((e for e in reversed(logs) if e.get("event") in f3_events), None) if f2_event else None
+    f3_status = {
+        "F3_FINAL_PICK": "최종",
+        "ENTRY_ORDER_SENT": "주문전송",
+        "ENTRY_EXECUTED": "체결",
+        "F3_ENTRY_BLOCKED": "차단",
+        "F3_SKIPPED": "생략",
+        "GAP_CHANGED": "제외",
+    }.get(f3_event.get("event") if f3_event else None, "대기")
+    steps.append({
+        "key": "f3",
+        "phase": "F3 최종",
+        "tickers": [f3_event.get("ticker")] if f3_event and f3_event.get("ticker") else [],
+        "ticker": f3_event.get("ticker") if f3_event else None,
+        "expected_price": f3_event.get("expected_price") if f3_event else None,
+        "status": f3_status,
+        "detail": _f3_detail_from_event(f3_event),
+    })
+    return steps
+
+
+async def _fetch_asset_snapshot() -> dict:
+    mode = os.getenv("KIS_MODE", "PAPER")
+    resp = await kis_rest.get(
+        "/uapi/domestic-stock/v1/trading/inquire-balance",
+        tr_id=_BAL_TR[mode],
+        params=kis_rest.balance_inquiry_params(),
+    )
+    return _parse_asset_snapshot_response(resp)
+
+
+async def _asset_snapshot_safe() -> dict | None:
+    global _ASSET_CACHE, _ASSET_CACHE_AT
+    now = asyncio.get_running_loop().time()
+    if _ASSET_CACHE is not None and now - _ASSET_CACHE_AT < _ASSET_CACHE_TTL_SEC:
+        return _ASSET_CACHE
+    # With a stale cache, concurrent refreshes return the stale value immediately.
+    # On first load there is no safe value to show, so concurrent callers wait for
+    # the in-flight request and then reuse its newly populated cache.
+    if _ASSET_CACHE is not None and _ASSET_CACHE_LOCK.locked():
+        return _ASSET_CACHE
+    async with _ASSET_CACHE_LOCK:
+        now = asyncio.get_running_loop().time()
+        if _ASSET_CACHE is not None and now - _ASSET_CACHE_AT < _ASSET_CACHE_TTL_SEC:
+            return _ASSET_CACHE
+        try:
+            _ASSET_CACHE = await _fetch_asset_snapshot()
+            _ASSET_CACHE_AT = now
+            return _ASSET_CACHE
+        except Exception:
+            return _ASSET_CACHE
+
+
+def _asset_snapshot_cached() -> dict | None:
+    return _ASSET_CACHE
+
+
 # ── /api/status ──────────────────────────────────────────────────────
 
 @app.get("/api/status")
 async def api_status() -> JSONResponse:
     s = state.get()
     logs = _read_today_logs(limit=_STATUS_LOG_LIMIT)
+    assets = _asset_snapshot_cached()
     entry = s.entry_price or 0.0
     cur = live.last_tick_price
     pnl_pct = round((cur / entry - 1) * 100, 2) if (cur and entry) else None
@@ -148,11 +253,18 @@ async def api_status() -> JSONResponse:
         "ntp_offset_ms": live.ntp_offset_ms,
         "ntp_level": live.ntp_level,
         "close_reason": s.close_reason,
+        "assets": assets,
         **_pipeline_from_logs(logs, s.position_status),
     })
 
 
 # ── /api/logs ────────────────────────────────────────────────────────
+
+@app.get("/api/assets")
+async def api_assets(refresh: int = 0) -> JSONResponse:
+    assets = await _asset_snapshot_safe() if refresh else _asset_snapshot_cached()
+    return JSONResponse({"assets": assets})
+
 
 @app.get("/api/logs")
 async def api_logs(n: int = 60) -> JSONResponse:
@@ -180,6 +292,7 @@ async def api_f1() -> JSONResponse:
             datetime.fromtimestamp(snapshot_path.stat().st_mtime, tz=KST).isoformat()
             if snapshot_path else None
         ),
+        "selection_process": _selection_process_from_logs(summary, logs),
         **summary,
     })
 

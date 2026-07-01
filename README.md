@@ -72,6 +72,7 @@ python main.py
 - 스케줄러가 KST 기준으로 F1~F5 작업을 자동 실행합니다.
 - 08:40~09:00 사이에 켜면 catch-up으로 F1/F2/F3를 보완 실행합니다.
 - Web UI는 기본 `http://localhost:8080`에서 열립니다.
+- Security: `/api/status` and `/api/assets` can expose account asset values. The UI server binds to `127.0.0.1` by default; set `UI_HOST=0.0.0.0` only on a trusted network.
 - 로그는 `data/logs/YYYYMMDD.jsonl`에 기록됩니다.
 - DB는 `data/db/trading.db`를 사용합니다.
 

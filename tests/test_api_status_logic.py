@@ -75,3 +75,88 @@ def test_pipeline_live_position_status_takes_precedence():
     pipeline = status_logic.pipeline_from_logs(logs, "HOLDING")
 
     assert pipeline == {"pipeline_stage": 3, "pipeline_failed": False}
+
+
+def test_f3_detail_from_event_labels_internal_reasons():
+    assert status_logic.f3_detail_from_event({"event": "GAP_CHANGED", "reason": "BELOW_MIN"}) == "갭 하한 미달"
+    assert status_logic.f3_detail_from_event({"event": "GAP_CHANGED", "reason": "ABOVE_MAX"}) == "갭 상한 초과"
+    assert status_logic.f3_detail_from_event({"event": "F3_ENTRY_BLOCKED", "reason": "PRICE_UNAVAILABLE"}) == "예상가 조회 실패"
+
+
+def test_f3_detail_from_event_summarizes_final_pick():
+    assert (
+        status_logic.f3_detail_from_event({
+            "event": "F3_FINAL_PICK",
+            "valid_count": 2,
+            "checked_count": 3,
+        })
+        == "2 / 3 재검증"
+    )
+
+
+def test_parse_asset_snapshot_response_parses_kis_balance():
+    result = status_logic.parse_asset_snapshot_response({
+        "rt_cd": "0",
+        "output1": [
+            {"pdno": "005930", "hldg_qty": "2"},
+            {"pdno": "000660", "hldg_qty": "0"},
+        ],
+        "output2": [{
+            "dnca_tot_amt": "1,000,000",
+            "ord_psbl_cash": "800000",
+            "scts_evlu_amt": "500000",
+            "tot_evlu_amt": "1500000",
+            "evlu_pfls_smtl_amt": "12000",
+        }],
+    })
+
+    assert result == {
+        "cash": 1_000_000.0,
+        "buyable_cash": 800_000.0,
+        "stock_value": 500_000.0,
+        "total_asset": 1_500_000.0,
+        "pnl_amount": 12_000.0,
+        "holdings_count": 1,
+        "source": "KIS",
+    }
+
+
+def test_parse_asset_snapshot_response_rejects_kis_error():
+    try:
+        status_logic.parse_asset_snapshot_response({
+            "rt_cd": "1",
+            "msg_cd": "EGW00123",
+            "msg1": "token expired",
+        })
+    except RuntimeError as exc:
+        assert "KIS balance error" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")
+
+
+def test_parse_asset_snapshot_response_rejects_missing_output2():
+    try:
+        status_logic.parse_asset_snapshot_response({"rt_cd": "0", "output1": []})
+    except RuntimeError as exc:
+        assert "missing output2" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")
+
+
+def test_parse_asset_snapshot_response_rejects_invalid_number():
+    try:
+        status_logic.parse_asset_snapshot_response({
+            "rt_cd": "0",
+            "output1": [],
+            "output2": [{
+                "dnca_tot_amt": "not-a-number",
+                "ord_psbl_cash": "800000",
+                "scts_evlu_amt": "500000",
+                "tot_evlu_amt": "1500000",
+                "evlu_pfls_smtl_amt": "12000",
+            }],
+        })
+    except RuntimeError as exc:
+        assert "invalid field dnca_tot_amt" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")
