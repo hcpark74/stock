@@ -18,6 +18,7 @@ from src.api.status_logic import (
     f1_summary_from_rows as _f1_summary_from_rows,
     f1_verdict as _f1_verdict,
     f3_detail_from_event as _f3_detail_from_event,
+    latest_today_snapshot_path as _latest_today_snapshot_path,
     parse_asset_snapshot_response as _parse_asset_snapshot_response,
     pipeline_from_logs as _pipeline_from_logs,
     sort_f1_candidates_for_display as _sort_f1_candidates_for_display,
@@ -74,13 +75,7 @@ def _read_today_logs(limit: int | None = None) -> list[dict]:
 
 
 def _latest_f1_snapshot_path() -> Path | None:
-    if not _F1_SNAPSHOT_DIR.exists():
-        return None
-    today_files = list(_F1_SNAPSHOT_DIR.glob(f"{_today()}_*.jsonl"))
-    files = today_files or list(_F1_SNAPSHOT_DIR.glob("*.jsonl"))
-    if not files:
-        return None
-    return max(files, key=lambda p: p.stat().st_mtime)
+    return _latest_today_snapshot_path(_F1_SNAPSHOT_DIR, _today())
 
 
 def _read_f1_snapshot() -> tuple[Path | None, list[dict]]:

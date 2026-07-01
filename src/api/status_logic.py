@@ -1,6 +1,17 @@
 """Pure status/F1 display helpers for the API and tests."""
 
+from pathlib import Path
+
 from src.modules.f1_filter import GAP_MAX, GAP_MIN, select_liquidity_candidates
+
+
+def latest_today_snapshot_path(snapshot_dir: Path, today: str) -> Path | None:
+    if not snapshot_dir.exists():
+        return None
+    files = list(snapshot_dir.glob(f"{today}_*.jsonl"))
+    if not files:
+        return None
+    return max(files, key=lambda p: p.name)
 
 
 def _required_balance_float(source: dict, field: str) -> float:

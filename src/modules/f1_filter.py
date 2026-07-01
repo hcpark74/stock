@@ -437,7 +437,7 @@ def _rotate_candidate_snapshots(snapshot_dir: Path, keep: int = F1_SNAPSHOT_KEEP
         return
     files = sorted(
         snapshot_dir.glob("*.jsonl"),
-        key=lambda p: p.stat().st_mtime,
+        key=lambda p: p.name,
         reverse=True,
     )
     for old in files[keep:]:

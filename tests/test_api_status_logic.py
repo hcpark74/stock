@@ -1,3 +1,5 @@
+import os
+
 import src.api.status_logic as status_logic
 
 
@@ -20,6 +22,34 @@ def test_f1_summary_uses_same_liquidity_selection_as_f1_filter():
 
     assert summary["liquidity_pass"] == 10
     assert summary["selected"]["ticker"] == "TICK20"
+
+
+def test_latest_today_snapshot_ignores_previous_day_files(tmp_path):
+    old = tmp_path / "20260701_160253.jsonl"
+    old.write_text("{}", encoding="utf-8")
+
+    assert status_logic.latest_today_snapshot_path(tmp_path, "20260702") is None
+
+
+def test_latest_today_snapshot_selects_newest_today_file(tmp_path):
+    first = tmp_path / "20260702_084000.jsonl"
+    second = tmp_path / "20260702_085000.jsonl"
+    first.write_text("first", encoding="utf-8")
+    second.write_text("second", encoding="utf-8")
+
+    assert status_logic.latest_today_snapshot_path(tmp_path, "20260702") == second
+
+
+def test_latest_today_snapshot_breaks_mtime_ties_by_filename(tmp_path):
+    """Filenames sort chronologically; mtime alone can tie when writes land in the same tick."""
+    first = tmp_path / "20260702_084000.jsonl"
+    second = tmp_path / "20260702_085000.jsonl"
+    first.write_text("first", encoding="utf-8")
+    second.write_text("second", encoding="utf-8")
+    tied_time = first.stat().st_mtime
+    os.utime(second, (tied_time, tied_time))
+
+    assert status_logic.latest_today_snapshot_path(tmp_path, "20260702") == second
 
 
 def test_f1_candidates_display_pass_candidates_before_ranking_order():
