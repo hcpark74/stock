@@ -410,6 +410,8 @@ const LOG_EVENT_MAP = {
   TARGET_LOCKED:{n:'대상 종목 잠금(Target Locked)',cls:''},
   F3_SKIPPED:{n:'F3 진입 생략(F3 Skipped)',cls:'lv-WARN'},
   F3_RECHECK:{n:'F3 진입 전 재검증(F3 Recheck)',cls:''},
+  F3_ENTRY_BLOCKED:{n:'F3 진입 차단(F3 Entry Blocked)',cls:'lv-WARN'},
+  ENTRY_PRE_ORDER_WAIT:{n:'진입 주문 전 대기(Entry Pre-order Wait)',cls:''},
   ENTRY_ORDER_SENT:{n:'진입 주문 전송(Entry Order Sent)',cls:''},
   ENTRY_RETRY_START:{n:'진입 재시도 시작(Entry Retry Start)',cls:'lv-WARN'},
   ENTRY_RETRY_SKIPPED:{n:'진입 재시도 생략(Entry Retry Skipped)',cls:'lv-WARN'},
@@ -458,6 +460,7 @@ function buildLogDetail(l) {
   if(l.ntp_server) parts.push(l.ntp_server);
   if(l.order_price) parts.push(`주문가 ${fmt(l.order_price)}원`);
   if(l.order_qty) parts.push(`주문 ${fmt(l.order_qty)}주`);
+  if(l.sleep_sec!=null) parts.push(`대기 ${fmt(l.sleep_sec,1)}초`);
   if(l.entry_attempt!=null && l.max_attempts!=null) parts.push(`시도 ${fmt(l.entry_attempt)}/${fmt(l.max_attempts)}`);
   if(l.entry_price) parts.push(`진입 ${fmt(l.entry_price)}원`);
   if(l.exit_price)  parts.push(`청산 ${fmt(l.exit_price)}원`);

@@ -157,26 +157,26 @@ async def test_step_trailing_not_triggered_above_stop():
     mock_close.assert_not_awaited()
 
 
-# ── 09:50 강제 발동 ───────────────────────────────────────────────────
+# ── 10:50 강제 발동 ───────────────────────────────────────────────────
 
 async def test_late_force_trailing_active():
-    """09:50 이후 → highest_step 0이어도 trailing_active 강제 True."""
+    """10:50 이후 → highest_step 0이어도 trailing_active 강제 True."""
     price = ENTRY * 1.01  # 1% 이익, 스텝 미달
-    await _run_tick(price, hour=9, minute=50)
+    await _run_tick(price, hour=10, minute=50)
     assert _state_mod.get().trailing_active is True
 
 
 async def test_late_triggers_if_below_zero_step_stop():
-    """09:50 강제 활성 후 stop(entry×0.985) 이하 → 청산 발동."""
+    """10:50 강제 활성 후 stop(entry×0.985) 이하 → 청산 발동."""
     price = ENTRY * 0.984  # stop = ENTRY*(1+0-0.015)=9850, 9840 < 9850
-    mock_close = await _run_tick(price, hour=9, minute=50, set_closed_return=True)
+    mock_close = await _run_tick(price, hour=10, minute=50, set_closed_return=True)
     mock_close.assert_awaited_once_with(price, "TRAILING")
 
 
 async def test_before_late_no_force():
-    """09:49 → 강제 발동 없음, trailing_active 여전히 False."""
+    """10:49 → 강제 발동 없음, trailing_active 여전히 False."""
     price = ENTRY * 1.01
-    await _run_tick(price, hour=9, minute=49)
+    await _run_tick(price, hour=10, minute=49)
     assert _state_mod.get().trailing_active is False
 
 

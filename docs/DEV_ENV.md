@@ -46,7 +46,7 @@
   │   │   ├── f2_lockup.py      # F2: 타겟 락업 엔진
   │   │   ├── f3_entry.py       # F3: 진입 주문 모듈
   │   │   ├── f4_tracking.py    # F4: 장중 추적 스탑
-  │   │   └── f5_timeout.py     # F5: 10시 타임아웃 청산
+  │   │   └── f5_timeout.py     # F5: 11시 타임아웃 청산
   │   │
   │   ├── api/
   │   │   ├── __init__.py
@@ -399,7 +399,7 @@ requirements-dev.txt (개발/테스트 전용)
 
   ● main.py는 08:30에 KIS 토큰 갱신 및 NTP 검증을 수행하고,
     이후 APScheduler에 F1~F5를 등록한 뒤 이벤트 루프를 유지한다.
-  ● 10:00 청산 완료 후 다음 날 08:30까지 대기 상태로 유지된다 (종료 안 함).
+  ● 11:00 청산 완료 후 다음 날 08:30까지 대기 상태로 유지된다 (종료 안 함).
 
 ──────────────────────────────────────────────────
 12-2. 개발/테스트 실행
@@ -494,6 +494,7 @@ F3_ENTRY_MAX_ATTEMPTS=2
 F3_ENTRY_RETRY_DELAY_SEC=0.5
 F3_ENTRY_RETRY_FILL_SEC=3.0
 F3_ENTRY_RETRY_DEADLINE=09:00:08
+F3_PRE_ORDER_QUIET_SEC=1.5
 ```
 
 ### DRY_RUN 실행 목적
@@ -507,6 +508,7 @@ F3_ENTRY_RETRY_DEADLINE=09:00:08
 - REST 호출은 `KIS_RATE_INTERVAL_SEC` 기준으로 전역 직렬화한다.
 - F1 예상체결가 보강은 `F1_EXPECTED_QUOTE_CONCURRENCY`로 동시 작업 수를 제한한다.
 - F1 KOSPI/KOSDAQ 랭킹 조회 사이에는 `F1_MARKET_INTERVAL_SEC` 간격을 둔다.
+- F3 매수 주문 직전에는 `F3_PRE_ORDER_QUIET_SEC`만큼 대기해 직전 조회 호출과 주문 호출이 붙지 않게 한다.
 - KOSDAQ 랭킹 조회가 KIS 응답 코드 `OPSQ2001` 등으로 실패할 수 있으므로, F1 로그의 `market`, `rt_cd`, `msg_cd`를 함께 확인한다.
 
 ### 테스트 명령

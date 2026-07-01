@@ -213,6 +213,8 @@ logger.log("TRAILING_STOP", level="INFO",
 - 호출 간격은 `KIS_RATE_INTERVAL_SEC`로 제어한다. 개별 모듈에서 별도 sleep으로 rate-limit을 흉내 내지 않는다.
 - F1 예상체결가 보강처럼 다수 종목을 조회할 때는 세마포어로 동시성을 제한한다.
 - F1 KOSPI/KOSDAQ처럼 시장 단위 조회를 연속 호출할 때는 `F1_MARKET_INTERVAL_SEC`를 사용한다.
+- F3 매수 주문 직전에는 `F3_PRE_ORDER_QUIET_SEC` 대기를 거쳐 직전 조회 호출과 주문 호출을 분리한다.
+- F2에서 대상 종목이 잠기면 F3는 기본적으로 매수를 시도한다. 주문 전 차단이 필요하면 `F3_ENTRY_BLOCKED`에 표준 `reason`을 남긴다.
 - F3 진입 재시도는 마지막 시도까지 미체결 주문 취소가 보장되어야 한다.
 - F3 실패 로그에는 주문번호, 주문가, 주문수량, 재시도 횟수, 체결조회 요약을 가능한 한 포함한다.
 - DRY_RUN 경로에서는 실제 주문, 실제 KIS API, 운영 DB를 호출하지 않는다.

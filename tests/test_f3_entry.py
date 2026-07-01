@@ -24,8 +24,9 @@ def _reset_state() -> None:
 
 
 @pytest.fixture(autouse=True)
-def reset_fill_poll_summary():
+def reset_fill_poll_summary(monkeypatch):
     f3._last_fill_poll_summary = {}
+    monkeypatch.setattr(f3, "F3_PRE_ORDER_QUIET_SEC", 0)
     yield
     f3._last_fill_poll_summary = {}
 
@@ -40,6 +41,35 @@ def test_parse_deadline_logs_invalid_value(monkeypatch):
     assert events[0][0] == "F3_DEADLINE_PARSE_ERROR"
     assert events[0][1]["value"] == "09:bad:08"
     assert events[0][1]["default"] == "09:00:08"
+
+
+@pytest.mark.asyncio
+async def test_pre_order_quiet_wait_logs_and_sleeps(monkeypatch):
+    events = []
+    sleep = AsyncMock()
+
+    monkeypatch.setattr(f3, "F3_PRE_ORDER_QUIET_SEC", 1.5)
+    monkeypatch.setattr(f3.asyncio, "sleep", sleep)
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+
+    await f3._pre_order_quiet_wait("006340", 1, 2, 12900.0, 774)
+
+    sleep.assert_awaited_once_with(1.5)
+    assert events == [
+        (
+            "ENTRY_PRE_ORDER_WAIT",
+            {
+                "level": "INFO",
+                "ticker": "006340",
+                "phase": "ENTRY",
+                "sleep_sec": 1.5,
+                "order_price": 12900.0,
+                "order_qty": 774,
+                "entry_attempt": 1,
+                "max_attempts": 2,
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -87,6 +117,133 @@ async def test_entry_fail_logs_fill_poll_summary(monkeypatch):
     assert entry_fail["order_id"] == "0000000937"
     assert entry_fail["poll_attempts"] == 6
     assert entry_fail["poll_last_matched"] is False
+
+
+@pytest.mark.asyncio
+async def test_price_unavailable_blocks_entry_with_reason(monkeypatch):
+    events = []
+    send_buy = AsyncMock()
+    _reset_state()
+
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(0.0, 10000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3.run(force=True)
+
+    blocked = [kwargs for event, kwargs in events if event == "F3_ENTRY_BLOCKED"][-1]
+    assert blocked["reason"] == "PRICE_UNAVAILABLE"
+    assert state.get().day_skip is True
+    assert state.get().close_reason == "PRICE_UNAVAILABLE"
+    send_buy.assert_not_awaited()
+    f3.db.record_skip.assert_awaited_once()
+    assert f3.db.record_skip.await_args.args[1] == "ENTRY_FAIL"
+
+
+@pytest.mark.asyncio
+async def test_insufficient_balance_blocks_entry_with_reason(monkeypatch):
+    events = []
+    send_buy = AsyncMock()
+    _reset_state()
+
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10310.0, 10000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1.0))
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3.run(force=True)
+
+    blocked = [kwargs for event, kwargs in events if event == "F3_ENTRY_BLOCKED"][-1]
+    assert blocked["reason"] == "QTY_ZERO"
+    assert state.get().day_skip is True
+    assert state.get().close_reason == "INSUFFICIENT_BALANCE"
+    send_buy.assert_not_awaited()
+    f3.db.record_skip.assert_awaited_once()
+    assert f3.db.record_skip.await_args.args[1] == "ENTRY_FAIL"
+
+
+@pytest.mark.asyncio
+async def test_order_rejected_sets_day_skip(monkeypatch):
+    events = []
+    _reset_state()
+
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10310.0, 10000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(
+        f3,
+        "_send_buy",
+        AsyncMock(return_value={
+            "rt_cd": "7",
+            "msg_cd": "ORDER_REJECTED",
+            "msg1": "rejected",
+            "output": {},
+        }),
+    )
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3.run(force=True)
+
+    entry_fail = [kwargs for event, kwargs in events if event == "ENTRY_FAIL"][-1]
+    assert entry_fail["reason"] == "ORDER_REJECTED"
+    assert state.get().position_status == "IDLE"
+    assert state.get().day_skip is True
+    f3.db.record_skip.assert_awaited_once()
+    assert f3.db.record_skip.await_args.args[1] == "ENTRY_FAIL"
+
+
+@pytest.mark.asyncio
+async def test_state_collision_blocks_entry_with_reason(monkeypatch):
+    events = []
+    send_buy = AsyncMock()
+    _reset_state()
+    state.get().position_status = "HOLDING"
+
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10310.0, 10000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+
+    await f3.run(force=True)
+
+    blocked = [kwargs for event, kwargs in events if event == "F3_ENTRY_BLOCKED"][-1]
+    assert blocked["reason"] == "STATE_NOT_IDLE"
+    assert blocked["position_status"] == "HOLDING"
+    send_buy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_single_share_quantity_still_places_buy(monkeypatch):
+    _reset_state()
+    send_buy = AsyncMock(return_value={
+        "rt_cd": "0",
+        "msg_cd": "MCA00000",
+        "msg1": "OK",
+        "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
+    })
+
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(1000.0, 970.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=10_000.0))
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1000, "fill_qty": 1}))
+    monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=1000))
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "record_order", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "update_order_fill", AsyncMock())
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+
+    await f3.run(force=True)
+
+    assert send_buy.await_args.args == ("006340", 1, "PAPER")
+    assert state.get().position_status == "HOLDING"
 
 
 @pytest.mark.asyncio
@@ -177,6 +334,40 @@ async def test_entry_cancels_last_unfilled_attempt(monkeypatch):
     assert cancel_order.await_count == 2
     assert cancel_order.await_args_list[-1].args[:3] == ("0000000938", "001", "PAPER")
     assert state.get().position_status == "IDLE"
+
+
+@pytest.mark.asyncio
+async def test_entry_fail_uses_last_run_attempt_when_retry_skipped(monkeypatch):
+    events = []
+    _reset_state()
+
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(f3, "_before_deadline", lambda deadline: False)
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10310.0, 10000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(
+        f3,
+        "_send_buy",
+        AsyncMock(return_value={
+            "rt_cd": "0",
+            "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
+        }),
+    )
+    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value=None))
+    monkeypatch.setattr(f3, "_cancel_order", AsyncMock(return_value={"rt_cd": "0"}))
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3.run()
+
+    event_names = [event for event, _ in events]
+    assert "ENTRY_RETRY_SKIPPED" in event_names
+    entry_fail = [kwargs for event, kwargs in events if event == "ENTRY_FAIL"][-1]
+    assert entry_fail["entry_attempt"] == 1
+    assert entry_fail["max_attempts"] == 2
+    assert "attempts=1" in f3.db.record_skip.await_args.args[2]
 
 
 @pytest.mark.asyncio

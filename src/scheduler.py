@@ -16,6 +16,8 @@ F1_H, F1_M = 8, 40
 F2_H, F2_M = 8, 58
 F3_H, F3_M, F3_S = 8, 59, 40
 F3_FILL_DEADLINE_H, F3_FILL_DEADLINE_M = 9, 0
+F5_PRECHECK_H, F5_PRECHECK_M, F5_PRECHECK_S = 10, 59, 50
+F5_EXEC_H, F5_EXEC_M, F5_EXEC_S = 11, 0, 0
 
 
 def build(
@@ -50,10 +52,18 @@ def build(
     # F3 — 갭 재검증 → 진입 → 피라미딩 전 과정 포함
     scheduler.add_job(f3, cron(hour=F3_H, minute=F3_M, second=F3_S), id="f3_entry")
 
-    # 09:59:50 — F5 Pre-Check
-    scheduler.add_job(f5_precheck, cron(hour=9, minute=59, second=50), id="f5_precheck")
+    # 10:59:50 — F5 Pre-Check
+    scheduler.add_job(
+        f5_precheck,
+        cron(hour=F5_PRECHECK_H, minute=F5_PRECHECK_M, second=F5_PRECHECK_S),
+        id="f5_precheck",
+    )
 
-    # 10:00:00 — F5 Execute
-    scheduler.add_job(f5_exec, cron(hour=10, minute=0, second=0), id="f5_exec")
+    # 11:00:00 — F5 Execute
+    scheduler.add_job(
+        f5_exec,
+        cron(hour=F5_EXEC_H, minute=F5_EXEC_M, second=F5_EXEC_S),
+        id="f5_exec",
+    )
 
     return scheduler

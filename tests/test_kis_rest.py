@@ -43,4 +43,4 @@ async def test_kis_rest_rate_limiter_serializes_concurrent_requests(monkeypatch)
     gaps = [b - a for a, b in zip(starts, starts[1:])]
 
     assert len(starts) == 5
-    assert min(gaps) >= 0.035
+    assert min(gaps) >= 0.040

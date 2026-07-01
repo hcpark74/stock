@@ -71,7 +71,7 @@ Sprint 5  ░░░░░░░░░░░░░░░░░░░░  대기  
   - `highest_step` 갱신, `trailing_active` 플래그 관리
   - Hard Stop: `trailing_active == False and price <= entry * (1 - HARD_STOP_RATIO)`
   - Step Trailing: `trailing_active == True and price <= entry * (1 + highest_step - STEP_TRAIL)`
-  - 09:50 강제 발동 유지
+  - 10:50 강제 발동 유지
 - [x] `_first_partial_exit()` 함수 제거
 - [x] `_execute_close()` 로그 필드 업데이트 (BEP_STOP 제거, highest_step/stop_price 추가)
 
@@ -166,7 +166,7 @@ Sprint 5  ░░░░░░░░░░░░░░░░░░░░  대기  
   - 스텝 갱신 정확성 (구간별 2.6/5.1/7.6% — 부동소수점 경계 주의)
   - Hard Stop 발동/비발동/trailing 활성 시 우선순위
   - Step Trailing 발동/비발동 경계
-  - 09:50 강제 발동 + stop 이하 시 청산 확인
+  - 10:50 강제 발동 + stop 이하 시 청산 확인
   - highest_step 단조 증가 + 신고가 갱신
 - [x] `tests/test_f1_filter.py` — 완료 2026-06-23 (10개 케이스)
   - 갭 필터 경계값 (2.9%, 3.0%, 7.0%, 6.99%, 7.1%)

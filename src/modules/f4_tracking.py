@@ -1,4 +1,4 @@
-"""F4. 장중 추적 스탑 모듈 (09:00:00 ~ 09:59:59) — PRD §F4"""
+"""F4. 장중 추적 스탑 모듈 (09:00:00 ~ 10:59:59) — PRD §F4"""
 
 import asyncio
 import math
@@ -12,6 +12,8 @@ from src.utils.logger import log
 from src.utils.spike_filter import SpikeFilter
 
 KST = ZoneInfo("Asia/Seoul")
+FORCE_TRAILING_HOUR = 10
+FORCE_TRAILING_MINUTE = 50
 
 STEP_SIZE      = 0.025   # 스텝 간격 +2.5% (params.json 로드 예정)
 STEP_TRAIL     = 0.015   # 스텝 기준 하락폭 -1.5%
@@ -68,7 +70,7 @@ async def _process_tick(price: float, spike_filter: SpikeFilter) -> None:
     state.update_high_price(price)
 
     now = datetime.now(KST)
-    late = now.hour == 9 and now.minute >= 50
+    late = (now.hour, now.minute) >= (FORCE_TRAILING_HOUR, FORCE_TRAILING_MINUTE)
 
     # 스텝 갱신 (highest_step은 단조 증가)
     pnl = price / entry - 1
@@ -78,7 +80,7 @@ async def _process_tick(price: float, spike_filter: SpikeFilter) -> None:
     if s.highest_step >= STEP_SIZE:
         s.trailing_active = True
 
-    # 09:50 강제 활성화 (스텝 미달성이어도 trailing 발동)
+    # 청산 10분 전 강제 활성화 (스텝 미달성이어도 trailing 발동)
     if late and not s.trailing_active:
         s.trailing_active = True
 

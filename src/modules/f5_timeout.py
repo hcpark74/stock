@@ -1,4 +1,4 @@
-"""F5. 타임아웃 청산 스케줄러 (10:00:00) — PRD §F5"""
+"""F5. 타임아웃 청산 스케줄러 (11:00:00) — PRD §F5"""
 
 import asyncio
 import os
@@ -21,7 +21,7 @@ _prefetch_qty: int = 0
 
 
 async def precheck() -> None:
-    """09:59:50 — 잔고 조회로 실제 보유 수량 확인."""
+    """10:59:50 — 잔고 조회로 실제 보유 수량 확인."""
     global _prefetch_qty
     s = state.get()
     if s.position_status != "HOLDING" or not s.target_ticker:
@@ -58,7 +58,7 @@ async def precheck() -> None:
 
 
 async def execute() -> None:
-    """10:00:00 — 미청산 잔여 전량 시장가 청산. Retry 최대 3회."""
+    """11:00:00 — 미청산 잔여 전량 시장가 청산. Retry 최대 3회."""
     s = state.get()
     if s.position_status != "HOLDING":
         return  # 이미 F4에서 청산됨
@@ -92,7 +92,7 @@ async def execute() -> None:
                 entry_price=entry, exit_price=exit_price, exit_qty=qty,
                 pnl_pct=pnl_pct, fill_latency_ms=0)
             await notifier.send("TIMEOUT_CLOSE", level="INFO",
-                                message=f"10시 청산: {ticker} {qty}주 @ {exit_price:,.0f}원")
+                                message=f"11시 청산: {ticker} {qty}주 @ {exit_price:,.0f}원")
             await state.persist(os.getenv("STATE_DIR", "data/state"),
                                 datetime.now(KST).strftime("%Y%m%d"))
             return
@@ -105,7 +105,7 @@ async def execute() -> None:
     log("TIMEOUT_ORDER_FAILED", level="CRIT", ticker=ticker,
         attempt_count=_RETRY, last_error_code="", last_error_msg="Max retries exceeded")
     await notifier.send("TIMEOUT_ORDER_FAILED", level="CRIT",
-                        message=f"10시 청산 실패! 수동 청산 필요. {ticker} {qty}주")
+                        message=f"11시 청산 실패! 수동 청산 필요. {ticker} {qty}주")
 
 
 async def _send_sell(ticker: str, qty: int, mode: str) -> dict:

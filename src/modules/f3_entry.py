@@ -21,6 +21,7 @@ F3_ENTRY_MAX_ATTEMPTS = max(1, int(os.getenv("F3_ENTRY_MAX_ATTEMPTS", "2")))
 F3_ENTRY_RETRY_DELAY_SEC = float(os.getenv("F3_ENTRY_RETRY_DELAY_SEC", "0.5"))
 F3_ENTRY_RETRY_FILL_SEC = float(os.getenv("F3_ENTRY_RETRY_FILL_SEC", "3.0"))
 F3_ENTRY_RETRY_DEADLINE = os.getenv("F3_ENTRY_RETRY_DEADLINE", "09:00:08")
+F3_PRE_ORDER_QUIET_SEC = float(os.getenv("F3_PRE_ORDER_QUIET_SEC", "1.5"))
 
 # KIS TR ID (PAPER/REAL 분기) — 신TR 기준
 _BUY_TR    = {"REAL": "TTTC0012U", "PAPER": "VTTC0012U"}
@@ -43,8 +44,10 @@ async def run(force: bool = False) -> None:
     """
     s = state.get()
     if s.day_skip or not s.target_ticker:
+        reason = "DAY_SKIP" if s.day_skip else "NO_TARGET"
         log("F3_SKIPPED", level="WARN",
-            reason="DAY_SKIP" if s.day_skip else "NO_TARGET")
+            reason=reason)
+        _log_entry_blocked(s.target_ticker, reason)
         return
     ticker = s.target_ticker
     mode = os.getenv("KIS_MODE", "PAPER")
@@ -70,10 +73,19 @@ async def run(force: bool = False) -> None:
         if not (GAP_MIN_RECHECK <= gap < GAP_MAX_RECHECK):
             s.day_skip = True
             s.close_reason = "GAP_CHANGED"
+            gap_reason = "BELOW_MIN" if gap < GAP_MIN_RECHECK else "ABOVE_MAX"
             log(
                 "GAP_CHANGED", level="WARN", ticker=ticker,
                 gap_at_lockup=None, gap_at_entry=round(gap * 100, 2),
-                reason="BELOW_MIN" if gap < GAP_MIN_RECHECK else "ABOVE_MAX",
+                reason=gap_reason,
+            )
+            _log_entry_blocked(
+                ticker,
+                "GAP_CHANGED",
+                gap_at_entry=round(gap * 100, 2),
+                gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
+                gap_max_pct=round(GAP_MAX_RECHECK * 100, 2),
+                gap_reason=gap_reason,
             )
             await notifier.send("GAP_CHANGED", level="WARN",
                                 message=f"진입 직전 갭 변동({gap*100:.1f}%). 거래 스킵.")
@@ -84,6 +96,14 @@ async def run(force: bool = False) -> None:
     cash = await _fetch_available_cash()
     total_amount = int(cash * ALLOC_RATIO)
     if not expected_price or expected_price == 0:
+        s.day_skip = True
+        s.close_reason = "PRICE_UNAVAILABLE"
+        _log_entry_blocked(
+            ticker,
+            "PRICE_UNAVAILABLE",
+            order_price=expected_price,
+            cash=cash,
+        )
         log(
             "ENTRY_FAIL",
             level="WARN",
@@ -94,27 +114,55 @@ async def run(force: bool = False) -> None:
             cash=cash,
             reason="PRICE_UNAVAILABLE",
         )
+        await db.record_skip(
+            _today(),
+            "ENTRY_FAIL",
+            f"reason=PRICE_UNAVAILABLE,cash={cash}",
+        )
         return
     total_qty = int(total_amount / expected_price)
     if total_qty == 0:
+        s.day_skip = True
+        s.close_reason = "INSUFFICIENT_BALANCE"
+        _log_entry_blocked(
+            ticker,
+            "QTY_ZERO",
+            cash=cash,
+            alloc_ratio=ALLOC_RATIO,
+            order_price=expected_price,
+            total_amount=total_amount,
+        )
         log("INSUFFICIENT_BALANCE", level="WARN", ticker=ticker,
             cash=cash, alloc_ratio=ALLOC_RATIO, order_price=expected_price,
             total_amount=total_amount, filter_count=0, reason="QTY_ZERO")
-        s.day_skip = True
+        await db.record_skip(
+            _today(),
+            "ENTRY_FAIL",
+            (
+                "reason=QTY_ZERO,"
+                f"cash={cash},alloc_ratio={ALLOC_RATIO},order_price={expected_price}"
+            ),
+        )
         return
 
-    first_qty = int(total_qty * FIRST_RATIO)
+    first_qty = max(1, int(total_qty * FIRST_RATIO))
     second_qty = total_qty - first_qty
 
     # ── [08:59:50] 1차 70% 시장가 매수 ──────────────────────────────
     await _sleep_until(8, 59, 50)
     if not await state.set_entering():
+        _log_entry_blocked(
+            ticker,
+            "STATE_NOT_IDLE",
+            position_status=state.get().position_status,
+        )
         return
 
     global _pending_buy_org_no
     fill = None
     order_id = "UNKNOWN"
     max_attempts = F3_ENTRY_MAX_ATTEMPTS if not force else 1
+    last_run_attempt = 0
     for attempt in range(1, max_attempts + 1):
         if attempt > 1:
             if not _before_deadline(_entry_retry_deadline()):
@@ -140,6 +188,8 @@ async def run(force: bool = False) -> None:
                 max_attempts=max_attempts,
             )
 
+        await _pre_order_quiet_wait(ticker, attempt, max_attempts, expected_price, first_qty)
+        last_run_attempt = attempt
         order_resp = await _send_buy(ticker, first_qty, mode)
         order_id = order_resp.get("output", {}).get("ODNO", "UNKNOWN")
         _pending_buy_org_no = order_resp.get("output", {}).get("KRX_FWDG_ORD_ORGNO", "")
@@ -161,6 +211,7 @@ async def run(force: bool = False) -> None:
         )
         if order_id == "UNKNOWN" or str(order_resp.get("rt_cd", "0")) != "0":
             await state.reset_to_idle("ENTRY_FAIL")
+            state.get().day_skip = True
             log(
                 "ENTRY_FAIL",
                 level="WARN",
@@ -175,7 +226,11 @@ async def run(force: bool = False) -> None:
                 msg_cd=order_resp.get("msg_cd"),
                 msg1=order_resp.get("msg1"),
             )
-            await db.record_skip(_today(), "ENTRY_FAIL", f"order_id={order_id},reason=ORDER_REJECTED")
+            await db.record_skip(
+                _today(),
+                "ENTRY_FAIL",
+                f"order_id={order_id},reason=ORDER_REJECTED",
+            )
             return
 
         fill_deadline = _entry_fill_deadline(attempt, force)
@@ -201,7 +256,7 @@ async def run(force: bool = False) -> None:
         await state.reset_to_idle("ENTRY_FAIL")
         log("ENTRY_FAIL", level="WARN", ticker=ticker,
             order_id=order_id, order_price=expected_price,
-            order_qty=first_qty, entry_attempt=max_attempts,
+            order_qty=first_qty, entry_attempt=last_run_attempt,
             max_attempts=max_attempts, reason="UNFILLED",
             **_last_fill_poll_summary)
         await notifier.send("ENTRY_FAIL", level="WARN",
@@ -209,7 +264,10 @@ async def run(force: bool = False) -> None:
         await db.record_skip(
             _today(),
             "ENTRY_FAIL",
-            f"order_id={order_id},reason=UNFILLED,attempts={max_attempts},poll_attempts={_last_fill_poll_summary.get('poll_attempts', 0)}",
+            (
+                f"order_id={order_id},reason=UNFILLED,attempts={last_run_attempt},"
+                f"poll_attempts={_last_fill_poll_summary.get('poll_attempts', 0)}"
+            ),
         )
         return
 
@@ -252,7 +310,8 @@ async def run(force: bool = False) -> None:
         return
 
     current_price = await _fetch_current_price(ticker)
-    if current_price and current_price >= fill_price * (1 + PYRAMID_MIN_UP):
+    if second_qty > 0 and current_price and current_price >= fill_price * (1 + PYRAMID_MIN_UP):
+        await _pre_order_quiet_wait(ticker, 1, 1, current_price, second_qty, phase="PYRAMID")
         py_resp = await _send_buy(ticker, second_qty, mode)
         py_id     = py_resp.get("output", {}).get("ODNO", "")
         py_org_no = py_resp.get("output", {}).get("KRX_FWDG_ORD_ORGNO", "")
@@ -275,7 +334,7 @@ async def run(force: bool = False) -> None:
             await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
             log("PYRAMID_EXECUTED", level="INFO", ticker=ticker,
                 fill_price=py_fill["fill_price"], fill_qty=py_fill["fill_qty"])
-    else:
+    elif second_qty > 0:
         diff_pct = ((current_price or 0.0) / fill_price - 1) * 100
         log("PYRAMID_SKIPPED", level="INFO", ticker=ticker,
             entry_price=fill_price, current_price=current_price,
@@ -290,12 +349,47 @@ def _today() -> str:
     return datetime.now(KST).strftime("%Y%m%d")
 
 
+def _log_entry_blocked(ticker: str | None, reason: str, **extra: object) -> None:
+    log(
+        "F3_ENTRY_BLOCKED",
+        level="WARN",
+        ticker=ticker,
+        reason=reason,
+        **extra,
+    )
+
+
 async def _sleep_until(h: int, m: int, s: int) -> None:
     now = datetime.now(KST)
     target = now.replace(hour=h, minute=m, second=s, microsecond=0)
     delta = (target - now).total_seconds()
     if delta > 0:
         await asyncio.sleep(delta)
+
+
+async def _pre_order_quiet_wait(
+    ticker: str,
+    attempt: int,
+    max_attempts: int,
+    order_price: float | None,
+    order_qty: int,
+    *,
+    phase: str = "ENTRY",
+) -> None:
+    if F3_PRE_ORDER_QUIET_SEC <= 0:
+        return
+    log(
+        "ENTRY_PRE_ORDER_WAIT",
+        level="INFO",
+        ticker=ticker,
+        phase=phase,
+        sleep_sec=F3_PRE_ORDER_QUIET_SEC,
+        order_price=order_price,
+        order_qty=order_qty,
+        entry_attempt=attempt,
+        max_attempts=max_attempts,
+    )
+    await asyncio.sleep(F3_PRE_ORDER_QUIET_SEC)
 
 
 def _parse_deadline(value: str, default: tuple[int, int, int]) -> tuple[int, int, int]:
@@ -335,6 +429,9 @@ def _entry_fill_deadline(attempt: int, force: bool) -> tuple[int, int, int]:
     if force:
         return _deadline_after_seconds(30)
     if attempt == 1:
+        # Normal scheduled entry is intentionally narrow: the first market order
+        # is sent after _sleep_until(08:59:50) plus F3_PRE_ORDER_QUIET_SEC, then
+        # only polled until 09:00:00 before retry logic takes over.
         return 9, 0, 0
 
     retry_deadline = _deadline_datetime(_entry_retry_deadline())
@@ -468,7 +565,11 @@ async def _cancel_order(order_id: str, org_no: str, mode: str) -> dict:
     )
 
 
-async def _poll_fill(order_id: str, deadline: tuple[int, int, int], ticker: str | None = None) -> dict | None:
+async def _poll_fill(
+    order_id: str,
+    deadline: tuple[int, int, int],
+    ticker: str | None = None,
+) -> dict | None:
     """주문 체결을 1초 간격으로 폴링. deadline(시, 분, 초) 도달 시 None."""
     global _last_fill_poll_summary
     h, m, s = deadline
