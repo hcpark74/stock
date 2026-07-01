@@ -103,19 +103,32 @@ async def _execute_close(price: float, reason: str) -> None:
     entry = s.entry_price or price
     mode = os.getenv("KIS_MODE", "PAPER")
 
+    if os.getenv("DRY_RUN", "0") == "1":
+        exit_price = price
+        pnl_pct = round((exit_price / entry - 1) * 100, 2) if entry else 0.0
+        event_name = "TRAILING_STOP" if reason == "TRAILING" else reason
+        level = "INFO" if reason == "TRAILING" else "WARN"
+        log_extra: dict = {}
+        if reason == "TRAILING":
+            stop_price = entry * (1 + s.highest_step - STEP_TRAIL)
+            log_extra = {"highest_step": s.highest_step, "stop_price": round(stop_price, 0)}
+        log(event_name, level=level, ticker=s.target_ticker,
+            entry_price=entry, exit_price=exit_price, exit_qty=qty,
+            pnl_pct=pnl_pct, dry_run=True, fill_latency_ms=0, **log_extra)
+        await state.persist(os.getenv("STATE_DIR", "data/state"),
+                            datetime.now(KST).strftime("%Y%m%d"))
+        return
+
     sell_id = ""
     exit_price = price
-    if os.getenv("DRY_RUN", "0") == "1":
-        sell_id = f"DRY-SELL-{datetime.now(KST).strftime('%H%M%S')}"
-    else:
-        try:
-            sell_resp = await _send_sell(s.target_ticker, qty, mode)
-            sell_id = sell_resp.get("output", {}).get("ODNO", "")
-            fill = await _poll_fill(sell_id, timeout_sec=30)
-            if fill:
-                exit_price = fill["fill_price"]
-        except Exception as e:
-            log("F4_SELL_ERROR", level="CRIT", ticker=s.target_ticker, error=repr(e))
+    try:
+        sell_resp = await _send_sell(s.target_ticker, qty, mode)
+        sell_id = sell_resp.get("output", {}).get("ODNO", "")
+        fill = await _poll_fill(sell_id, timeout_sec=30)
+        if fill:
+            exit_price = fill["fill_price"]
+    except Exception as e:
+        log("F4_SELL_ERROR", level="CRIT", ticker=s.target_ticker, error=repr(e))
 
     pnl_pct = round((exit_price / entry - 1) * 100, 2) if entry else 0.0
 
@@ -153,7 +166,9 @@ async def _run_dry_ticks(ticker: str, spike_filter: SpikeFilter) -> None:
         entry,
         round(entry * 1.026),
         round(entry * 1.032),
-        round(entry * 1.010),
+        # After the first step, trailing stop is entry * 1.010. Use a value
+        # slightly below it so DRY_RUN deterministically closes.
+        round(entry * 1.009),
     ]
 
     live.ws_connected = True
@@ -226,4 +241,3 @@ async def _poll_fill(order_id: str, timeout_sec: int = 30) -> dict | None:
             pass
         await asyncio.sleep(1)
     return None
-

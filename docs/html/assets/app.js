@@ -183,7 +183,7 @@ function applyStatus(d) {
   $('fl-stop').querySelector('.dot').className = 'dot'+(stopPrice?' off':'  off');
 
   // 바텀 파이프라인 상태 반영
-  updatePipeline(d.position_status);
+  updatePipeline(d.position_status, d);
   renderAssetSummary(d);
   renderAssets(d);
 }
@@ -205,11 +205,14 @@ function updateFlag(id, on, label, dotColor) {
   el.lastChild.textContent=label;
 }
 
-function updatePipeline(status) {
+function updatePipeline(status, pipeline) {
   const stages=['F1 스캔','F2 잠금','F3 진입','F4 Step Trailing','F5 타임아웃'];
-  const activeIdx = {IDLE:0,ENTERING:2,HOLDING:3,CLOSED:4}[status]??0;
+  const activeIdx = Number.isInteger(pipeline?.pipeline_stage)
+    ? pipeline.pipeline_stage
+    : ({IDLE:0,ENTERING:2,HOLDING:3,CLOSED:4}[status]??0);
+  const failed = pipeline?.pipeline_failed === true;
   const segs = stages.map((s,i)=>{
-    const c = i<activeIdx?'b-done':i===activeIdx?'b-active':'b-dim';
+    const c = failed && i===activeIdx ? 'b-fail' : i<activeIdx ? 'b-done' : i===activeIdx ? 'b-active' : 'b-dim';
     return `<span class="${c}">${s}</span>`;
   });
   $('btm-pipeline').innerHTML = segs.join('<span class="b-arr">›</span>');
@@ -406,6 +409,12 @@ const LOG_EVENT_MAP = {
   F2_SKIPPED:{n:'F2 종목 잠금 생략(F2 Skipped)',cls:'lv-WARN'},
   TARGET_LOCKED:{n:'대상 종목 잠금(Target Locked)',cls:''},
   F3_SKIPPED:{n:'F3 진입 생략(F3 Skipped)',cls:'lv-WARN'},
+  F3_RECHECK:{n:'F3 진입 전 재검증(F3 Recheck)',cls:''},
+  ENTRY_ORDER_SENT:{n:'진입 주문 전송(Entry Order Sent)',cls:''},
+  ENTRY_RETRY_START:{n:'진입 재시도 시작(Entry Retry Start)',cls:'lv-WARN'},
+  ENTRY_RETRY_SKIPPED:{n:'진입 재시도 생략(Entry Retry Skipped)',cls:'lv-WARN'},
+  ENTRY_FILL_POLL_TIMEOUT:{n:'진입 체결조회 시간초과(Entry Fill Poll Timeout)',cls:'lv-WARN'},
+  ENTRY_CANCEL_SENT:{n:'진입 주문 취소 전송(Entry Cancel Sent)',cls:'lv-WARN'},
   ENTRY_EXECUTED:{n:'진입 체결(Entry Executed)',cls:''},
   ENTRY_FAIL:{n:'진입 실패(Entry Failed)',cls:'lv-WARN'},
   GAP_CHANGED:{n:'진입 전 갭 변동(Gap Changed)',cls:'lv-WARN'},
@@ -443,13 +452,26 @@ function renderLogs(logs) {
 function buildLogDetail(l) {
   const parts=[];
   if(l.ticker) parts.push(l.ticker);
+  if(l.reason) parts.push(`사유 ${l.reason}`);
+  if(l.order_id) parts.push(`주문 ${l.order_id}`);
   if(l.offset_ms!=null) parts.push(`+${l.offset_ms}ms ${l.level}`);
   if(l.ntp_server) parts.push(l.ntp_server);
+  if(l.order_price) parts.push(`주문가 ${fmt(l.order_price)}원`);
+  if(l.order_qty) parts.push(`주문 ${fmt(l.order_qty)}주`);
+  if(l.entry_attempt!=null && l.max_attempts!=null) parts.push(`시도 ${fmt(l.entry_attempt)}/${fmt(l.max_attempts)}`);
   if(l.entry_price) parts.push(`진입 ${fmt(l.entry_price)}원`);
   if(l.exit_price)  parts.push(`청산 ${fmt(l.exit_price)}원`);
   if(l.pnl_pct!=null) parts.push(`P&L ${fmtPct(l.pnl_pct)}`);
   if(l.fill_qty)    parts.push(`${fmt(l.fill_qty)}주`);
   if(l.gap_pct)     parts.push(`갭 ${fmtPct(l.gap_pct)}`);
+  if(l.cash!=null) parts.push(`현금 ${fmt(l.cash)}`);
+  if(l.poll_attempts!=null) parts.push(`조회 ${fmt(l.poll_attempts)}회`);
+  if(l.poll_last_output_count!=null) parts.push(`체결조회 ${fmt(l.poll_last_output_count)}건`);
+  if(l.poll_last_matched===true) parts.push('주문매칭');
+  if(l.poll_last_ccld_qty!=null && l.poll_last_ccld_qty>0) parts.push(`체결 ${fmt(l.poll_last_ccld_qty)}주`);
+  if(l.rt_cd!=null) parts.push(`rt ${l.rt_cd}`);
+  if(l.msg_cd) parts.push(l.msg_cd);
+  if(l.poll_last_msg_cd) parts.push(`last ${l.poll_last_msg_cd}`);
   if(l.raw_count!=null) parts.push(`raw ${fmt(l.raw_count)}`);
   if(l.ranking_pass!=null) parts.push(`ranking ${fmt(l.ranking_pass)}`);
   if(l.expected_pass!=null) parts.push(`expected ${fmt(l.expected_pass)}`);
@@ -458,6 +480,9 @@ function buildLogDetail(l) {
   if(l.mismatch_count!=null) parts.push(`불일치 ${fmt(l.mismatch_count)}`);
   if(l.count!=null && l.path) parts.push(`${fmt(l.count)}건 저장`);
   if(l.error)       parts.push(l.error.substring(0,40));
+  if(l.poll_last_error) parts.push(l.poll_last_error.substring(0,40));
+  if(l.msg1)        parts.push(String(l.msg1).substring(0,40));
+  if(l.poll_last_msg1) parts.push(String(l.poll_last_msg1).substring(0,40));
   if(l.message)     parts.push(l.message.substring(0,60));
   if(l.token_prefix) parts.push(l.token_prefix);
   return parts.join(' · ')||l.event;

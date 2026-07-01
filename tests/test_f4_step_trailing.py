@@ -11,7 +11,9 @@ from src.modules.f4_tracking import (
     HARD_STOP_RATIO,
     STEP_SIZE,
     STEP_TRAIL,
+    _execute_close,
     _process_tick,
+    _run_dry_ticks,
 )
 
 KST = ZoneInfo("Asia/Seoul")
@@ -200,3 +202,45 @@ async def test_highest_step_advances_to_new_high():
     price = ENTRY * (1 + STEP_SIZE * 2)  # 10500
     await _run_tick(price)
     assert _state_mod.get().highest_step == pytest.approx(STEP_SIZE * 2)
+
+
+async def test_dry_run_execute_close_does_not_touch_order_db(monkeypatch):
+    s = _state_mod.get()
+    s.trade_id = 123
+    s.highest_step = STEP_SIZE
+    monkeypatch.setenv("DRY_RUN", "1")
+
+    record_order = AsyncMock()
+    update_order_fill = AsyncMock()
+    close_trade = AsyncMock()
+    persist = AsyncMock()
+
+    monkeypatch.setattr("src.modules.f4_tracking.db.record_order", record_order)
+    monkeypatch.setattr("src.modules.f4_tracking.db.update_order_fill", update_order_fill)
+    monkeypatch.setattr("src.modules.f4_tracking.db.close_trade", close_trade)
+    monkeypatch.setattr("src.modules.f4_tracking.state.persist", persist)
+    monkeypatch.setattr("src.modules.f4_tracking.notifier.send", AsyncMock())
+
+    await _execute_close(ENTRY * 1.01, "TRAILING")
+
+    record_order.assert_not_awaited()
+    update_order_fill.assert_not_awaited()
+    close_trade.assert_not_awaited()
+    persist.assert_awaited_once()
+
+
+async def test_dry_run_ticks_finish_below_trailing_stop(monkeypatch):
+    events = []
+    s = _state_mod.get()
+    s.entry_price = ENTRY
+    s.position_status = "HOLDING"
+
+    monkeypatch.setenv("DRY_RUN_STEP_DELAY", "0")
+    monkeypatch.setattr("src.modules.f4_tracking.log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr("src.modules.f4_tracking._process_tick", AsyncMock())
+
+    await _run_dry_ticks("005930", _spike_always_pass())
+
+    start_event = [kwargs for event, kwargs in events if event == "DRY_RUN_F4_START"][0]
+    prices = start_event["prices"]
+    assert prices[-1] < ENTRY * (1 + STEP_SIZE - STEP_TRAIL)

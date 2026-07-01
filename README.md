@@ -1,165 +1,192 @@
-# DAILY 1 — 갭업 자동매매 시스템
+# DAILY 1 갭업 자동매매 시스템
 
-KOSPI/KOSDAQ 장전 갭업 종목을 자동으로 탐색·진입·추적 청산하는 Python 자동매매 봇.  
-한국투자증권(KIS) OpenAPI 사용. PAPER(모의투자) / REAL(실계좌) 전환 가능.
+KOSPI/KOSDAQ 장전 갭업 후보를 자동으로 찾고, 09:00 전후 진입부터 10:00 전량 청산까지 관리하는 Python 자동매매 봇입니다. 한국투자증권(KIS) OpenAPI를 사용하며 `PAPER` 모의투자와 `REAL` 실계좌 전환을 지원합니다.
 
----
+## 핵심 흐름
 
-## 트레이딩 로직
-
-장전 8:40부터 10:00까지 5단계 파이프라인이 순차 실행된다.
-
-```
-F1 (08:40)  갭 필터링  →  +3~7% 갭업 + 유동성 상위 10% 종목 선별
-F2 (08:58)  종목 잠금  →  1순위 종목 최종 확정
-F3 (08:59:40) 진입    →  갭 재검증 → 70% 시장가 진입 → 30% 피라미딩
-F4 (09:00~)  추적 관리 →  WebSocket 실시간 틱 수신, Step Trailing / Hard Stop
-F5 (10:00)  타임아웃   →  잔여 포지션 전량 청산
+```text
+F1 08:40        장전 후보 스캔: 갭/유동성 필터 + 예상체결가 보강
+F2 08:58        대상 종목 잠금: 유동성, 예상금액, VI 근접 여부 확인
+F3 08:59:40     진입: 갭 재검증, 매수 주문, 미체결 시 짧은 재시도
+F4 09:00~       보유 추적: WebSocket/REST 가격 추적, Step Trailing, Hard Stop
+F5 10:00        타임아웃 청산: 남은 수량 시장가 전량 청산
 ```
 
-**청산 조건**
-
-| 방식 | 조건 |
-|---|---|
-| Step Trailing | +2.5% 스텝 도달 후 -1.5% 하락 시 청산 |
-| Hard Stop | Trailing 미활성 구간에서 진입가 -2.0% 이탈 |
-| Timeout | 10:00 강제 청산 |
-
----
+F3 진입이 실패하면 주문 취소와 실패 사유를 로그로 남기고 당일 진입을 종료합니다. UI 하단 파이프라인은 현재 포지션 상태뿐 아니라 오늘 로그 기준 진행 단계도 반영하므로, 진입 실패 후 `IDLE`로 돌아가도 F3 실패까지 진행된 것으로 표시됩니다.
 
 ## 설치
 
-**Python 3.11+ 필요**
+Python 3.12 기준으로 개발되었습니다.
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-```
-
-개발 도구(테스트·린트) 포함 설치:
-```powershell
 pip install -r requirements-dev.txt
 ```
 
----
+## 환경변수
 
-## 환경변수 설정
+`.env.example`을 복사해 `.env`를 만들고 실제 값을 입력합니다.
 
-`.env` 파일을 편집한다. 기본값은 모의투자(PAPER) 설정.
-
-```env
-KIS_MODE=PAPER          # PAPER | REAL
-
-# 모의투자 API 키 (실계좌 전환 시 아래 주석 처리된 4줄과 교체)
-KIS_APP_KEY=...
-KIS_APP_SECRET=...
-KIS_ACCT_NO=...
-KIS_BASE_URL=https://openapivts.koreainvestment.com:29443
-
-KIS_ACCT_CD=01
-
-TELEGRAM_BOT_TOKEN=...  # 알림 수신용
-TELEGRAM_CHAT_ID=...
-
-NTP_SERVER=time.google.com,time.windows.com,kr.pool.ntp.org  # 쉼표로 구분, 순서대로 폴백
-UI_PORT=8000
+```powershell
+copy .env.example .env
 ```
 
----
+주요 값:
+
+```env
+KIS_MODE=PAPER
+KIS_APP_KEY=your_app_key_here
+KIS_APP_SECRET=your_app_secret_here
+KIS_ACCOUNT_NO=12345678-01
+KIS_ACCOUNT_TYPE=01
+KIS_BASE_URL=https://openapivts.koreainvestment.com:29443
+KIS_WS_URL=ws://ops.koreainvestment.com:31000
+
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+TELEGRAM_CHAT_ID=your_chat_id_here
+
+KIS_RATE_INTERVAL_SEC=0.10
+F1_EXPECTED_QUOTE_CONCURRENCY=2
+F1_MARKET_INTERVAL_SEC=2.0
+
+F3_ENTRY_MAX_ATTEMPTS=2
+F3_ENTRY_RETRY_DELAY_SEC=0.5
+F3_ENTRY_RETRY_FILL_SEC=3.0
+F3_ENTRY_RETRY_DEADLINE=09:00:08
+```
+
+실계좌 전환 시에는 `KIS_MODE=REAL`, 실계좌 URL, 실계좌 번호를 모두 확인한 뒤 소액으로 검증하세요.
 
 ## 실행
 
 ```powershell
-# 가상환경 활성화 (d:\Private\stock 폴더에서 터미널 열면 자동 활성화됨)
 .\.venv\Scripts\Activate.ps1
-
-# 봇 시작
 python main.py
 ```
 
-봇이 시작되면:
-- 스케줄러가 F1~F5 작업을 KST 기준으로 자동 실행
-- **08:40~09:00 사이 기동** 시 F1 missed 감지 → F1→F2→F3 즉시 보완 실행
-- **Web UI**: http://localhost:8000 에서 실시간 모니터링
-- **로그**: `data/logs/YYYYMMDD.jsonl`
-- **DB**: `data/db/trading.db` (SQLite, WAL 모드)
+실행 후:
 
-**로그 실시간 확인:**
+- 스케줄러가 KST 기준으로 F1~F5 작업을 자동 실행합니다.
+- 08:40~09:00 사이에 켜면 catch-up으로 F1/F2/F3를 보완 실행합니다.
+- Web UI는 기본 `http://localhost:8080`에서 열립니다.
+- 로그는 `data/logs/YYYYMMDD.jsonl`에 기록됩니다.
+- DB는 `data/db/trading.db`를 사용합니다.
+
+로그 실시간 확인:
+
 ```powershell
 Get-Content data\logs\(Get-Date -Format 'yyyyMMdd').jsonl -Wait
 ```
 
-**프로세스 종료:**
-```powershell
-# 터미널에서 Ctrl+C  (권장)
+종료:
 
-# 또는 PID로 강제 종료
+```powershell
+# 권장: 실행 터미널에서 Ctrl+C
+
+# 필요 시 PID 파일 기반 종료
 Stop-Process -Id (Get-Content main.pid) -Force
 ```
 
----
+## DRY_RUN
+
+외부 KIS 인증/API/주문/WebSocket 없이 F1~F4 흐름을 확인하는 안전한 테스트 모드입니다.
+
+```env
+DRY_RUN=1
+DRY_RUN_TICKER=005930
+DRY_RUN_PREV_CLOSE=10000
+DRY_RUN_EXPECTED_PRICE=10300
+DRY_RUN_EXPECTED_QTY=500000
+DRY_RUN_ENTRY_PRICE=10300
+DRY_RUN_ENTRY_QTY=10
+```
+
+DRY_RUN 데이터는 운영 데이터와 분리됩니다.
+
+```text
+data/dry_run/logs
+data/dry_run/state
+data/dry_run/db
+```
 
 ## Web UI
 
-`http://localhost:8000` — 봇과 같은 asyncio 루프에서 FastAPI로 동작.
+FastAPI 서버가 봇과 같은 이벤트 루프에서 실행됩니다.
 
-| 탭 | 내용 |
+| 화면 | 내용 |
 |---|---|
-| 오늘 | 현재 포지션, 실시간 틱 가격, Arc 진행 게이지, 이벤트 로그 |
-| 이력 | 전체 거래 내역 테이블 (SQLite) |
-| 통계 | 승률 도넛, 청산 사유별 손익, 월별 누적 손익 |
+| 오늘 | 현재 상태, F1 후보, 가격/손익, 하단 진행 파이프라인, 이벤트 로그 |
+| 우선 선정 | F1 스냅샷 후보 목록과 통과 가능성 우선 정렬 |
+| 이력 | SQLite 거래 이력 |
+| 통계 | 승률, 평균 손익, 청산 사유별 성과 |
 
----
+하단 파이프라인은 `/api/status`의 `pipeline_stage`, `pipeline_failed`를 사용합니다. 예를 들어 오늘 F3에서 미체결 실패가 발생하면 상태가 다시 `IDLE`이어도 F3 실패 단계가 유지됩니다.
+
+## Telegram 알림
+
+Telegram 알림은 내부 로그 코드가 아니라 운영자가 바로 이해할 수 있는 형식으로 전송됩니다.
+
+```text
+긴급: 전일 포지션 잔류 의심
+상황: 이전 거래일 상태 파일에 포지션 정보가 남아 있습니다.
+조치: 계좌 보유 수량과 미체결 주문을 확인하고, 필요하면 수동 정리 후 재시작하세요.
+세부: date=20260630
+코드: STALE_POSITION_DETECTED
+```
+
+형식은 `제목 -> 상황 -> 조치 -> 세부 -> 코드` 순서입니다.
 
 ## 프로젝트 구조
 
-```
-main.py                 # 진입점 — 스케줄러 + uvicorn 부트스트랩
+```text
+main.py
 src/
-  live.py               # 모듈 간 공유 라이브 상태 (틱, WS, NTP)
-  state.py              # 인메모리 포지션 상태 + today_state.json 영속화
-  db.py                 # SQLite (trades / orders / partial_exits)
-  notifier.py           # Telegram 알림 워커
-  scheduler.py          # APScheduler F1~F5 등록
   api/
     auth.py             # KIS OAuth2 토큰 관리
-    kis_rest.py         # KIS REST 클라이언트
+    kis_rest.py         # KIS REST 클라이언트 + 전역 rate limit
     kis_ws.py           # KIS WebSocket 클라이언트
-    server.py           # FastAPI Web UI 서버
+    server.py           # FastAPI Web UI API
   modules/
-    f1_filter.py        # 갭/유동성 필터
-    f2_lockup.py        # 종목 잠금
-    f3_entry.py         # 진입 주문 + 피라미딩
-    f4_tracking.py      # Step Trailing / Hard Stop
-    f5_timeout.py       # 타임아웃 청산
+    f1_filter.py        # F1 후보 스캔, 예상체결가 보강, 스냅샷 저장
+    f2_lockup.py        # F2 대상 종목 잠금
+    f3_entry.py         # F3 진입 주문, 재시도, 실패 로그
+    f4_tracking.py      # F4 Step Trailing / Hard Stop
+    f5_timeout.py       # F5 10시 청산
+  db.py                 # SQLite CRUD
+  live.py               # UI/WS 공유 라이브 상태
+  notifier.py           # Telegram 알림 큐와 문구 포매터
+  scheduler.py          # APScheduler 등록
+  state.py              # 인메모리 상태 + today_state.json 복구
   utils/
-    logger.py           # JSONL 로거
-    time_sync.py        # NTP 시각 검증
-    spike_filter.py     # 틱 스파이크 필터
-data/
-  logs/                 # YYYYMMDD.jsonl 일별 로그
-  state/                # today_state.json (재시작 복구용)
-  db/                   # trading.db
-  auth/                 # KIS 토큰 캐시
-docs/html/
-  index.html            # 프로덕션 Web UI
-  ui_mockup.html        # 정적 목업 (디자인 참고용)
+    logger.py           # JSONL 이벤트 로그
+    spike_filter.py
+    time_sync.py
+docs/
+  PRD.md
+  DEV_ENV.md
+  CODING_GUIDELINES.md
+  UI_DESIGN.md
+  DB_DESIGN.md
+  SPRINT.md
+  html/                 # Web UI 정적 파일
+tests/
 ```
-
----
 
 ## 테스트
 
-```powershell
-pytest tests/ -v
-```
+현재 기준 검증 명령:
 
----
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_kis_rest.py tests\test_f1_filter.py tests\test_f2_lockup.py tests\test_f3_entry.py tests\test_f4_step_trailing.py tests\test_api_server.py tests\test_notifier.py -q -p no:cacheprovider
+.\.venv\Scripts\python.exe -m ruff check src\notifier.py tests\test_notifier.py
+```
 
 ## 주의사항
 
-- **PC를 켜둬야 함** — 봇은 스케줄러 기반으로 장중 실행. 서버 프로세스가 종료되면 거래 없음.
-- **PAPER → REAL 전환** — `.env`에서 `KIS_MODE=REAL`로 변경 후 실계좌 API 키 4줄로 교체.
-- **NTP 오차** — 500ms 초과 시 CRIT 경고. `NTP_SERVER`에 쉼표로 구분된 서버 목록을 지정하면 순서대로 폴백. 기본값: `time.google.com,time.windows.com,kr.pool.ntp.org`.
-- **재시작 복구** — 장중 프로세스가 죽어도 `today_state.json`으로 HOLDING 포지션 자동 복구.
+- 장중에는 PC와 프로세스가 계속 실행 중이어야 합니다.
+- `.env`는 커밋하지 않습니다.
+- `REAL` 전환 전에는 PAPER에서 주문/체결/취소 흐름을 충분히 검증하세요.
+- KIS 모의투자는 장전 예상체결가, KOSDAQ 랭킹 조회 등 일부 응답이 실계좌와 다를 수 있습니다.
+- `STALE_POSITION_DETECTED`가 오면 실제 계좌 보유 수량과 미체결 주문을 먼저 확인하세요.

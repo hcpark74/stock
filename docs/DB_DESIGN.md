@@ -333,3 +333,24 @@ F5  execute()           → orders.record_order(TIMEOUT_SELL)
 2. **WAL 체크포인트** — 프로세스 정상 종료 시 자동 체크포인트. 비정상 종료 후 재시작해도 WAL에서 복구됨.
 3. **today_state.json 병행 유지** — DB는 분석/이력용. 운영 중 빠른 상태 읽기는 여전히 `state.py` 인메모리 + `today_state.json`.
 4. **마이그레이션** — 스키마 변경 시 `ALTER TABLE` 또는 버전 테이블(`schema_version`) 관리 필요 (현재 미구현).
+---
+
+## 2026-07-01 기록 정책 업데이트
+
+### DRY_RUN 데이터 분리
+
+- `DRY_RUN=1` 실행 시 운영 DB와 분리된 `DRY_RUN_DB_DIR` 경로를 사용한다.
+- 기본값은 `data/dry_run/db`이며, 운영 DB(`data/db/trading.db`)를 오염시키지 않는다.
+- DRY_RUN에서 상태 충돌로 F3가 생략되면 `daily_skips`에 `DRY_RUN_F3_SKIPPED` 사유를 기록한다.
+
+### F3 실패 기록
+
+- 진입 주문이 최종 미체결이면 `daily_skips.reason='ENTRY_FAIL'`로 기록한다.
+- `detail`에는 가능한 경우 주문번호, 실패 사유, 체결조회 요약을 포함한다.
+- 주문 전송 후 미체결이면 실제 미체결 주문 취소 이벤트는 로그(`ENTRY_CANCEL_SENT`)에 남긴다.
+
+### 로그와 DB 역할 구분
+
+- 주문/체결의 영속 기록은 `orders`, `trades`, `daily_skips`가 담당한다.
+- 재시도 시도 횟수, 체결조회 타임아웃, KIS 응답 코드처럼 진단용 세부 정보는 JSONL 이벤트 로그에 남긴다.
+- UI의 하단 파이프라인 진행 단계는 DB가 아니라 당일 JSONL 로그를 기준으로 계산한다.

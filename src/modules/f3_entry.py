@@ -17,6 +17,10 @@ ALLOC_RATIO = 0.10         # 자본 대비 10% 투입
 FIRST_RATIO = 0.70         # 1차 70%
 SLIPPAGE_LIMIT = 0.005     # 슬리피지 허용 +0.5%
 PYRAMID_MIN_UP = 0.005     # 피라미딩 조건 +0.5% 이상 유지
+F3_ENTRY_MAX_ATTEMPTS = max(1, int(os.getenv("F3_ENTRY_MAX_ATTEMPTS", "2")))
+F3_ENTRY_RETRY_DELAY_SEC = float(os.getenv("F3_ENTRY_RETRY_DELAY_SEC", "0.5"))
+F3_ENTRY_RETRY_FILL_SEC = float(os.getenv("F3_ENTRY_RETRY_FILL_SEC", "3.0"))
+F3_ENTRY_RETRY_DEADLINE = os.getenv("F3_ENTRY_RETRY_DEADLINE", "09:00:08")
 
 # KIS TR ID (PAPER/REAL 분기) — 신TR 기준
 _BUY_TR    = {"REAL": "TTTC0012U", "PAPER": "VTTC0012U"}
@@ -25,6 +29,7 @@ _CANCEL_TR = {"REAL": "TTTC0013U", "PAPER": "VTTC0013U"}
 _CCLD_TR   = {"REAL": "TTTC0081R", "PAPER": "VTTC0081R"}
 _BAL_TR    = {"REAL": "TTTC8434R", "PAPER": "VTTC8434R"}
 
+_last_fill_poll_summary: dict = {}
 _pending_buy_org_no: str = ""  # 매수 주문 후 저장, 취소 시 사용
 
 
@@ -52,6 +57,16 @@ async def run(force: bool = False) -> None:
     expected_price, prev_close = await _fetch_expected_price(ticker)
     if prev_close and expected_price:
         gap = (expected_price / prev_close) - 1
+        log(
+            "F3_RECHECK",
+            level="INFO",
+            ticker=ticker,
+            expected_price=expected_price,
+            prev_close=prev_close,
+            gap_pct=round(gap * 100, 2),
+            gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
+            gap_max_pct=round(GAP_MAX_RECHECK * 100, 2),
+        )
         if not (GAP_MIN_RECHECK <= gap < GAP_MAX_RECHECK):
             s.day_skip = True
             s.close_reason = "GAP_CHANGED"
@@ -69,11 +84,22 @@ async def run(force: bool = False) -> None:
     cash = await _fetch_available_cash()
     total_amount = int(cash * ALLOC_RATIO)
     if not expected_price or expected_price == 0:
+        log(
+            "ENTRY_FAIL",
+            level="WARN",
+            ticker=ticker,
+            order_id=None,
+            order_price=expected_price,
+            order_qty=0,
+            cash=cash,
+            reason="PRICE_UNAVAILABLE",
+        )
         return
     total_qty = int(total_amount / expected_price)
     if total_qty == 0:
         log("INSUFFICIENT_BALANCE", level="WARN", ticker=ticker,
-            filter_count=0, reason="QTY_ZERO")
+            cash=cash, alloc_ratio=ALLOC_RATIO, order_price=expected_price,
+            total_amount=total_amount, filter_count=0, reason="QTY_ZERO")
         s.day_skip = True
         return
 
@@ -86,26 +112,105 @@ async def run(force: bool = False) -> None:
         return
 
     global _pending_buy_org_no
-    order_resp = await _send_buy(ticker, first_qty, mode)
-    order_id = order_resp.get("output", {}).get("ODNO", "UNKNOWN")
-    _pending_buy_org_no = order_resp.get("output", {}).get("KRX_FWDG_ORD_ORGNO", "")
+    fill = None
+    order_id = "UNKNOWN"
+    max_attempts = F3_ENTRY_MAX_ATTEMPTS if not force else 1
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            if not _before_deadline(_entry_retry_deadline()):
+                log(
+                    "ENTRY_RETRY_SKIPPED",
+                    level="WARN",
+                    ticker=ticker,
+                    order_price=expected_price,
+                    order_qty=first_qty,
+                    entry_attempt=attempt,
+                    max_attempts=max_attempts,
+                    reason="DEADLINE_REACHED",
+                )
+                break
+            await asyncio.sleep(F3_ENTRY_RETRY_DELAY_SEC)
+            log(
+                "ENTRY_RETRY_START",
+                level="WARN",
+                ticker=ticker,
+                order_price=expected_price,
+                order_qty=first_qty,
+                entry_attempt=attempt,
+                max_attempts=max_attempts,
+            )
 
-    # ── 1차 체결 확인 (08:59:50 ~ 09:00:00, 1초 간격) ───────────────
-    if force:
-        dl = datetime.now(KST) + timedelta(seconds=30)
-        fill_deadline = (dl.hour, dl.minute, dl.second)
-    else:
-        fill_deadline = (9, 0, 0)
-    fill = await _poll_fill(order_id, deadline=fill_deadline)
+        order_resp = await _send_buy(ticker, first_qty, mode)
+        order_id = order_resp.get("output", {}).get("ODNO", "UNKNOWN")
+        _pending_buy_org_no = order_resp.get("output", {}).get("KRX_FWDG_ORD_ORGNO", "")
+        log(
+            "ENTRY_ORDER_SENT",
+            level="INFO",
+            ticker=ticker,
+            order_id=order_id,
+            org_no=_pending_buy_org_no,
+            order_price=expected_price,
+            order_qty=first_qty,
+            order_type="MARKET",
+            mode=mode,
+            entry_attempt=attempt,
+            max_attempts=max_attempts,
+            rt_cd=order_resp.get("rt_cd"),
+            msg_cd=order_resp.get("msg_cd"),
+            msg1=order_resp.get("msg1"),
+        )
+        if order_id == "UNKNOWN" or str(order_resp.get("rt_cd", "0")) != "0":
+            await state.reset_to_idle("ENTRY_FAIL")
+            log(
+                "ENTRY_FAIL",
+                level="WARN",
+                ticker=ticker,
+                order_id=order_id,
+                order_price=expected_price,
+                order_qty=first_qty,
+                entry_attempt=attempt,
+                max_attempts=max_attempts,
+                reason="ORDER_REJECTED",
+                rt_cd=order_resp.get("rt_cd"),
+                msg_cd=order_resp.get("msg_cd"),
+                msg1=order_resp.get("msg1"),
+            )
+            await db.record_skip(_today(), "ENTRY_FAIL", f"order_id={order_id},reason=ORDER_REJECTED")
+            return
+
+        fill_deadline = _entry_fill_deadline(attempt, force)
+        fill = await _poll_fill(order_id, deadline=fill_deadline, ticker=ticker)
+        if fill:
+            break
+
+        cancel_resp = await _cancel_order(order_id, _pending_buy_org_no, mode)
+        log(
+            "ENTRY_CANCEL_SENT",
+            level="WARN",
+            ticker=ticker,
+            order_id=order_id,
+            org_no=_pending_buy_org_no,
+            entry_attempt=attempt,
+            max_attempts=max_attempts,
+            rt_cd=cancel_resp.get("rt_cd"),
+            msg_cd=cancel_resp.get("msg_cd"),
+            msg1=cancel_resp.get("msg1"),
+        )
+
     if not fill:
-        await _cancel_order(order_id, _pending_buy_org_no, mode)
         await state.reset_to_idle("ENTRY_FAIL")
         log("ENTRY_FAIL", level="WARN", ticker=ticker,
             order_id=order_id, order_price=expected_price,
-            order_qty=first_qty, reason="UNFILLED")
+            order_qty=first_qty, entry_attempt=max_attempts,
+            max_attempts=max_attempts, reason="UNFILLED",
+            **_last_fill_poll_summary)
         await notifier.send("ENTRY_FAIL", level="WARN",
                             message=f"진입 미체결. {ticker}")
-        await db.record_skip(_today(), "ENTRY_FAIL", f"order_id={order_id}")
+        await db.record_skip(
+            _today(),
+            "ENTRY_FAIL",
+            f"order_id={order_id},reason=UNFILLED,attempts={max_attempts},poll_attempts={_last_fill_poll_summary.get('poll_attempts', 0)}",
+        )
         return
 
     fill_price: float = fill["fill_price"]
@@ -151,7 +256,7 @@ async def run(force: bool = False) -> None:
         py_resp = await _send_buy(ticker, second_qty, mode)
         py_id     = py_resp.get("output", {}).get("ODNO", "")
         py_org_no = py_resp.get("output", {}).get("KRX_FWDG_ORD_ORGNO", "")
-        py_fill = await _poll_fill(py_id, deadline=(9, 0, 20))
+        py_fill = await _poll_fill(py_id, deadline=(9, 0, 20), ticker=ticker)
         if not py_fill:
             if py_id and py_org_no:
                 await _cancel_order(py_id, py_org_no, mode)
@@ -193,6 +298,50 @@ async def _sleep_until(h: int, m: int, s: int) -> None:
         await asyncio.sleep(delta)
 
 
+def _parse_deadline(value: str, default: tuple[int, int, int]) -> tuple[int, int, int]:
+    try:
+        h, m, s = [int(part) for part in value.split(":")]
+        return h, m, s
+    except (ValueError, AttributeError) as exc:
+        log(
+            "F3_DEADLINE_PARSE_ERROR",
+            level="WARN",
+            value=str(value),
+            default=f"{default[0]:02d}:{default[1]:02d}:{default[2]:02d}",
+            error=repr(exc),
+        )
+        return default
+
+
+def _deadline_datetime(deadline: tuple[int, int, int]) -> datetime:
+    h, m, s = deadline
+    return datetime.now(KST).replace(hour=h, minute=m, second=s, microsecond=0)
+
+
+def _entry_retry_deadline() -> tuple[int, int, int]:
+    return _parse_deadline(F3_ENTRY_RETRY_DEADLINE, (9, 0, 8))
+
+
+def _before_deadline(deadline: tuple[int, int, int]) -> bool:
+    return datetime.now(KST) < _deadline_datetime(deadline)
+
+
+def _deadline_after_seconds(seconds: float) -> tuple[int, int, int]:
+    target = datetime.now(KST) + timedelta(seconds=seconds)
+    return target.hour, target.minute, target.second
+
+
+def _entry_fill_deadline(attempt: int, force: bool) -> tuple[int, int, int]:
+    if force:
+        return _deadline_after_seconds(30)
+    if attempt == 1:
+        return 9, 0, 0
+
+    retry_deadline = _deadline_datetime(_entry_retry_deadline())
+    target = min(datetime.now(KST) + timedelta(seconds=F3_ENTRY_RETRY_FILL_SEC), retry_deadline)
+    return target.hour, target.minute, target.second
+
+
 async def _run_dry_entry(ticker: str) -> None:
     expected_price = float(os.getenv("DRY_RUN_EXPECTED_PRICE", "10300"))
     fill_price = float(os.getenv("DRY_RUN_ENTRY_PRICE", str(expected_price)))
@@ -201,6 +350,7 @@ async def _run_dry_entry(ticker: str) -> None:
 
     if not await state.set_entering():
         log("DRY_RUN_F3_SKIPPED", level="WARN", ticker=ticker, reason="STATE_NOT_IDLE")
+        await db.record_skip(_today(), "DRY_RUN_F3_SKIPPED", "reason=STATE_NOT_IDLE")
         return
 
     await asyncio.sleep(float(os.getenv("DRY_RUN_STEP_DELAY", "0.2")))
@@ -318,16 +468,33 @@ async def _cancel_order(order_id: str, org_no: str, mode: str) -> dict:
     )
 
 
-async def _poll_fill(order_id: str, deadline: tuple[int, int, int]) -> dict | None:
+async def _poll_fill(order_id: str, deadline: tuple[int, int, int], ticker: str | None = None) -> dict | None:
     """주문 체결을 1초 간격으로 폴링. deadline(시, 분, 초) 도달 시 None."""
+    global _last_fill_poll_summary
     h, m, s = deadline
     mode = os.getenv("KIS_MODE", "PAPER")
     today = datetime.now(KST).strftime("%Y%m%d")
+    attempts = 0
+    _last_fill_poll_summary = {
+        "poll_attempts": 0,
+        "poll_deadline": f"{h:02d}:{m:02d}:{s:02d}",
+        "poll_last_rt_cd": None,
+        "poll_last_msg_cd": None,
+        "poll_last_msg1": None,
+        "poll_last_output_count": 0,
+        "poll_last_matched": False,
+        "poll_last_ccld_qty": 0,
+        "poll_last_ccld_amt": 0.0,
+        "poll_last_error": None,
+    }
     while True:
         now = datetime.now(KST)
         if now >= now.replace(hour=h, minute=m, second=s, microsecond=0):
+            log("ENTRY_FILL_POLL_TIMEOUT", level="WARN", ticker=ticker,
+                order_id=order_id, **_last_fill_poll_summary)
             return None
         try:
+            attempts += 1
             resp = await kis_rest.get(
                 "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
                 tr_id=_CCLD_TR[mode],
@@ -349,15 +516,33 @@ async def _poll_fill(order_id: str, deadline: tuple[int, int, int]) -> dict | No
                     "CTX_AREA_NK100": "",
                 },
             )
-            for item in resp.get("output1", []):
+            rows = resp.get("output1", []) or []
+            _last_fill_poll_summary.update({
+                "poll_attempts": attempts,
+                "poll_last_rt_cd": resp.get("rt_cd"),
+                "poll_last_msg_cd": resp.get("msg_cd"),
+                "poll_last_msg1": resp.get("msg1"),
+                "poll_last_output_count": len(rows),
+                "poll_last_matched": False,
+                "poll_last_error": None,
+            })
+            for item in rows:
                 if item.get("odno") == order_id:
                     tot_qty = int(item.get("tot_ccld_qty") or 0)
                     tot_amt = float(item.get("tot_ccld_amt") or 0)
+                    _last_fill_poll_summary.update({
+                        "poll_last_matched": True,
+                        "poll_last_ccld_qty": tot_qty,
+                        "poll_last_ccld_amt": tot_amt,
+                    })
                     if tot_qty > 0:
                         return {
                             "fill_price": round(tot_amt / tot_qty),
                             "fill_qty": tot_qty,
                         }
-        except Exception:
-            pass
+        except Exception as exc:
+            _last_fill_poll_summary.update({
+                "poll_attempts": attempts,
+                "poll_last_error": str(exc)[:160],
+            })
         await asyncio.sleep(1)

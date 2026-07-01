@@ -190,3 +190,37 @@ src/web/
 2. **모바일 미지원**: 아크 캔버스와 테이블이 좁은 화면에 최적화되어 있지 않음.
 3. **브라우저 보안**: `data/db/trading.db`는 Python 서버 없이 브라우저에서 직접 접근 불가.
 4. **NTP 경고 임계값**: ±200ms 초과 시 상태 바 점이 Amber로 전환 (PRD §4 기준).
+---
+
+## 7. 2026-07-01 UI 동작 업데이트
+
+### 하단 파이프라인
+
+- 하단 파이프라인은 단순 `position_status`가 아니라 `/api/status`의 `pipeline_stage`, `pipeline_failed`를 우선 사용한다.
+- `pipeline_stage` 인덱스는 다음 의미를 가진다.
+  - `0`: F1 스캔
+  - `1`: F1 완료
+  - `2`: F2 잠금 또는 F3 진입 시도
+  - `3`: F4 Step Trailing
+  - `4`: F5 타임아웃 또는 종료 단계
+- `pipeline_failed=true`이면 현재 단계는 실패 색상으로 표시한다.
+- 예: F3 미체결 실패 후 `position_status=IDLE`로 돌아가도 하단은 `F1 완료 > F2 완료 > F3 실패` 흐름을 유지한다.
+
+### F1 후보 패널
+
+- 후보 목록은 원 랭킹 순서보다 통과 가능성을 우선한다.
+- 정렬 우선순위는 선정 후보, 갭 통과, 예상체결 갭 통과, 랭킹 갭 통과, 예상체결 유효성, 거래대금 순이다.
+- `HIGH_GAP_VI_UNKNOWN`은 UI에서 `VI미확인`으로 표시한다.
+- 스냅샷이 존재하면 F1 로그 상태가 `IDLE`이어도 후보 요약을 표시한다.
+
+### 이벤트 로그
+
+- F3 진입 과정의 세부 이벤트를 표시한다.
+  - `F3_RECHECK`
+  - `ENTRY_ORDER_SENT`
+  - `ENTRY_FILL_POLL_TIMEOUT`
+  - `ENTRY_CANCEL_SENT`
+  - `ENTRY_RETRY_START`
+  - `ENTRY_RETRY_SKIPPED`
+  - `ENTRY_FAIL`
+- 주문번호, 주문가, 주문수량, 재시도 횟수, 체결조회 요약은 이벤트 상세 텍스트에 함께 노출한다.

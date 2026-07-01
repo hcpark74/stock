@@ -26,7 +26,8 @@ F1_DEADLINE_M = 58
 F1_RETRY_INTERVAL_SEC = int(os.getenv("F1_RETRY_INTERVAL_SEC", "30"))
 F1_SNAPSHOT_DIR = os.getenv("F1_SNAPSHOT_DIR", "data/f1_snapshots")
 F1_SNAPSHOT_KEEP = int(os.getenv("F1_SNAPSHOT_KEEP", "20"))
-F1_EXPECTED_QUOTE_CONCURRENCY = int(os.getenv("F1_EXPECTED_QUOTE_CONCURRENCY", "8"))
+F1_EXPECTED_QUOTE_CONCURRENCY = int(os.getenv("F1_EXPECTED_QUOTE_CONCURRENCY", "2"))
+F1_MARKET_INTERVAL_SEC = float(os.getenv("F1_MARKET_INTERVAL_SEC", "2.0"))
 
 _EXCLUDED_PRODUCT_KEYWORDS = (
     "ETF",
@@ -205,7 +206,11 @@ async def _fetch_all_premarket() -> list[dict]:
     quote API's expected execution price/volume when available.
     """
     results: list[dict] = []
-    for market in ("J", "Q"):
+    for index, market in enumerate(("J", "Q")):
+        if index > 0 and F1_MARKET_INTERVAL_SEC > 0:
+            log("F1_MARKET_INTERVAL", level="INFO", market=market, sleep_sec=F1_MARKET_INTERVAL_SEC)
+            await asyncio.sleep(F1_MARKET_INTERVAL_SEC)
+
         try:
             resp = await kis_rest.get(
                 "/uapi/domestic-stock/v1/ranking/fluctuation",

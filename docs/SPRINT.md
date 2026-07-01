@@ -256,3 +256,48 @@ Sprint 4까지 완료 + 아래 항목 모두 확인 후 진행.
 | `src/modules/f4_tracking.py` | ✅ 완료 | Step Trailing + REST fallback |
 | `src/modules/f5_timeout.py` | ✅ 완료 | precheck + execute 구현 |
 | `main.py` | ✅ 완료 | |
+---
+
+## 2026-07-01 보강 스프린트 — F1/F3 안정화 + DRY_RUN + UI 상태 보정 [완료]
+
+### F1 후보 조회 안정화
+
+- [x] 예상체결가 보강 조회를 세마포어 기반 동시 처리로 변경
+- [x] KIS REST 전역 rate-limit 슬롯 예약 방식 적용
+- [x] KOSPI/KOSDAQ 조회 사이 `F1_MARKET_INTERVAL_SEC` 대기 적용
+- [x] F1 스냅샷 저장/조회 경로를 `F1_SNAPSHOT_DIR` 기준으로 통일
+- [x] 음수 갭을 `NEGATIVE_GAP`으로 분류해 통과 후보에서 제외
+- [x] 오늘/우선선정 후보 표시는 랭킹 순서보다 통과 가능성 우선으로 정렬
+
+### F3 진입 재시도 및 실패 로그
+
+- [x] 진입 실패 시 짧은 재시도 정책 추가
+- [x] `ENTRY_ORDER_SENT`, `ENTRY_FILL_POLL_TIMEOUT`, `ENTRY_CANCEL_SENT`, `ENTRY_RETRY_START`, `ENTRY_RETRY_SKIPPED` 로그 추가
+- [x] 최종 미체결 주문까지 취소되는 회귀 테스트 추가
+- [x] `_poll_fill` 결과 요약을 `ENTRY_FAIL` 로그에 남기도록 보강
+- [x] 테스트 간 `_last_fill_poll_summary` 전역 오염 방지 fixture 추가
+
+### DRY_RUN
+
+- [x] F1/F3/F4 DRY_RUN 경로 추가
+- [x] DRY_RUN 로그/상태/DB 경로 분리
+- [x] `DRY_RUN_EXPECTED_QTY`, `DRY_RUN_ENTRY_PRICE` 문서화
+- [x] F4 DRY_RUN 종료 시 실제 주문/DB 경로로 빠지지 않도록 early return 적용
+
+### UI/API
+
+- [x] `/api/status`에 `pipeline_stage`, `pipeline_failed` 추가
+- [x] 하단 파이프라인이 현재 상태뿐 아니라 오늘 로그 기준 진행 단계도 반영
+- [x] `ENTRY_FAIL` 후 `IDLE`로 돌아가도 F3 실패 단계가 유지되도록 수정
+- [x] F1 후보 표에 `HIGH_GAP_VI_UNKNOWN` 표시 추가
+
+### Telegram 알림
+
+- [x] 알림 문구를 `제목 -> 상황 -> 조치 -> 세부 -> 코드` 형식으로 변경
+- [x] `STALE_POSITION_DETECTED` 등 운영자 조치가 필요한 이벤트에 사람이 읽는 메시지 규칙 추가
+- [x] Telegram `parse_mode=Markdown` 제거
+
+### 검증
+
+- [x] 관련 테스트 67개 통과
+- [x] `ruff check src/notifier.py tests/test_notifier.py` 통과

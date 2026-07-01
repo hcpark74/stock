@@ -258,10 +258,32 @@ async def test_fetch_all_premarket_requests_high_gap_band_from_api():
         seen_rates.append(kwargs["params"]["fid_rsfl_rate2"])
         return {"rt_cd": "0", "output": []}
 
-    with patch("src.api.kis_rest.get", new=fake_get):
+    with (
+        patch("src.api.kis_rest.get", new=fake_get),
+        patch("src.modules.f1_filter.F1_MARKET_INTERVAL_SEC", 0),
+    ):
         await _fetch_all_premarket()
 
     assert seen_rates == ["10.0", "10.0"]
+
+
+async def test_fetch_all_premarket_waits_between_markets(monkeypatch):
+    """F1 should pause before KOSDAQ ranking to avoid KIS burst limits."""
+    markets = []
+
+    async def fake_get(*args, **kwargs):
+        markets.append(kwargs["params"]["fid_cond_mrkt_div_code"])
+        return {"rt_cd": "0", "output": []}
+
+    with (
+        patch("src.api.kis_rest.get", new=fake_get),
+        patch("src.modules.f1_filter.F1_MARKET_INTERVAL_SEC", 1.5),
+        patch("src.modules.f1_filter.asyncio.sleep", new_callable=AsyncMock) as sleep,
+    ):
+        await _fetch_all_premarket()
+
+    assert markets == ["J", "Q"]
+    sleep.assert_awaited_once_with(1.5)
 
 
 async def test_fetch_all_premarket_enriches_expected_quotes_with_limited_concurrency(monkeypatch):
@@ -301,6 +323,7 @@ async def test_fetch_all_premarket_enriches_expected_quotes_with_limited_concurr
     with (
         patch("src.api.kis_rest.get", new=fake_get),
         patch("src.modules.f1_filter._fetch_expected_quote", new=fake_quote),
+        patch("src.modules.f1_filter.F1_MARKET_INTERVAL_SEC", 0),
     ):
         result = await _fetch_all_premarket()
 
@@ -433,6 +456,7 @@ async def test_fetch_excludes_etf_etn_leverage_inverse_products():
     with (
         patch("src.api.kis_rest.get", new=fake_get),
         patch("src.modules.f1_filter._fetch_expected_quote", new_callable=AsyncMock, return_value=None),
+        patch("src.modules.f1_filter.F1_MARKET_INTERVAL_SEC", 0),
     ):
         result = await _fetch_all_premarket()
 

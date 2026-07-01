@@ -8,8 +8,9 @@ from src.api import auth
 from src.utils.logger import log
 
 _last_call_at: float = 0.0
-_RATE_INTERVAL = 0.05  # 50ms → 초당 최대 20건 (PRD §5-2)
+_RATE_INTERVAL = float(os.getenv("KIS_RATE_INTERVAL_SEC", "0.10"))
 _TIMEOUT = 15.0        # 잔고조회 등 느린 API 대응 (문서: "조회속도가 느린 API")
+_rate_lock = asyncio.Lock()
 
 
 def _headers(tr_id: str = "") -> dict:
@@ -28,17 +29,20 @@ async def _request(method: str, path: str, tr_id: str = "", timeout: float = _TI
     """Rate-limited KIS REST 요청. 401/429 자동 처리."""
     global _last_call_at
 
-    # Rate limit (PRD §5-2)
-    wait = _RATE_INTERVAL - (time.monotonic() - _last_call_at)
-    if wait > 0:
-        await asyncio.sleep(wait)
-
     base_url = os.getenv("KIS_BASE_URL", "")
     url = base_url + path
 
     start = time.monotonic()
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    await _rate_lock.acquire()
+    try:
+        wait = _RATE_INTERVAL - (time.monotonic() - _last_call_at)
+        if wait > 0:
+            await asyncio.sleep(wait)
         _last_call_at = time.monotonic()
+    finally:
+        _rate_lock.release()
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.request(method, url, headers=_headers(tr_id), **kwargs)
     latency_ms = int((time.monotonic() - start) * 1000)
 

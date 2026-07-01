@@ -966,3 +966,56 @@ Walk-Forward 방식을 필수 적용한다.
   09:59:50      | F5 Pre-Check — 잔고 조회 및 prefetch_qty 저장
   10:00:00      | F5 Execute — 미청산 물량 시장가 청산 (Retry 최대 3회)
   10:00:00+     | 로그 최종 기록, today_state.json CLOSED 갱신, daily_pnl_pct 갱신, 알림 발송
+---
+
+## 10. 2026-07-01 구현 업데이트
+
+### F1 장전 후보 조회
+
+- F1은 랭킹 후보를 먼저 수집한 뒤 예상체결가/예상체결수량을 보강한다.
+- 예상체결가 보강은 `F1_EXPECTED_QUOTE_CONCURRENCY` 세마포어로 동시성을 제한한다.
+- 모든 KIS REST 호출은 `KIS_RATE_INTERVAL_SEC` 기준으로 직렬 슬롯을 예약한다.
+- KOSPI/KOSDAQ 랭킹 조회 사이에는 `F1_MARKET_INTERVAL_SEC` 대기 시간을 둔다.
+- 후보 스냅샷은 `F1_SNAPSHOT_DIR` 단일 상수를 기준으로 저장/조회한다.
+- 음수 갭은 `NEGATIVE_GAP`으로 분류해 통과 후보에서 제외한다.
+- 화면의 오늘 후보 표시는 랭킹 순서보다 통과 가능성, 유동성, 예상체결 유효성을 우선한다.
+
+### F3 진입 재시도
+
+- F3 진입 실패 시 짧은 재시도를 허용한다.
+- 재시도 정책은 다음 환경변수로 제어한다.
+  - `F3_ENTRY_MAX_ATTEMPTS`
+  - `F3_ENTRY_RETRY_DELAY_SEC`
+  - `F3_ENTRY_RETRY_FILL_SEC`
+  - `F3_ENTRY_RETRY_DEADLINE`
+- 각 시도에서 미체결이면 취소 주문을 전송한다. 마지막 시도 미체결 주문도 반드시 취소 대상이다.
+- 체결조회 타임아웃, 주문 전송, 취소 전송, 재시도 시작/생략은 각각 로그 이벤트로 남긴다.
+- 최종 미체결이면 `ENTRY_FAIL`로 기록하고 당일 진입은 종료한다.
+
+### DRY_RUN 테스트 모드
+
+- `DRY_RUN=1`은 외부 KIS 인증/API/주문/WebSocket을 사용하지 않는 안전한 시뮬레이션 모드다.
+- DRY_RUN 데이터는 별도 경로를 사용한다.
+  - `DRY_RUN_LOG_DIR`
+  - `DRY_RUN_STATE_DIR`
+  - `DRY_RUN_DB_DIR`
+- F1/F3/F4 시뮬레이션 입력값은 다음 값으로 조정한다.
+  - `DRY_RUN_TICKER`
+  - `DRY_RUN_PREV_CLOSE`
+  - `DRY_RUN_EXPECTED_PRICE`
+  - `DRY_RUN_EXPECTED_QTY`
+  - `DRY_RUN_ENTRY_PRICE`
+  - `DRY_RUN_ENTRY_QTY`
+
+### Telegram 알림 문구
+
+- Telegram 알림은 내부 이벤트 코드가 아니라 운영자 메시지로 작성한다.
+- 형식은 `제목 -> 상황 -> 조치 -> 세부 -> 코드` 순서를 따른다.
+- `CRIT` 알림은 조치 문구에 수동 확인 또는 수동 처리 필요 여부를 포함한다.
+- 예: `STALE_POSITION_DETECTED`는 “전일 포지션 잔류 의심”으로 표시하고, 계좌 보유 수량과 미체결 주문 확인을 조치로 안내한다.
+
+### UI 진행 단계 표시
+
+- 하단 파이프라인은 현재 `position_status`만 보지 않고 오늘 로그 기준 진행 단계도 반영한다.
+- `ENTRY_FAIL` 후 상태가 `IDLE`로 돌아가도 오늘 진행 단계는 F3 실패로 유지한다.
+- `/api/status`는 `pipeline_stage`, `pipeline_failed`를 반환한다.

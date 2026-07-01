@@ -465,3 +465,61 @@ requirements-dev.txt (개발/테스트 전용)
 ● 방화벽:
   KIS REST API (포트 9443) 및 WebSocket (포트 21000/31000) 아웃바운드 허용 필요.
   회사 네트워크 사용 시 방화벽 예외 등록 확인.
+---
+
+## 15. 2026-07-01 운영 변수 및 DRY_RUN 업데이트
+
+### 추가 환경변수
+
+아래 값은 `.env.example`에 반영되어 있으며, 실제 운영 시 `.env`에서 조정한다.
+
+```env
+DRY_RUN=0
+DRY_RUN_TICKER=005930
+DRY_RUN_PREV_CLOSE=10000
+DRY_RUN_EXPECTED_PRICE=10300
+DRY_RUN_EXPECTED_QTY=500000
+DRY_RUN_ENTRY_PRICE=10300
+DRY_RUN_ENTRY_QTY=10
+DRY_RUN_STEP_DELAY=0.2
+DRY_RUN_LOG_DIR=data/dry_run/logs
+DRY_RUN_STATE_DIR=data/dry_run/state
+DRY_RUN_DB_DIR=data/dry_run/db
+
+KIS_RATE_INTERVAL_SEC=0.10
+F1_EXPECTED_QUOTE_CONCURRENCY=2
+F1_MARKET_INTERVAL_SEC=2.0
+
+F3_ENTRY_MAX_ATTEMPTS=2
+F3_ENTRY_RETRY_DELAY_SEC=0.5
+F3_ENTRY_RETRY_FILL_SEC=3.0
+F3_ENTRY_RETRY_DEADLINE=09:00:08
+```
+
+### DRY_RUN 실행 목적
+
+- 실계좌/모의계좌 주문 없이 F1 -> F4 흐름을 확인한다.
+- DRY_RUN 실행 시 로그, 상태, DB는 `data/dry_run/*` 경로를 사용한다.
+- 외부 KIS 인증, 주문, WebSocket을 건너뛰므로 안전한 회귀 테스트에 사용한다.
+
+### KIS rate limit 운영 기준
+
+- REST 호출은 `KIS_RATE_INTERVAL_SEC` 기준으로 전역 직렬화한다.
+- F1 예상체결가 보강은 `F1_EXPECTED_QUOTE_CONCURRENCY`로 동시 작업 수를 제한한다.
+- F1 KOSPI/KOSDAQ 랭킹 조회 사이에는 `F1_MARKET_INTERVAL_SEC` 간격을 둔다.
+- KOSDAQ 랭킹 조회가 KIS 응답 코드 `OPSQ2001` 등으로 실패할 수 있으므로, F1 로그의 `market`, `rt_cd`, `msg_cd`를 함께 확인한다.
+
+### 테스트 명령
+
+현재 검증 기준은 가상환경 파이썬을 명시해서 실행한다.
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_kis_rest.py tests\test_f1_filter.py tests\test_f2_lockup.py tests\test_f3_entry.py tests\test_f4_step_trailing.py tests\test_api_server.py tests\test_notifier.py -q -p no:cacheprovider
+.\.venv\Scripts\python.exe -m ruff check src\notifier.py tests\test_notifier.py
+```
+
+### Telegram 알림 확인
+
+- 알림 메시지는 `제목 -> 상황 -> 조치 -> 세부 -> 코드` 순서로 표시된다.
+- `STALE_POSITION_DETECTED`처럼 조치가 필요한 이벤트는 이벤트 코드보다 사람이 읽는 제목을 우선한다.
+- Telegram 전송에는 Markdown `parse_mode`를 사용하지 않는다. 이벤트 코드의 `_` 문자나 한글 문구가 파싱 오류를 만들지 않게 하기 위함이다.

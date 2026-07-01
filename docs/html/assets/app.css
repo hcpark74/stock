@@ -200,6 +200,7 @@ tr:hover td{background:var(--s2);}
 .b-seg.right{border-right:none;margin-left:auto;border-left:1px solid var(--bd);}
 .b-done{color:var(--mu);}
 .b-active{color:var(--br);}
+.b-fail{color:var(--dn);}
 .b-dim{color:var(--s2);}
 .b-arr{color:var(--bd);margin:0 2px;}
 
