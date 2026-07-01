@@ -35,6 +35,23 @@ _pending_buy_org_no: str = ""  # 매수 주문 후 저장, 취소 시 사용
 
 
 async def run(force: bool = False) -> None:
+    s = state.get()
+    candidates = _entry_candidate_tickers(s)
+    if s.day_skip or len(candidates) <= 1 or os.getenv("DRY_RUN", "0") == "1":
+        await _run_single(force=force)
+        return
+
+    picked = await _pick_final_entry_candidate(state.get())
+    if picked is None:
+        return
+
+    s = state.get()
+    s.target_ticker = picked["ticker"]
+    s.target_candidates = [picked["candidate"]]
+    await _run_single(force=force)
+
+
+async def _run_single(force: bool = False) -> None:
     """
     [08:59:40] 갭 재검증
     [08:59:50] 1차 70% 시장가 매수
@@ -49,7 +66,8 @@ async def run(force: bool = False) -> None:
             reason=reason)
         _log_entry_blocked(s.target_ticker, reason)
         return
-    ticker = s.target_ticker
+    candidate_tickers = _entry_candidate_tickers(s)
+    ticker = candidate_tickers[0]
     mode = os.getenv("KIS_MODE", "PAPER")
 
     if os.getenv("DRY_RUN", "0") == "1":
@@ -344,6 +362,153 @@ async def run(force: bool = False) -> None:
 
 
 # ── 헬퍼 ─────────────────────────────────────────────────────────────
+
+def _entry_candidate_tickers(s: state.State) -> list[str]:
+    tickers: list[str] = []
+    for candidate in s.target_candidates or []:
+        ticker = candidate.get("ticker") if isinstance(candidate, dict) else str(candidate)
+        if ticker and ticker not in tickers:
+            tickers.append(ticker)
+    if s.target_ticker and s.target_ticker not in tickers:
+        tickers.insert(0, s.target_ticker)
+    return tickers
+
+
+async def _pick_final_entry_candidate(s: state.State) -> dict | None:
+    candidates = s.target_candidates or []
+    candidate_by_ticker = {
+        c.get("ticker"): c
+        for c in candidates
+        if isinstance(c, dict) and c.get("ticker")
+    }
+    tickers = _entry_candidate_tickers(s)
+    cash = await _fetch_available_cash()
+    total_amount = int(cash * ALLOC_RATIO)
+    quote_results = await asyncio.gather(*(_fetch_expected_price(ticker) for ticker in tickers))
+    valid: list[dict] = []
+    blocked_reasons: list[str] = []
+
+    for rank, (ticker, quote) in enumerate(zip(tickers, quote_results), start=1):
+        expected_price, prev_close = quote
+        candidate = candidate_by_ticker.get(ticker)
+        if candidate is None:
+            log(
+                "F3_CANDIDATE_SNAPSHOT_MISSING",
+                level="WARN",
+                ticker=ticker,
+                candidate_rank=rank,
+                candidates=tickers,
+            )
+            candidate = {"ticker": ticker}
+        if prev_close and expected_price:
+            gap = (expected_price / prev_close) - 1
+            log(
+                "F3_RECHECK",
+                level="INFO",
+                ticker=ticker,
+                candidate_rank=rank,
+                expected_price=expected_price,
+                prev_close=prev_close,
+                gap_pct=round(gap * 100, 2),
+                gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
+                gap_max_pct=round(GAP_MAX_RECHECK * 100, 2),
+            )
+            if not (GAP_MIN_RECHECK <= gap < GAP_MAX_RECHECK):
+                reason = "BELOW_MIN" if gap < GAP_MIN_RECHECK else "ABOVE_MAX"
+                blocked_reasons.append("GAP_CHANGED")
+                log(
+                    "GAP_CHANGED",
+                    level="WARN",
+                    ticker=ticker,
+                    candidate_rank=rank,
+                    gap_at_lockup=None,
+                    gap_at_entry=round(gap * 100, 2),
+                    reason=reason,
+                )
+                _log_entry_blocked(
+                    ticker,
+                    "GAP_CHANGED",
+                    candidate_rank=rank,
+                    gap_at_entry=round(gap * 100, 2),
+                    gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
+                    gap_max_pct=round(GAP_MAX_RECHECK * 100, 2),
+                    gap_reason=reason,
+                )
+                continue
+
+        if not expected_price:
+            blocked_reasons.append("PRICE_UNAVAILABLE")
+            _log_entry_blocked(
+                ticker,
+                "PRICE_UNAVAILABLE",
+                candidate_rank=rank,
+                order_price=expected_price,
+                cash=cash,
+            )
+            continue
+
+        total_qty = int(total_amount / expected_price)
+        if total_qty == 0:
+            blocked_reasons.append("INSUFFICIENT_BALANCE")
+            _log_entry_blocked(
+                ticker,
+                "QTY_ZERO",
+                candidate_rank=rank,
+                cash=cash,
+                alloc_ratio=ALLOC_RATIO,
+                order_price=expected_price,
+                total_amount=total_amount,
+            )
+            continue
+
+        valid.append(
+            {
+                "ticker": ticker,
+                "candidate": candidate,
+                "candidate_rank": rank,
+                "expected_price": expected_price,
+                "total_qty": total_qty,
+            }
+        )
+
+    if not valid:
+        reason = blocked_reasons[-1] if blocked_reasons else "NO_ENTRY_CANDIDATE"
+        s.day_skip = True
+        s.close_reason = reason
+        s.target_ticker = None
+        await notifier.send(
+            reason,
+            level="WARN",
+            message="F3 후보 전체가 주문 전 재검증에서 제외되었습니다.",
+        )
+        await db.record_skip(
+            _today(),
+            "ENTRY_FAIL" if reason != "GAP_CHANGED" else "GAP_CHANGED",
+            f"reason={reason},candidates={','.join(tickers)}",
+        )
+        return None
+
+    picked = max(
+        valid,
+        key=lambda item: (
+            item["candidate"].get("expected_amount", 0.0),
+            item["candidate"].get("buy_sell_ratio", 0.0),
+            -item["candidate_rank"],
+        ),
+    )
+    log(
+        "F3_FINAL_PICK",
+        level="INFO",
+        ticker=picked["ticker"],
+        candidate_rank=picked["candidate_rank"],
+        checked_count=len(tickers),
+        valid_count=len(valid),
+        candidates=tickers,
+        expected_price=picked["expected_price"],
+        total_qty=picked["total_qty"],
+    )
+    return picked
+
 
 def _today() -> str:
     return datetime.now(KST).strftime("%Y%m%d")

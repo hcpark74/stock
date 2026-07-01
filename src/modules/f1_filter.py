@@ -20,6 +20,7 @@ EXTREME_GAP_MAX = 0.150
 HIGH_GAP_MIN_EXPECTED_AMOUNT = 2_000_000_000
 HIGH_GAP_MIN_VI_GAP = 0.010
 LIQUIDITY_TOP_PCT = 0.10
+F1_MIN_CANDIDATES = max(1, int(os.getenv("F1_MIN_CANDIDATES", "10")))
 
 F1_DEADLINE_H = 8
 F1_DEADLINE_M = 58
@@ -28,6 +29,12 @@ F1_SNAPSHOT_DIR = os.getenv("F1_SNAPSHOT_DIR", "data/f1_snapshots")
 F1_SNAPSHOT_KEEP = int(os.getenv("F1_SNAPSHOT_KEEP", "20"))
 F1_EXPECTED_QUOTE_CONCURRENCY = int(os.getenv("F1_EXPECTED_QUOTE_CONCURRENCY", "2"))
 F1_MARKET_INTERVAL_SEC = float(os.getenv("F1_MARKET_INTERVAL_SEC", "2.0"))
+
+# KIS ranking uses J+input market buckets, and expected-quote accepts J for both KOSPI/KOSDAQ.
+_PREMARKET_MARKETS = (
+    {"label": "J", "ranking_market": "J", "ranking_input": "0001", "quote_market": "J"},
+    {"label": "Q", "ranking_market": "J", "ranking_input": "1001", "quote_market": "J"},
+)
 
 _EXCLUDED_PRODUCT_KEYWORDS = (
     "ETF",
@@ -136,7 +143,7 @@ def select_liquidity_candidates(candidates: list[dict]) -> list[dict]:
         key=lambda c: c.get("avg_amount_5d", 0.0),
         reverse=True,
     )
-    threshold = max(1, int(len(sorted_candidates) * LIQUIDITY_TOP_PCT))
+    threshold = max(F1_MIN_CANDIDATES, int(len(sorted_candidates) * LIQUIDITY_TOP_PCT))
     return sorted_candidates[:threshold]
 
 
@@ -206,7 +213,8 @@ async def _fetch_all_premarket() -> list[dict]:
     quote API's expected execution price/volume when available.
     """
     results: list[dict] = []
-    for index, market in enumerate(("J", "Q")):
+    for index, market_cfg in enumerate(_PREMARKET_MARKETS):
+        market = market_cfg["label"]
         if index > 0 and F1_MARKET_INTERVAL_SEC > 0:
             log("F1_MARKET_INTERVAL", level="INFO", market=market, sleep_sec=F1_MARKET_INTERVAL_SEC)
             await asyncio.sleep(F1_MARKET_INTERVAL_SEC)
@@ -216,9 +224,9 @@ async def _fetch_all_premarket() -> list[dict]:
                 "/uapi/domestic-stock/v1/ranking/fluctuation",
                 tr_id="FHPST01710000",
                 params={
-                    "fid_cond_mrkt_div_code": market,
+                    "fid_cond_mrkt_div_code": market_cfg["ranking_market"],
                     "fid_cond_scr_div_code": "20171",
-                    "fid_input_iscd": "0000",
+                    "fid_input_iscd": market_cfg["ranking_input"],
                     "fid_rank_sort_cls_code": "0",
                     "fid_input_cnt_1": "0",
                     "fid_prc_cls_code": "0",
@@ -237,7 +245,11 @@ async def _fetch_all_premarket() -> list[dict]:
             continue
 
         output = resp.get("output", [])
-        candidates = await _parse_candidates_concurrently(output, market)
+        candidates = await _parse_candidates_concurrently(
+            output,
+            market,
+            market_cfg["quote_market"],
+        )
         parsed_count = len(candidates)
         zero_gap_count = sum(1 for c in candidates if abs(c.get("gap_pct", 0.0)) < 0.000001)
         results.extend(candidates)
@@ -259,14 +271,18 @@ async def _fetch_all_premarket() -> list[dict]:
     return results
 
 
-async def _parse_candidates_concurrently(items: list[dict], market: str) -> list[dict]:
+async def _parse_candidates_concurrently(
+    items: list[dict],
+    market: str,
+    quote_market: str = "J",
+) -> list[dict]:
     concurrency = max(1, F1_EXPECTED_QUOTE_CONCURRENCY)
     semaphore = asyncio.Semaphore(concurrency)
 
     async def parse_one(item: dict) -> dict | None:
         async with semaphore:
             try:
-                return await _parse_candidate(item, market)
+                return await _parse_candidate(item, market, quote_market)
             except (KeyError, ValueError, ZeroDivisionError):
                 return None
 
@@ -274,7 +290,7 @@ async def _parse_candidates_concurrently(items: list[dict], market: str) -> list
     return [candidate for candidate in parsed if candidate is not None]
 
 
-async def _parse_candidate(item: dict, market: str = "J") -> dict | None:
+async def _parse_candidate(item: dict, market: str = "J", quote_market: str = "J") -> dict | None:
     ticker = item.get("stck_shrn_iscd") or item.get("mksc_shrn_iscd")
     name = item.get("hts_kor_isnm", "")
     if not _is_common_stock_candidate(ticker, name):
@@ -292,7 +308,7 @@ async def _parse_candidate(item: dict, market: str = "J") -> dict | None:
     final_gap_pct = ranking_gap_pct
     gap_source = "ranking.prdy_ctrt"
 
-    expected_quote = await _fetch_expected_quote(ticker, market)
+    expected_quote = await _fetch_expected_quote(ticker, quote_market)
     if expected_quote and expected_quote["expected_price"] > 0 and expected_quote["expected_qty"] > 0:
         expected_price = expected_quote["expected_price"]
         expected_qty = expected_quote["expected_qty"]
@@ -328,6 +344,7 @@ async def _parse_candidate(item: dict, market: str = "J") -> dict | None:
         "expected_api_qty": expected_quote["expected_qty"] if expected_quote else None,
         "expected_api_amount": expected_quote["expected_amount"] if expected_quote else None,
         "vi_gap": vi_gap,
+        "buy_sell_ratio": 0.0,
     }
     candidate.update(_classify_gap_candidate(candidate))
     return candidate

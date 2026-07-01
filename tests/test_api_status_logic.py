@@ -18,7 +18,7 @@ def test_f1_summary_uses_same_liquidity_selection_as_f1_filter():
 
     summary = status_logic.f1_summary_from_rows(rows)
 
-    assert summary["liquidity_pass"] == 2
+    assert summary["liquidity_pass"] == 10
     assert summary["selected"]["ticker"] == "TICK20"
 
 

@@ -48,9 +48,11 @@ def clean_state():
     s = _state_mod.get()
     s.day_skip = False
     s.target_ticker = None
+    s.target_candidates = None
     yield
     s.day_skip = False
     s.target_ticker = None
+    s.target_candidates = None
 
 
 # ── VI 이격 필터 ──────────────────────────────────────────────────────
@@ -111,6 +113,21 @@ async def test_sort_picks_highest_expected_amount():
     ]
     await _run(candidates)
     assert _state_mod.get().target_ticker == "HIGH_AMT"
+
+
+async def test_locks_up_to_three_targets_for_f3_failover():
+    candidates = [
+        _candidate("A", gap_pct=0.05, expected_amount=4e11),
+        _candidate("B", gap_pct=0.05, expected_amount=3e11),
+        _candidate("C", gap_pct=0.05, expected_amount=2e11),
+        _candidate("D", gap_pct=0.05, expected_amount=1e11),
+    ]
+
+    await _run(candidates)
+
+    s = _state_mod.get()
+    assert s.target_ticker == "A"
+    assert [c["ticker"] for c in s.target_candidates] == ["A", "B", "C"]
 
 
 async def test_sort_tiebreak_by_buy_sell_ratio():

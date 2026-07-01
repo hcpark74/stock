@@ -4,6 +4,7 @@ from src import notifier, state
 from src.utils.logger import log
 
 VI_GAP_MIN = 0.03   # 정적 VI 상단까지 최소 이격 3%
+F2_MAX_TARGET_CANDIDATES = 3
 
 
 async def run(candidates: list[dict]) -> None:
@@ -46,11 +47,15 @@ async def run(candidates: list[dict]) -> None:
         return
 
     # ── 락업 ─────────────────────────────────────────────────────────
-    target = vi_filtered[0]
+    locked_candidates = vi_filtered[:F2_MAX_TARGET_CANDIDATES]
+    target = locked_candidates[0]
     s.target_ticker = target["ticker"]
+    s.target_candidates = locked_candidates
 
     log(
         "TARGET_LOCKED", level="INFO", ticker=s.target_ticker,
+        target_count=len(locked_candidates),
+        target_tickers=[c.get("ticker") for c in locked_candidates],
         gap_pct=round(target.get("gap_pct", 0.0) * 100, 2),
         expected_price=target.get("expected_price"),
         expected_amount=target.get("expected_amount"),

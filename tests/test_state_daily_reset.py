@@ -7,6 +7,7 @@ def _clear_state() -> None:
     s = state.get()
     s.trading_date = None
     s.target_ticker = None
+    s.target_candidates = None
     s.entry_price = None
     s.entry_qty = None
     s.remaining_qty = None
@@ -71,3 +72,37 @@ async def test_new_trading_day_does_not_clear_active_position():
     assert s.position_status == "HOLDING"
     assert s.target_ticker == "005930"
     assert s.remaining_qty == 10
+
+
+async def test_target_candidates_persist_restore_round_trip(tmp_path):
+    s = state.get()
+    s.trading_date = "20260701"
+    s.target_ticker = "005930"
+    s.target_candidates = [
+        {"ticker": "005930", "expected_amount": 10_000.0},
+        {"ticker": "000660", "expected_amount": 9_000.0},
+    ]
+
+    await state.persist(str(tmp_path), "20260701")
+    _clear_state()
+    data = state.load(str(tmp_path))
+    state.restore_from(data)
+
+    restored = state.get()
+    assert restored.target_ticker == "005930"
+    assert restored.target_candidates == [
+        {"ticker": "005930", "expected_amount": 10_000.0},
+        {"ticker": "000660", "expected_amount": 9_000.0},
+    ]
+
+
+def test_restore_from_legacy_state_without_target_candidates():
+    state.restore_from({
+        "date": "20260701",
+        "ticker": "005930",
+        "position_status": "IDLE",
+    })
+
+    s = state.get()
+    assert s.target_ticker == "005930"
+    assert s.target_candidates is None

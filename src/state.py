@@ -8,6 +8,7 @@ from pathlib import Path
 class State:
     trading_date: str | None = None
     target_ticker: str | None = None
+    target_candidates: list[dict] | None = None
     entry_price: float | None = None
     entry_qty: int | None = None
     remaining_qty: int | None = None
@@ -34,6 +35,7 @@ def get() -> State:
 def _clear_for_trading_day(date_str: str) -> None:
     _state.trading_date = date_str
     _state.target_ticker = None
+    _state.target_candidates = None
     _state.entry_price = None
     _state.entry_qty = None
     _state.remaining_qty = None
@@ -100,6 +102,7 @@ async def reset_to_idle(reason: str) -> None:
         _state.position_status = "IDLE"
         _state.close_reason = reason
         _state.target_ticker = None
+        _state.target_candidates = None
         _state.order_id = None
 
 
@@ -118,6 +121,7 @@ async def persist(state_dir: str, date_str: str) -> None:
     data = {
         "date": date_str,
         "ticker": _state.target_ticker,
+        "target_candidates": _state.target_candidates or [],
         "entry_price": _state.entry_price,
         "entry_qty": _state.entry_qty,
         "remaining_qty": _state.remaining_qty,
@@ -147,6 +151,7 @@ def restore_from(data: dict) -> None:
     """재시작 복구: today_state.json → 인메모리 State 복원. PRD §6-7."""
     _state.trading_date = data.get("date")
     _state.target_ticker = data.get("ticker")
+    _state.target_candidates = data.get("target_candidates") or None
     _state.entry_price = data.get("entry_price")
     _state.entry_qty = data.get("entry_qty")
     _state.remaining_qty = data.get("remaining_qty")

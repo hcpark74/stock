@@ -158,6 +158,7 @@ async def test_ranking_candidate_uses_expected_quote_when_valid():
     assert result["gap_source"] == "expected.antc_cnpr"
     assert result["ranking_gap_pct"] == 0.0
     assert result["expected_api_gap_pct"] == pytest.approx(0.05)
+    assert result["buy_sell_ratio"] == 0.0
 
 
 async def test_expected_quote_drift_can_promote_candidate_to_high_gap():
@@ -190,8 +191,8 @@ async def test_expected_quote_drift_can_promote_candidate_to_high_gap():
     assert result["gap_allowed"] is True
 
 
-async def test_parse_candidate_passes_market_to_expected_quote():
-    """KOSDAQ ranking rows must request expected quotes with the KOSDAQ market code."""
+async def test_parse_candidate_keeps_kosdaq_label_but_uses_kis_quote_market():
+    """KOSDAQ rows are labeled Q locally, but KIS expected quote uses market code J."""
     item = {
         "mksc_shrn_iscd": "126640",
         "hts_kor_isnm": "화신정공",
@@ -205,7 +206,7 @@ async def test_parse_candidate_passes_market_to_expected_quote():
     with patch("src.modules.f1_filter._fetch_expected_quote", new_callable=AsyncMock, return_value=None) as quote:
         result = await f1_mod._parse_candidate(item, "Q")
 
-    quote.assert_awaited_once_with("126640", "Q")
+    quote.assert_awaited_once_with("126640", "J")
     assert result["market"] == "Q"
 
 
@@ -228,10 +229,10 @@ async def test_parse_candidate_preserves_unrounded_prev_close_for_replay():
     assert result["prev_close"] != round(result["prev_close"])
 
 
-async def test_fetch_expected_quote_uses_given_market_code():
-    """Expected quote API should not hardcode KOSPI for KOSDAQ tickers."""
+async def test_fetch_expected_quote_uses_kis_quote_market_code():
+    """Expected quote API sends the KIS quote market code."""
     async def fake_get(*args, **kwargs):
-        assert kwargs["params"]["FID_COND_MRKT_DIV_CODE"] == "Q"
+        assert kwargs["params"]["FID_COND_MRKT_DIV_CODE"] == "J"
         assert kwargs["params"]["FID_INPUT_ISCD"] == "126640"
         return {
             "rt_cd": "0",
@@ -244,7 +245,7 @@ async def test_fetch_expected_quote_uses_given_market_code():
         }
 
     with patch("src.api.kis_rest.get", new=fake_get):
-        result = await f1_mod._fetch_expected_quote("126640", "Q")
+        result = await f1_mod._fetch_expected_quote("126640", "J")
 
     assert result["expected_price"] == 10500
     assert result["expected_qty"] == 2000
@@ -272,7 +273,8 @@ async def test_fetch_all_premarket_waits_between_markets(monkeypatch):
     markets = []
 
     async def fake_get(*args, **kwargs):
-        markets.append(kwargs["params"]["fid_cond_mrkt_div_code"])
+        params = kwargs["params"]
+        markets.append((params["fid_cond_mrkt_div_code"], params["fid_input_iscd"]))
         return {"rt_cd": "0", "output": []}
 
     with (
@@ -282,7 +284,7 @@ async def test_fetch_all_premarket_waits_between_markets(monkeypatch):
     ):
         await _fetch_all_premarket()
 
-    assert markets == ["J", "Q"]
+    assert markets == [("J", "0001"), ("J", "1001")]
     sleep.assert_awaited_once_with(1.5)
 
 
@@ -293,8 +295,8 @@ async def test_fetch_all_premarket_enriches_expected_quotes_with_limited_concurr
     max_active = 0
 
     async def fake_get(*args, **kwargs):
-        market = kwargs["params"]["fid_cond_mrkt_div_code"]
-        if market == "Q":
+        input_iscd = kwargs["params"]["fid_input_iscd"]
+        if input_iscd == "1001":
             return {"rt_cd": "0", "output": []}
         return {
             "rt_cd": "0",
@@ -382,8 +384,19 @@ async def test_liquidity_top_10_pct_single_result():
         for i in range(1, 11)  # i=1~10, 최댓값 i=10 → 10e9
     ]
     result = await _run(candidates)
-    assert len(result) == 1
-    assert result[0]["avg_amount_5d"] == pytest.approx(10e9)  # i=10 최고 유동성
+    assert len(result) == 10
+    assert [c["ticker"] for c in result] == [
+        "TICK10",
+        "TICK09",
+        "TICK08",
+        "TICK07",
+        "TICK06",
+        "TICK05",
+        "TICK04",
+        "TICK03",
+        "TICK02",
+        "TICK01",
+    ]
 
 
 async def test_liquidity_min_one_result():
@@ -399,9 +412,9 @@ async def test_liquidity_top_10_of_20():
         for i in range(1, 21)
     ]
     result = await _run(candidates)
-    assert len(result) == 2
+    assert len(result) == 10
     amounts = {c["avg_amount_5d"] for c in result}
-    assert amounts == {20e9, 19e9}  # i=20, i=19
+    assert amounts == {float(i) * 1e9 for i in range(11, 21)}
 
 
 async def test_day_skip_returns_early():
@@ -417,8 +430,8 @@ async def test_day_skip_returns_early():
 async def test_fetch_excludes_etf_etn_leverage_inverse_products():
     """KIS 원본 응답에서 ETF/ETN/레버리지/인버스 상품은 F1 후보에서 제외."""
     async def fake_get(*args, **kwargs):
-        market = kwargs["params"]["fid_cond_mrkt_div_code"]
-        if market == "Q":
+        input_iscd = kwargs["params"]["fid_input_iscd"]
+        if input_iscd == "1001":
             return {"rt_cd": "0", "output": []}
         return {
             "rt_cd": "0",
