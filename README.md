@@ -50,6 +50,9 @@ TELEGRAM_CHAT_ID=your_chat_id_here
 KIS_RATE_INTERVAL_SEC=0.20
 F1_EXPECTED_QUOTE_CONCURRENCY=1
 F1_MARKET_INTERVAL_SEC=3.0
+F2_RETRY_F1_ON_FAIL=1
+F2_RETRY_F1_INTERVAL_SEC=30
+F2_RETRY_F1_MIN_REMAINING_SEC=2
 
 F3_ENTRY_MAX_ATTEMPTS=2
 F3_ENTRY_RETRY_DELAY_SEC=0.5
@@ -61,6 +64,8 @@ F3_FIRST_ORDER_AT=09:10:20
 F3_PYRAMID_AT=09:10:40
 F3_PYRAMID_FILL_SEC=10.0
 ```
+
+`F2_RETRY_F1_ON_FAIL`은 모의투자(`PAPER`) 실험용으로 기본 예시에 활성화되어 있습니다. 실계좌(`REAL`) 코드 기본값은 비활성이지만, `.env`에 `F2_RETRY_F1_ON_FAIL=1`이 남아 있으면 명시적으로 켜지므로 REAL 전환 전에는 `0`으로 바꾸세요. F2에서 후보가 모두 제외되면 09:10 전까지만 F1을 다시 시도하며, 데드라인까지 `F2_RETRY_F1_MIN_REMAINING_SEC`보다 적게 남았거나 `DRY_RUN=1`이면 재시도하지 않습니다. 예약된 F2 시각도 09:10이므로 이 재시도는 주로 09:00 F1 직후 체이닝 경로에서 의미가 있습니다.
 
 실계좌 전환 시에는 `KIS_MODE=REAL`, 실계좌 URL, 실계좌 번호를 모두 확인한 뒤 소액으로 검증하세요.
 

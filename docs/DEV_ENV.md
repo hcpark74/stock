@@ -489,6 +489,9 @@ DRY_RUN_DB_DIR=data/dry_run/db
 KIS_RATE_INTERVAL_SEC=0.20
 F1_EXPECTED_QUOTE_CONCURRENCY=1
 F1_MARKET_INTERVAL_SEC=3.0
+F2_RETRY_F1_ON_FAIL=1
+F2_RETRY_F1_INTERVAL_SEC=30
+F2_RETRY_F1_MIN_REMAINING_SEC=2
 
 F3_ENTRY_MAX_ATTEMPTS=2
 F3_ENTRY_RETRY_DELAY_SEC=0.5
@@ -500,6 +503,8 @@ F3_FIRST_ORDER_AT=09:10:20
 F3_PYRAMID_AT=09:10:40
 F3_PYRAMID_FILL_SEC=10.0
 ```
+
+`F2_RETRY_F1_ON_FAIL`은 모의투자(`PAPER`) 실험용으로 env 예시에 활성화되어 있다. 실계좌(`REAL`) 코드 기본값은 비활성이지만, `.env`에 `F2_RETRY_F1_ON_FAIL=1`이 남아 있으면 명시적으로 켜지므로 REAL 전환 전에는 `0`으로 변경한다. F2 실패 후 재시도는 F1 deadline인 09:10 전까지만 수행하며, 데드라인까지 `F2_RETRY_F1_MIN_REMAINING_SEC`보다 적게 남았거나 `DRY_RUN=1`이면 재시도하지 않는다. 예약 F2 fallback 경로보다는 09:00 F1 직후 체이닝 경로에서 주로 의미가 있다.
 
 ### DRY_RUN 실행 목적
 

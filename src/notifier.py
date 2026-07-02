@@ -6,7 +6,7 @@ import httpx
 from src.utils.logger import log
 
 _queue: asyncio.Queue[str] = asyncio.Queue()
-_SEND_INTERVAL = 1.1  # Telegram 동일 chat 기준 1건/초 rate limit (PRD §6)
+_SEND_INTERVAL = 1.1
 
 _LEVEL_LABELS = {
     "CRIT": "긴급",
@@ -16,8 +16,8 @@ _LEVEL_LABELS = {
 
 _ALERT_RULES = {
     "STALE_POSITION_DETECTED": {
-        "title": "전일 포지션 잔류 의심",
-        "situation": "이전 거래일 상태 파일에 포지션 정보가 남아 있습니다.",
+        "title": "전일 포지션 오류 발견",
+        "situation": "이전 거래일의 상태 파일이나 포지션 정보가 남아 있습니다.",
         "action": "계좌 보유 수량과 미체결 주문을 확인하고, 필요하면 수동 정리 후 재시작하세요.",
     },
     "TIMEOUT_ORDER_FAILED": {
@@ -32,10 +32,8 @@ _ALERT_RULES = {
     },
     "WS_KEY_REFRESH_FAIL": {
         "title": "웹소켓 키 갱신 실패",
-        "situation": "실시간 시세 연결용 키를 발급받지 못했습니다.",
-        "action": (
-            "KIS 인증 상태를 확인하세요. 보유 중이면 REST 시세와 계좌 상태를 직접 확인하세요."
-        ),
+        "situation": "실시간 시세 연결 키를 발급받지 못했습니다.",
+        "action": "KIS 인증 상태를 확인하세요. 보유 중이면 REST 시세와 계좌 상태를 직접 확인하세요.",
     },
     "TIME_SYNC_WARN": {
         "title": "시스템 시각 오차 감지",
@@ -60,21 +58,28 @@ _ALERT_RULES = {
     "TARGET_LOCKED": {
         "title": "대상 종목 확정",
         "situation": "F2에서 오늘 매매 후보가 확정되었습니다.",
-        "action": "09:10 진입 전까지 종목과 예상 갭을 확인하세요.",
+        "action": "09:10 진입 전까지 종목과 예상가를 확인하세요.",
     },
     "NO_TARGET": {
         "title": "오늘 매매 대상 없음",
         "situation": "F1 필터를 통과한 종목이 없습니다.",
         "action": "오늘 자동 진입은 건너뜁니다.",
     },
+    "F2_FAIL_F1_RETRY": {
+        "title": "F2 실패 후 F1 재시도",
+        "situation": "F2에서 후보가 모두 제외되어 F1 후보 탐색을 다시 시도합니다.",
+        "action": "재시도 후 TARGET_LOCKED 또는 F2_RETRY_EXHAUSTED 알림을 확인하세요.",
+    },
+    "F2_RETRY_EXHAUSTED": {
+        "title": "F1 재시도 후 대상 없음",
+        "situation": "F2 실패 뒤 F1을 다시 시도했지만 최종 진입 대상을 확정하지 못했습니다.",
+        "action": "오늘 자동 진입은 종료된 것으로 보고 로그에서 제외 사유를 확인하세요.",
+    },
 }
 
 
 async def send(event: str, level: str = "INFO", message: str = "") -> None:
-    """
-    Telegram 알림을 비동기 큐에 추가 (non-blocking).
-    운영자가 바로 이해할 수 있도록 제목, 상황, 조치, 세부 순서로 구성한다.
-    """
+    """Queue a non-blocking Telegram alert."""
     text = _format_alert_text(event, level, message)
     await _queue.put(text)
 
@@ -82,18 +87,18 @@ async def send(event: str, level: str = "INFO", message: str = "") -> None:
 def _format_alert_text(event: str, level: str = "INFO", message: str = "") -> str:
     rule = _ALERT_RULES.get(event, {})
     severity = _LEVEL_LABELS.get(level, level)
-    prefix = "🔴 " if level == "CRIT" else "🟡 " if level == "WARN" else "ℹ️ "
+    prefix = "[CRIT]" if level == "CRIT" else "[WARN]" if level == "WARN" else "[INFO]"
     title = rule.get("title") or event.replace("_", " ").title()
     situation = rule.get("situation")
     action = rule.get("action")
 
-    lines = [f"{prefix}{severity}: {title}"]
+    lines = [f"{prefix} {severity}: {title}"]
     if situation:
         lines.append(f"상황: {situation}")
     if action:
         lines.append(f"조치: {action}")
     if message:
-        lines.append(f"세부: {_clean_message(message)}")
+        lines.append(f"메모: {_clean_message(message)}")
     lines.append(f"코드: {event}")
     return "\n".join(lines)
 
@@ -104,8 +109,8 @@ def _clean_message(message: str) -> str:
 
 async def worker() -> None:
     """
-    백그라운드 태스크 — 큐 드레인 후 Telegram API 전송.
-    main.py에서 asyncio.create_task(notifier.worker()) 로 구동.
+    Background sender for Telegram API.
+    main.py starts this with asyncio.create_task(notifier.worker()).
     """
     token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "")

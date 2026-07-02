@@ -29,6 +29,14 @@ LOG_DIR = os.getenv("LOG_DIR", "data/logs")
 STATE_DIR = os.getenv("STATE_DIR", "data/state")
 NTP_SERVERS = [s.strip() for s in os.getenv("NTP_SERVER", "pool.ntp.org").split(",")]
 DB_PATH = os.path.join(os.getenv("DB_DIR", "data/db"), "trading.db")
+F2_RETRY_F1_ON_FAIL = os.getenv(
+    "F2_RETRY_F1_ON_FAIL",
+    "0" if os.getenv("KIS_MODE", "PAPER") == "REAL" else "1",
+) == "1"
+F2_RETRY_F1_INTERVAL_SEC = int(
+    os.getenv("F2_RETRY_F1_INTERVAL_SEC", str(f1_filter.F1_RETRY_INTERVAL_SEC))
+)
+F2_RETRY_F1_MIN_REMAINING_SEC = int(os.getenv("F2_RETRY_F1_MIN_REMAINING_SEC", "2"))
 
 # F1 결과를 F2에 전달하기 위한 세션 변수
 _f1_result: list[dict] = []
@@ -46,6 +54,21 @@ def _scheduled_at(hour: int, minute: int, second: int = 0) -> datetime:
 
 def _past_f3_schedule() -> bool:
     return datetime.now(KST) >= _scheduled_at(F3_H, F3_M, F3_S)
+
+
+def _before_f1_retry_deadline() -> bool:
+    return datetime.now(KST) < _scheduled_at(f1_filter.F1_DEADLINE_H, f1_filter.F1_DEADLINE_M)
+
+
+def _f2_retry_sleep_seconds() -> int:
+    deadline = _scheduled_at(f1_filter.F1_DEADLINE_H, f1_filter.F1_DEADLINE_M)
+    remaining = max(1, int((deadline - datetime.now(KST)).total_seconds()))
+    return max(1, min(F2_RETRY_F1_INTERVAL_SEC, remaining))
+
+
+def _f2_retry_remaining_seconds() -> int:
+    deadline = _scheduled_at(f1_filter.F1_DEADLINE_H, f1_filter.F1_DEADLINE_M)
+    return int((deadline - datetime.now(KST)).total_seconds())
 
 
 async def _ensure_trading_day() -> None:
@@ -78,15 +101,13 @@ async def job_f1() -> None:
 
 
 async def job_f2() -> None:
-    global _f2_done
     await _ensure_trading_day()
     # F1 completion can trigger F2/F3 immediately; this scheduled job is a safety net.
     if _f2_done:
         return
     if not _f1_result:
         return
-    await f2_lockup.run(_f1_result)
-    _f2_done = True
+    await _run_f2_f3_after_f1(immediate=_past_f3_schedule())
 
 
 async def job_f3() -> None:
@@ -115,21 +136,80 @@ async def _run_f2_f3_after_f1(*, immediate: bool = False) -> None:
     """
     Chain F2/F3 after F1 produced candidates.
 
-    Normal F1 calls this right away; F3 only uses force mode if the scheduled F3
-    time has already passed. Catch-up calls it only inside the missed-run window
-    and can force F3 when explicitly catching up after the scheduled F3 time.
+    Normal F1 calls this right away; if F2 rejects every candidate and the
+    env-controlled F2 retry is enabled, the chain can clear that F2-only
+    day_skip and retry F1 before the F1 deadline. F3 only uses force mode if
+    the scheduled F3 time has already passed. Catch-up calls it only inside the
+    missed-run window and can force F3 when explicitly catching up after the
+    scheduled F3 time.
     """
-    global _f2_done, _f3_started
+    global _f1_result, _f2_done, _f3_started
     if not _f1_result or state.get().day_skip:
         return
 
-    if not _f2_done:
+    f2_attempt = 0
+    f2_retry_started = False
+    while not _f2_done and _f1_result and not state.get().day_skip:
+        f2_attempt += 1
         await f2_lockup.run(_f1_result)
+
+        s = state.get()
+        if s.target_ticker and not s.day_skip:
+            _f2_done = True
+            break
+
+        if not _should_retry_f1_after_f2_fail():
+            _f2_done = True
+            break
+
+        sleep_sec = _f2_retry_sleep_seconds()
+        logger.log(
+            "F2_FAIL_F1_RETRY",
+            level="WARN",
+            attempt=f2_attempt,
+            retry_after_sec=sleep_sec,
+            deadline=f"{f1_filter.F1_DEADLINE_H:02d}:{f1_filter.F1_DEADLINE_M:02d}:00",
+            reason="F2_NO_TARGET",
+        )
+        await notifier.send(
+            "F2_FAIL_F1_RETRY",
+            level="WARN",
+            message=(
+                f"F2 후보가 전부 제외되어 F1을 {sleep_sec}초 후 재시도합니다. "
+                f"deadline={f1_filter.F1_DEADLINE_H:02d}:{f1_filter.F1_DEADLINE_M:02d}:00"
+            ),
+        )
+        f2_retry_started = True
+        s.day_skip = False
+        s.target_ticker = None
+        s.target_candidates = None
+        await asyncio.sleep(sleep_sec)
+        _f1_result = await f1_filter.run()
+
+    if state.get().day_skip:
         _f2_done = True
+        if f2_retry_started and not state.get().target_ticker:
+            await notifier.send(
+                "F2_RETRY_EXHAUSTED",
+                level="WARN",
+                message="F2 실패 후 F1 재시도까지 했지만 최종 후보를 확정하지 못했습니다.",
+            )
 
     if _f2_done and not _f3_started and state.get().target_ticker and not state.get().day_skip:
         _f3_started = True
         await f3_entry.run(force=immediate)
+
+
+def _should_retry_f1_after_f2_fail() -> bool:
+    s = state.get()
+    return (
+        F2_RETRY_F1_ON_FAIL
+        and os.getenv("DRY_RUN", "0") != "1"
+        and s.day_skip
+        and not s.target_ticker
+        and _before_f1_retry_deadline()
+        and _f2_retry_remaining_seconds() >= F2_RETRY_F1_MIN_REMAINING_SEC
+    )
 
 
 # ── F1 missed 보완 실행 ──────────────────────────────────────────────
