@@ -108,6 +108,8 @@ body{background:var(--g);color:var(--tx);font-family:-apple-system,'Segoe UI',sy
 .f1-v{font-family:var(--mn);font-size:13px;font-weight:600;}
 .f1-v.up{color:var(--up);}
 .f1-v.br{color:var(--br);}
+.today-note{min-height:30px;border:1px solid var(--bd);background:rgba(255,255,255,.015);display:flex;align-items:center;justify-content:space-between;gap:10px;padding:5px 8px;color:var(--mu);font-size:10px;}
+.text-btn{border:1px solid var(--bd);background:transparent;color:var(--mu);font-size:10px;padding:3px 8px;cursor:pointer;white-space:nowrap;}
 .f1-table{border:1px solid var(--bd);overflow:hidden;}
 .f1-row{display:grid;grid-template-columns:62px 1fr 62px 70px 62px 76px 60px;align-items:center;border-bottom:1px solid var(--bd);min-height:26px;}
 .f1-row:last-child{border-bottom:none;}
@@ -129,6 +131,21 @@ body{background:var(--g);color:var(--tx);font-family:-apple-system,'Segoe UI',sy
 .flags{display:flex;flex-wrap:wrap;gap:7px;}
 .flag{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--mu);}
 .flag.on{color:var(--tx);}
+.price-flow{padding:12px 16px 14px;border-top:1px solid var(--bd);position:relative;z-index:1;}
+.flow-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:8px;}
+.flow-title{font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:.08em;}
+.flow-sub{font-family:var(--mn);font-size:10px;color:var(--mu);margin-top:2px;}
+.flow-legend{display:flex;align-items:center;gap:10px;font-size:9px;color:var(--mu);white-space:nowrap;}
+.flow-legend span{display:flex;align-items:center;gap:4px;}
+.flow-legend i{width:14px;height:2px;display:inline-block;}
+.lg-cur{background:var(--up);}
+.lg-entry{background:var(--br);}
+.lg-stop{background:var(--dn);}
+.flow-mock{height:180px;border:1px solid var(--bd);background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(255,255,255,.005));position:relative;overflow:hidden;}
+.flow-mock:before{content:"";position:absolute;left:46px;right:14px;top:92px;border-top:1px dashed rgba(247,166,0,.7);}
+.flow-mock:after{content:"";position:absolute;left:46px;right:14px;top:118px;border-top:1px dashed rgba(239,83,80,.65);}
+.flow-line{position:absolute;left:50px;right:20px;top:56px;height:72px;border-bottom:2px solid var(--up);border-radius:45% 25% 20% 35%;transform:skewY(-4deg);}
+.flow-dot{position:absolute;right:18px;top:52px;width:8px;height:8px;background:var(--up);border-radius:50%;}
 
 /* Event log panel */
 .ev-hdr{height:30px;padding:0 12px;display:flex;align-items:center;border-bottom:1px solid var(--bd);font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:.08em;flex-shrink:0;}
@@ -155,6 +172,13 @@ body{background:var(--g);color:var(--tx);font-family:-apple-system,'Segoe UI',sy
 .view-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:12px;min-width:0;}
 .view-title{font-size:15px;font-weight:700;letter-spacing:0;color:var(--tx);}
 .view-sub{font-size:10px;color:var(--mu);margin-top:2px;}
+.asset-action{display:flex;align-items:center;gap:7px;min-height:30px;}
+.refresh-btn{width:30px;height:30px;display:flex;align-items:center;justify-content:center;border:1px solid var(--bd);background:rgba(255,255,255,.018);color:var(--mu);font-size:15px;line-height:1;cursor:pointer;transition:all .1s;}
+.refresh-btn:hover{border-color:rgba(247,166,0,.55);color:var(--br);background:rgba(247,166,0,.07);}
+.status-chip{display:flex;align-items:center;min-height:30px;max-width:360px;border:1px solid var(--bd);background:rgba(255,255,255,.018);padding:0 9px;font-family:var(--mn);font-size:10px;color:var(--mu);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.status-chip.ok{border-color:rgba(38,166,154,.28);background:rgba(38,166,154,.08);color:var(--up);}
+.status-chip.warn{border-color:rgba(247,166,0,.34);background:rgba(247,166,0,.08);color:var(--br);}
+.status-chip.err{border-color:rgba(239,83,80,.32);background:rgba(239,83,80,.08);color:var(--dn);}
 .ref-pill{display:flex;align-items:center;gap:7px;border:1px solid var(--bd);background:rgba(255,255,255,.018);padding:5px 8px;white-space:nowrap;min-height:30px;}
 .ref-k{font-size:9px;color:var(--mu);letter-spacing:.04em;text-transform:uppercase;}
 .ref-v{font-family:var(--mn);font-size:12px;font-weight:700;color:var(--br);}
@@ -163,6 +187,7 @@ body{background:var(--g);color:var(--tx);font-family:-apple-system,'Segoe UI',sy
 .sc2{background:var(--s);border:1px solid var(--bd);padding:12px 14px;}
 .sc2-lbl{font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;}
 .sc2-val{font-family:var(--mn);font-size:20px;font-weight:700;}
+.sc2-note{font-family:var(--mn);font-size:9px;color:var(--mu);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .frow{display:flex;gap:4px;margin-bottom:10px;flex-wrap:wrap;}
 .fp{padding:2px 8px;border:1px solid var(--bd);font-size:10px;color:var(--mu);cursor:pointer;background:transparent;transition:all .1s;}
 .fp:hover{border-color:var(--mu);color:var(--tx);}
@@ -344,23 +369,9 @@ tr:hover td{background:var(--s2);}
             <div><div class="f1-k">구간 보정</div><div class="f1-v br">CORE 1 · HIGH 0</div></div>
           </div>
 
-          <div class="f1-table">
-            <div class="f1-row h">
-              <div class="f1-cell">종목</div><div class="f1-cell">이름</div><div class="f1-cell">최종갭</div>
-              <div class="f1-cell">구간</div><div class="f1-cell">등락률</div><div class="f1-cell">예상체결</div><div class="f1-cell">판정</div>
-            </div>
-            <div class="f1-row">
-              <div class="f1-cell">126640</div><div class="f1-cell name">화신정공</div><div class="f1-cell f1-pass">+5.48%</div>
-              <div class="f1-cell f1-src">CORE_GAP</div><div class="f1-cell">+2.41%</div><div class="f1-cell">+5.48%</div><div class="f1-cell f1-pass">통과</div>
-            </div>
-            <div class="f1-row">
-              <div class="f1-cell">006340</div><div class="f1-cell name">대원전선</div><div class="f1-cell">+8.98%</div>
-              <div class="f1-cell">HIGH_GAP</div><div class="f1-cell">+2.24%</div><div class="f1-cell">+8.98%</div><div class="f1-cell f1-drop">VI근접</div>
-            </div>
-            <div class="f1-row">
-              <div class="f1-cell">005930</div><div class="f1-cell name">삼성전자</div><div class="f1-cell">+1.08%</div>
-              <div class="f1-cell">LOW_GAP</div><div class="f1-cell">+1.08%</div><div class="f1-cell">0.00%</div><div class="f1-cell f1-drop">갭미달</div>
-            </div>
+          <div class="today-note">
+            <span>후보 3개 전체 목록은 선정 메뉴에서 확인</span>
+            <button class="text-btn" onclick="go('selection')">선정 보기</button>
           </div>
         </div>
 
@@ -380,6 +391,21 @@ tr:hover td{background:var(--s2);}
             <div class="flag on"><span class="dot" style="background:var(--br)"></span>최고 스텝 +2.5%</div>
             <div class="flag"><span class="dot off"></span>Hard Stop 74,284원</div>
           </div>
+        </div>
+
+        <div class="price-flow">
+          <div class="flow-head">
+            <div>
+              <div class="flow-title">보유 후 가격흐름</div>
+              <div class="flow-sub">18 ticks · 현재 77,200원</div>
+            </div>
+            <div class="flow-legend">
+              <span><i class="lg-cur"></i>현재</span>
+              <span><i class="lg-entry"></i>진입</span>
+              <span><i class="lg-stop"></i>스탑</span>
+            </div>
+          </div>
+          <div class="flow-mock"><div class="flow-line"></div><div class="flow-dot"></div></div>
         </div>
       </div>
 
@@ -434,14 +460,18 @@ tr:hover td{background:var(--s2);}
       <div class="hist-inner">
         <div class="view-head">
           <div>
-            <div class="view-title">자산 스냅샷</div>
-            <div class="view-sub">KIS 잔고 조회 기준 현재 계좌 상태</div>
+            <div class="view-title">자산 조회</div>
+            <div class="view-sub">KIS 잔고 기준 현재 계좌 상태</div>
+          </div>
+          <div class="asset-action">
+            <button class="refresh-btn" title="KIS 잔고 다시 조회">↻</button>
+            <span class="status-chip ok">최근 조회 09:15:23</span>
           </div>
         </div>
         <div class="scards asset-cards">
           <div class="sc2"><div class="sc2-lbl">총평가금액</div><div class="sc2-val">9,987,445</div></div>
           <div class="sc2"><div class="sc2-lbl">예수금</div><div class="sc2-val" style="color:var(--br)">492,845</div></div>
-          <div class="sc2"><div class="sc2-lbl">주문가능금액</div><div class="sc2-val" style="color:var(--br)">492,845</div></div>
+          <div class="sc2"><div class="sc2-lbl">주문가능금액</div><div class="sc2-val" style="color:var(--br)">492,845</div><div class="sc2-note">예수금 기준</div></div>
           <div class="sc2"><div class="sc2-lbl">유가평가</div><div class="sc2-val">9.49M</div></div>
           <div class="sc2"><div class="sc2-lbl">당일손익</div><div class="sc2-val pup">+1.84%</div></div>
         </div>
@@ -479,10 +509,10 @@ tr:hover td{background:var(--s2);}
         </div>
         <div class="tbl-wrap">
           <table>
-            <thead><tr><th>주문번호</th><th>시간</th><th>종목</th><th>구분</th><th>주문수량</th><th>주문가격</th><th>체결수량</th><th>상태</th><th>단계</th></tr></thead>
+            <thead><tr><th>주문번호</th><th>시간</th><th>종목</th><th>구분</th><th>주문수량</th><th>주문가격</th><th>체결수량</th><th>상태</th><th>단계</th><th>사유</th></tr></thead>
             <tbody>
-              <tr><td>0000000937</td><td>08:59:52</td><td>005930 삼성전자</td><td>매수</td><td>89</td><td>75,800</td><td>89</td><td><span class="badge b-tr">체결</span></td><td>FIRST_BUY</td></tr>
-              <tr><td>0000000938</td><td>09:00:12</td><td>005930 삼성전자</td><td>매수</td><td>18</td><td>76,100</td><td>18</td><td><span class="badge b-tr">체결</span></td><td>PYRAMID_BUY</td></tr>
+              <tr><td>0000000937</td><td>08:59:52</td><td>005930 삼성전자</td><td>매수</td><td>89</td><td>75,800</td><td>89</td><td><span class="badge b-tr">체결</span></td><td>FIRST_BUY</td><td>—</td></tr>
+              <tr><td>0000000938</td><td>09:00:12</td><td>005930 삼성전자</td><td>매수</td><td>18</td><td>76,100</td><td>18</td><td><span class="badge b-tr">체결</span></td><td>PYRAMID_BUY</td><td>—</td></tr>
             </tbody>
           </table>
         </div>

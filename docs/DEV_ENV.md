@@ -525,12 +525,16 @@ F3_PYRAMID_FILL_SEC=10.0
 - `자산` 메뉴는 KIS 잔고 조회 기반 계좌 스냅샷을 표시한다.
   - API: `/api/assets`
   - 항목: 총평가금액, 예수금, 주문가능금액, 보유종목 수, 주식평가금액, 평가손익
+  - KIS 조회 성공 결과는 `asset_snapshots` 테이블에 저장한다.
+  - `/api/assets`와 `/api/status`는 메모리 캐시가 비어 있으면 마지막 저장 스냅샷을 fallback으로 반환할 수 있으며, UI는 `captured_at` 기준 마지막 저장 시각을 표시한다.
 - `주문` 메뉴는 주문 실행과 처리 결과를 표시한다.
   - 현재 원천: `orders` 테이블, 주문 관련 JSONL 이벤트 로그
   - API: `/api/orders`
   - 항목: 주문번호, 종목, 매수/매도, 주문수량, 주문가격, 체결수량, 상태, 주문 단계, 주문시각/체결시각
 - 주문/체결 내역은 `/api/stream`의 로그 이벤트 수신 시 즉시 `/api/orders`를 재조회하고, 5초 폴링을 백업으로 둔다.
 - `주문가능금액`은 자산 데이터이므로 `/api/assets`가 원천이다. 주문 메뉴에서는 주문 판단용 보조 참조값으로만 노출한다.
+- KIS 잔고 조회 응답에 `ord_psbl_cash`가 없으면 UI의 주문가능금액은 `dnca_tot_amt`를 fallback으로 사용한다. 종목별 정확한 주문가능수량/금액 판단은 F3의 매수가능조회 경로를 우선한다.
+- 보유 후 가격흐름은 `live.push_tick()`이 관리하는 최근 tick ring buffer를 `/api/status.tick_history`로 내려받아 표시한다.
 
 ### 테스트 명령
 

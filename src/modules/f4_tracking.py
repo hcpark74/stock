@@ -48,7 +48,7 @@ async def run() -> None:
 
     async def on_tick(tick: dict) -> None:
         live.ws_connected = True
-        live.push_tick(tick["price"])
+        live.push_tick(tick["price"], ticker=ticker)
         await _process_tick(tick["price"], spike_filter)
 
     await kis_ws.subscribe(
@@ -178,7 +178,7 @@ async def _run_dry_ticks(ticker: str, spike_filter: SpikeFilter) -> None:
     for price in prices:
         if state.get().position_status != "HOLDING":
             break
-        live.push_tick(price)
+        live.push_tick(price, ticker=ticker)
         log("DRY_RUN_TICK", level="INFO", ticker=ticker, price=price)
         await _process_tick(price, spike_filter)
         await asyncio.sleep(delay)

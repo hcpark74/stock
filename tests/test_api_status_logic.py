@@ -143,12 +143,29 @@ def test_parse_asset_snapshot_response_parses_kis_balance():
     assert result == {
         "cash": 1_000_000.0,
         "buyable_cash": 800_000.0,
+        "buyable_cash_source": "ord_psbl_cash",
         "stock_value": 500_000.0,
         "total_asset": 1_500_000.0,
         "pnl_amount": 12_000.0,
         "holdings_count": 1,
         "source": "KIS",
     }
+
+
+def test_parse_asset_snapshot_response_falls_back_to_cash_when_buyable_missing():
+    result = status_logic.parse_asset_snapshot_response({
+        "output1": [],
+        "output2": [{
+            "dnca_tot_amt": "1,000,000",
+            "scts_evlu_amt": "500000",
+            "tot_evlu_amt": "1500000",
+            "evlu_pfls_smtl_amt": "12000",
+        }],
+    })
+
+    assert result["cash"] == 1_000_000.0
+    assert result["buyable_cash"] == 1_000_000.0
+    assert result["buyable_cash_source"] == "dnca_tot_amt"
 
 
 def test_parse_asset_snapshot_response_rejects_kis_error():

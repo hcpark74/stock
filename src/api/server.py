@@ -25,6 +25,7 @@ from src.api.status_logic import (
 )
 from src.modules.f4_tracking import HARD_STOP_RATIO, STEP_TRAIL
 from src.modules.f1_filter import F1_SNAPSHOT_DIR
+from src.utils.logger import log
 
 KST = ZoneInfo("Asia/Seoul")
 _MODE = os.getenv("KIS_MODE", "PAPER")
@@ -36,6 +37,7 @@ _ASSET_CACHE_TTL_SEC = float(os.getenv("ASSET_CACHE_TTL_SEC", "60"))
 _ASSET_CACHE: dict | None = None
 _ASSET_CACHE_AT: float = 0.0
 _ASSET_CACHE_LOCK = asyncio.Lock()
+_ASSET_LAST_ERROR: dict | None = None
 _BAL_TR = {"REAL": "TTTC8434R", "PAPER": "VTTC8434R"}
 
 app = FastAPI(title="Daily1 Trading UI", docs_url=None, redoc_url=None)
@@ -184,11 +186,20 @@ async def _fetch_asset_snapshot() -> dict:
         tr_id=_BAL_TR[mode],
         params=kis_rest.balance_inquiry_params(),
     )
-    return _parse_asset_snapshot_response(resp)
+    snapshot = {**_parse_asset_snapshot_response(resp), "captured_at": datetime.now(KST).isoformat()}
+    try:
+        snapshot_id = await db.record_asset_snapshot(snapshot, raw=resp)
+        snapshot = {**snapshot, "asset_snapshot_id": snapshot_id, "snapshot_source": "KIS"}
+    except RuntimeError:
+        snapshot = {**snapshot, "snapshot_source": "KIS"}
+    except Exception as exc:
+        log("ASSET_SNAPSHOT_SAVE_FAILED", level="WARN", error=repr(exc))
+        snapshot = {**snapshot, "snapshot_source": "KIS"}
+    return snapshot
 
 
 async def _asset_snapshot_safe() -> dict | None:
-    global _ASSET_CACHE, _ASSET_CACHE_AT
+    global _ASSET_CACHE, _ASSET_CACHE_AT, _ASSET_LAST_ERROR
     now = asyncio.get_running_loop().time()
     if _ASSET_CACHE is not None and now - _ASSET_CACHE_AT < _ASSET_CACHE_TTL_SEC:
         return _ASSET_CACHE
@@ -204,13 +215,35 @@ async def _asset_snapshot_safe() -> dict | None:
         try:
             _ASSET_CACHE = await _fetch_asset_snapshot()
             _ASSET_CACHE_AT = now
+            _ASSET_LAST_ERROR = None
             return _ASSET_CACHE
-        except Exception:
+        except Exception as exc:
+            _ASSET_LAST_ERROR = {
+                "type": type(exc).__name__,
+                "message": str(exc) or repr(exc),
+            }
+            log(
+                "ASSET_SNAPSHOT_FAILED",
+                level="WARN",
+                error_type=_ASSET_LAST_ERROR["type"],
+                error=_ASSET_LAST_ERROR["message"],
+                has_stale_cache=_ASSET_CACHE is not None,
+            )
             return _ASSET_CACHE
 
 
 def _asset_snapshot_cached() -> dict | None:
     return _ASSET_CACHE
+
+
+async def _latest_asset_snapshot_from_db() -> dict | None:
+    try:
+        return await db.latest_asset_snapshot()
+    except RuntimeError:
+        return None
+    except Exception as exc:
+        log("ASSET_SNAPSHOT_LOAD_FAILED", level="WARN", error=repr(exc))
+        return None
 
 
 # ── /api/status ──────────────────────────────────────────────────────
@@ -219,7 +252,7 @@ def _asset_snapshot_cached() -> dict | None:
 async def api_status() -> JSONResponse:
     s = state.get()
     logs = _read_today_logs(limit=_STATUS_LOG_LIMIT)
-    assets = _asset_snapshot_cached()
+    assets = _asset_snapshot_cached() or await _latest_asset_snapshot_from_db()
     entry = s.entry_price or 0.0
     cur = live.last_tick_price
     pnl_pct = round((cur / entry - 1) * 100, 2) if (cur and entry) else None
@@ -249,6 +282,7 @@ async def api_status() -> JSONResponse:
         "ntp_level": live.ntp_level,
         "close_reason": s.close_reason,
         "assets": assets,
+        "tick_history": live.tick_history(s.target_ticker) if s.position_status == "HOLDING" else [],
         **_pipeline_from_logs(logs, s.position_status),
     })
 
@@ -258,7 +292,9 @@ async def api_status() -> JSONResponse:
 @app.get("/api/assets")
 async def api_assets(refresh: int = 0) -> JSONResponse:
     assets = await _asset_snapshot_safe() if refresh else _asset_snapshot_cached()
-    return JSONResponse({"assets": assets})
+    if assets is None and not refresh:
+        assets = await _latest_asset_snapshot_from_db()
+    return JSONResponse({"assets": assets, "error": None if assets else _ASSET_LAST_ERROR})
 
 
 @app.get("/api/logs")
@@ -288,7 +324,8 @@ async def api_orders(limit: int = 60) -> JSONResponse:
         ) as cur:
             rows = await cur.fetchall()
         return JSONResponse([dict(r) for r in rows])
-    except Exception:
+    except Exception as exc:
+        log("API_ORDERS_FAILED", level="WARN", error=repr(exc))
         return JSONResponse([])
 
 
@@ -330,7 +367,8 @@ async def api_history(limit: int = 60) -> JSONResponse:
         ) as cur:
             rows = await cur.fetchall()
         result = [dict(r) for r in rows]
-    except Exception:
+    except Exception as exc:
+        log("API_HISTORY_FAILED", level="WARN", error=repr(exc))
         result = []
     return JSONResponse(result)
 
@@ -391,7 +429,8 @@ async def api_stats() -> JSONResponse:
             "by_reason": by_reason,
             "monthly": monthly,
         })
-    except Exception:
+    except Exception as exc:
+        log("API_STATS_FAILED", level="WARN", error=repr(exc))
         return JSONResponse({"total": 0, "wins": 0, "losses": 0, "win_rate": 0,
                              "avg_pnl": 0, "max_loss": 0, "max_gain": 0,
                              "by_reason": {}, "monthly": []})

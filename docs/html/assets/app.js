@@ -121,6 +121,8 @@ function drawArc(prog) {
 // ── Status 업데이트 ───────────────────────────────────────────────────────
 let _lastStatus = null;
 let _lastAssets = null;
+let _priceFlow = [];
+let _priceFlowTicker = null;
 
 function applyStatus(d) {
   if(d.assets) _lastAssets = d.assets;
@@ -178,6 +180,7 @@ function applyStatus(d) {
   $('pv-qty').innerHTML  = d.remaining_qty!=null ? fmt(d.remaining_qty)+'<span class="u">주</span>' : '—';
   const amt = d.entry_price&&d.entry_qty ? d.entry_price*d.entry_qty : null;
   $('pv-amount').innerHTML = amt ? fmtM(amt) : '—';
+  updatePriceFlow(d);
 
   // 플래그
   const trail = d.trailing_active;
@@ -283,33 +286,107 @@ function renderF1(d) {
     <div><div class="f1-k">구간 보정</div><div class="f1-v br">${esc(`CORE ${d.core_gap||0} · HIGH ${d.high_gap_allowed||0}`)}</div></div>
   `;
 
-  const rows = (d.candidates || []).slice(0, 8);
-  if(!rows.length) {
-    $('f1-table').innerHTML = '<div class="empty">F1 후보 스냅샷 없음</div>';
-    renderSelection(d);
+  const note = $('f1-today-note');
+  if(note) {
+    const count = d.candidates?.length || 0;
+    note.textContent = count ? `후보 ${count}개 전체 목록은 선정 메뉴에서 확인` : '후보 전체 목록은 선정 메뉴에서 확인';
+  }
+  renderSelection(d);
+}
+
+function updatePriceFlow(d) {
+  const ticker = d?.ticker || null;
+  if(ticker !== _priceFlowTicker) {
+    _priceFlowTicker = ticker;
+    _priceFlow = [];
+  }
+  if(Array.isArray(d?.tick_history) && d.tick_history.length) {
+    _priceFlow = d.tick_history
+      .map(row => ({ts: Date.parse(row.ts) || Date.now(), price: Number(row.price || 0)}))
+      .filter(row => row.price > 0)
+      .slice(-120);
+  }
+  const price = Number(d?.current_price || 0);
+  if(price > 0 && d?.position_status === 'HOLDING') {
+    const last = _priceFlow[_priceFlow.length - 1];
+    if(!last || last.price !== price) {
+      _priceFlow.push({ts: Date.now(), price});
+      if(_priceFlow.length > 120) _priceFlow.shift();
+    }
+  }
+  drawPriceFlow(d);
+}
+
+function drawPriceFlow(d) {
+  const c = $('price-flow');
+  if(!c) return;
+  const ctx = c.getContext('2d');
+  const W = c.width, H = c.height;
+  ctx.clearRect(0, 0, W, H);
+  const pad = {l:46,r:14,t:14,b:24};
+  const chartW = W - pad.l - pad.r;
+  const chartH = H - pad.t - pad.b;
+  const points = _priceFlow;
+  const refs = [d?.entry_price, d?.high_price, d?.trail_stop, d?.hard_stop, d?.current_price]
+    .map(Number).filter(v => v > 0);
+  const values = points.map(p => p.price).concat(refs);
+  const sub = $('flow-sub');
+  if(!values.length || d?.position_status !== 'HOLDING') {
+    const emptyText = d?.position_status === 'CLOSED' ? '포지션 청산됨' : '보유 포지션 없음';
+    if(sub) sub.textContent = emptyText;
+    ctx.fillStyle = themeVal('#787b86', '#4f5260');
+    ctx.font = '12px Noto Sans KR,sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(emptyText, W / 2, H / 2);
     return;
   }
-  $('f1-table').innerHTML = `
-    <div class="f1-row h">
-      <div class="f1-cell">종목</div><div class="f1-cell">이름</div><div class="f1-cell">최종갭</div>
-        <div class="f1-cell">구간</div><div class="f1-cell">등락률</div><div class="f1-cell">예상체결</div><div class="f1-cell">판정</div>
-    </div>
-    ${rows.map(c=>{
-      const verdict = c.verdict || '';
-      const pass = c.gap_allowed === true || verdict === '통과' || verdict === '고갭통과';
-      const band = c.gap_band || ((c.gap_source || '').startsWith('expected') ? '예상체결' : '등락률');
-      return `<div class="f1-row">
-        <div class="f1-cell">${esc(c.ticker)}</div>
-        <div class="f1-cell name">${esc(c.name || TICKER_NAMES[c.ticker] || '')}</div>
-        <div class="f1-cell ${pass?'f1-pass':''}">${fmtPct(pctFromRatio(c.gap_pct))}</div>
-        <div class="f1-cell ${pass?'f1-src':''}">${esc(band)}</div>
-        <div class="f1-cell">${fmtPct(pctFromRatio(c.ranking_gap_pct))}</div>
-        <div class="f1-cell">${c.expected_api_gap_pct==null ? '—' : fmtPct(pctFromRatio(c.expected_api_gap_pct))}</div>
-        <div class="f1-cell ${pass?'f1-pass':'f1-drop'}">${esc(verdict)}</div>
-      </div>`;
-    }).join('')}
-  `;
-  renderSelection(d);
+  if(sub) sub.textContent = `${points.length} ticks · 현재 ${fmt(d.current_price)}원`;
+  let min = Math.min(...values), max = Math.max(...values);
+  if(min === max) { min *= .998; max *= 1.002; }
+  const span = max - min;
+  min -= span * .12; max += span * .12;
+  const xAt = i => pad.l + (points.length <= 1 ? chartW : chartW * i / (points.length - 1));
+  const yAt = v => pad.t + (max - v) / (max - min) * chartH;
+
+  ctx.strokeStyle = themeVal('rgba(120,123,134,.18)', 'rgba(79,82,96,.18)');
+  ctx.lineWidth = 1;
+  for(let i=0;i<4;i++){
+    const y = pad.t + chartH * i / 3;
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+  }
+
+  const drawRef = (value, color, label) => {
+    if(!value) return;
+    const y = yAt(Number(value));
+    ctx.strokeStyle = color; ctx.setLineDash([4,4]); ctx.beginPath();
+    ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = color; ctx.font = '10px Noto Sans KR,sans-serif'; ctx.textAlign = 'left';
+    ctx.fillText(label, pad.l + 4, y - 4);
+  };
+  drawRef(d.entry_price, '#f7a600', '진입');
+  drawRef(d.trail_stop || d.hard_stop, '#ef5350', d.trail_stop ? 'Trail Stop' : 'Hard Stop');
+  drawRef(d.high_price, '#7b9ef9', '최고');
+
+  if(points.length > 1) {
+    ctx.strokeStyle = Number(d.current_price) >= Number(d.entry_price || d.current_price) ? '#26a69a' : '#ef5350';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    points.forEach((p,i) => {
+      const x = xAt(i), y = yAt(p.price);
+      if(i === 0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    });
+    ctx.stroke();
+  }
+  const last = points[points.length - 1];
+  if(last) {
+    ctx.fillStyle = Number(last.price) >= Number(d.entry_price || last.price) ? '#26a69a' : '#ef5350';
+    ctx.beginPath(); ctx.arc(xAt(points.length - 1), yAt(last.price), 4, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.fillStyle = themeVal('#787b86', '#4f5260');
+  ctx.font = '10px Noto Sans KR,sans-serif';
+  ctx.textAlign = 'right';
+  ctx.fillText(fmt(max), pad.l - 6, pad.t + 4);
+  ctx.fillText(fmt(min), pad.l - 6, pad.t + chartH);
 }
 
 function renderSelection(d) {
@@ -377,12 +454,33 @@ function positionAssetValues(d) {
     total: assets.total_asset != null ? Number(assets.total_asset) : stockValue,
     cash: assets.cash != null ? Number(assets.cash) : null,
     buyable: assets.buyable_cash != null ? Number(assets.buyable_cash) : null,
+    buyableSource: assets.buyable_cash_source || null,
     holdings: assets.holdings_count != null ? Number(assets.holdings_count) : (qty > 0 && d.ticker ? 1 : 0),
   };
 }
 
+function buyableSourceLabel(source) {
+  if(source === 'ord_psbl_cash') return '주문가능 현금';
+  if(source === 'dnca_tot_amt') return '예수금 기준';
+  return '출처 대기';
+}
+
+function assetSnapshotLabel(assets, freshLabel='자산 메뉴에서 상세') {
+  if(!assets) return freshLabel;
+  if(assets.snapshot_source === 'DB') {
+    const t = shortTime(assets.captured_at);
+    return t === '—' ? '마지막 저장 스냅샷' : `마지막 저장 ${t}`;
+  }
+  if(assets.snapshot_source === 'KIS') {
+    const t = shortTime(assets.captured_at);
+    return t === '—' ? freshLabel : `KIS 조회 ${t}`;
+  }
+  return freshLabel;
+}
+
 function renderAssetSummary(d) {
   const v = positionAssetValues(d);
+  const assets = d?.assets || _lastAssets || null;
   $('as-total').innerHTML = v.total == null ? '—' : fmtWon(v.total);
   $('as-cash').innerHTML = v.cash == null ? '—' : fmtWon(v.cash);
   $('as-holdings').textContent = `${v.holdings}종목`;
@@ -390,6 +488,7 @@ function renderAssetSummary(d) {
   pnl.innerHTML = v.pnlAmount == null ? '—' : fmtWon(v.pnlAmount);
   pnl.className = 'asset-v ' + (v.pnlAmount == null ? '' : v.pnlAmount >= 0 ? 'up' : 'dn');
   $('as-buyable').innerHTML = v.buyable == null ? '—' : fmtWon(v.buyable);
+  if($('as-source')) $('as-source').textContent = assetSnapshotLabel(assets);
   $('order-buyable').textContent = v.buyable == null ? '—' : fmtM(v.buyable);
 }
 
@@ -399,13 +498,15 @@ function renderAssets(d) {
   $('asset-total').textContent = v.total == null ? '—' : fmt(v.total);
   $('asset-cash').textContent = v.cash == null ? '—' : fmt(v.cash);
   $('asset-buyable').textContent = v.buyable == null ? '—' : fmt(v.buyable);
+  const assets = d?.assets || _lastAssets || null;
+  $('asset-buyable-source').textContent = `${buyableSourceLabel(v.buyableSource)} · ${assetSnapshotLabel(assets, 'KIS 현재 조회')}`;
   $('asset-stock').textContent = v.stockValue == null ? '—' : fmtM(v.stockValue);
   $('asset-pnl').textContent = v.pnlAmount == null ? '—' : fmt(v.pnlAmount);
   $('asset-pnl').className = 'sc2-val ' + (v.pnlAmount == null ? '' : v.pnlAmount >= 0 ? 'pup' : 'pdn');
 
   const rows = [];
   rows.push(`<tr><td>예수금</td><td>${v.cash == null ? '—' : fmt(v.cash)}</td><td>—</td><td><span class="badge ${v.cash == null ? 'b-to' : 'b-op'}">${v.cash == null ? 'API 대기' : '연동'}</span></td></tr>`);
-  rows.push(`<tr><td>주문가능금액</td><td>${v.buyable == null ? '—' : fmt(v.buyable)}</td><td>—</td><td><span class="badge ${v.buyable == null ? 'b-to' : 'b-op'}">${v.buyable == null ? 'API 대기' : '주문가능'}</span></td></tr>`);
+  rows.push(`<tr><td>주문가능금액</td><td>${v.buyable == null ? '—' : fmt(v.buyable)}</td><td>${esc(buyableSourceLabel(v.buyableSource))}</td><td><span class="badge ${v.buyable == null ? 'b-to' : 'b-op'}">${v.buyable == null ? 'API 대기' : '주문가능'}</span></td></tr>`);
   if(v.holdings && d?.ticker) {
     rows.push(`<tr><td>${esc(d.ticker)} ${esc(TICKER_NAMES[d.ticker] || '')}</td><td>${fmt(v.stockValue)}</td><td>—</td><td><span class="badge b-tr">보유중</span></td></tr>`);
     rows.push(`<tr><td>평가손익</td><td class="${v.pnlAmount >= 0 ? 'pup' : 'pdn'}">${fmt(v.pnlAmount)}</td><td>${fmtPct(d.pnl_pct)}</td><td><span class="badge ${v.pnlAmount >= 0 ? 'b-tr' : 'b-hs'}">${v.pnlAmount >= 0 ? '수익' : '손실'}</span></td></tr>`);
@@ -452,7 +553,7 @@ function renderOrders(rows) {
   const body = $('orders-tbody');
   if(!body) return;
   if(!orders.length) {
-    body.innerHTML = '<tr><td colspan="9" class="empty">오늘 주문 내역 없음</td></tr>';
+    body.innerHTML = '<tr><td colspan="10" class="empty">오늘 주문 내역 없음</td></tr>';
     return;
   }
   body.innerHTML = orders.map(o => {
@@ -467,6 +568,7 @@ function renderOrders(rows) {
       <td>${o.fill_qty == null ? '—' : fmt(o.fill_qty)}</td>
       <td>${orderStatusBadge(o.status)}</td>
       <td>${esc(o.order_phase || '—')}</td>
+      <td>${esc(o.error_msg || o.error_code || '—')}</td>
     </tr>`;
   }).join('');
 }
@@ -702,10 +804,32 @@ async function loadStatus() {
 async function loadAssets(refresh) {
   const btn = $('asset-refresh');
   const meta = $('asset-updated');
+  const setAssetMeta = (text, cls='idle', title='') => {
+    if(!meta) return;
+    meta.textContent = text;
+    meta.className = 'status-chip ' + cls;
+    meta.title = title || text;
+  };
+  const assetErrorLabel = err => {
+    const msg = String(err?.message || '').trim();
+    const code = msg.match(/\bmsg_cd=([^ ]+)/)?.[1] || String(err?.code || '').trim();
+    const msg1 = msg.match(/\bmsg1=(.+)$/)?.[1];
+    if(code && msg1) return `${code}: ${msg1}`;
+    if(code) return code;
+    const missing = msg.match(/missing field ([A-Za-z0-9_]+)/);
+    if(missing) return `응답 필드 누락: ${missing[1]}`;
+    if(msg.includes('missing output2')) return '잔고 요약 누락';
+    if(msg.includes('output1 is not a list')) return '보유종목 응답 형식 오류';
+    if(msg.includes('output1 item is not an object')) return '보유종목 항목 형식 오류';
+    const invalid = msg.match(/invalid field ([A-Za-z0-9_]+)/);
+    if(invalid) return `응답 숫자 오류: ${invalid[1]}`;
+    return msg || '원인 미상';
+  };
   try {
     if(refresh && btn) {
       btn.disabled = true;
-      btn.textContent = '조회중';
+      btn.textContent = '…';
+      setAssetMeta('KIS 잔고 조회중', 'warn');
     }
     let r = await fetch('/api/assets' + (refresh ? '?refresh=1' : ''));
     let d = null;
@@ -715,7 +839,7 @@ async function loadAssets(refresh) {
       r = await fetch('/api/status');
       if(!r.ok) throw new Error('asset api missing');
       d = await r.json();
-      if(meta) meta.textContent = '자산 API 미반영: 서버 재시작 필요';
+      setAssetMeta('자산 API 미반영', 'warn');
     } else {
       if(!r.ok) throw new Error('asset api failed');
       d = await r.json();
@@ -726,16 +850,26 @@ async function loadAssets(refresh) {
       _lastStatus.assets = d.assets;
       renderAssetSummary(_lastStatus);
       renderAssets(_lastStatus);
-      if(meta && !missingAssetApi) meta.textContent = '최근 조회 ' + new Date().toLocaleTimeString('ko-KR', {hour12:false});
+      if(!missingAssetApi) {
+        const metaText = d.assets.snapshot_source === 'DB'
+          ? assetSnapshotLabel(d.assets)
+          : '최근 조회 ' + new Date().toLocaleTimeString('ko-KR', {hour12:false});
+        setAssetMeta(metaText, d.assets.snapshot_source === 'DB' ? 'warn' : 'ok');
+      }
     } else if(meta) {
-      meta.textContent = refresh ? '자산 응답 없음' : '자산 조회 대기';
+      if(refresh && d.error) {
+        const reason = assetErrorLabel(d.error);
+        setAssetMeta('KIS 잔고 실패: ' + reason, 'warn', d.error.message || reason);
+      } else {
+        setAssetMeta(refresh ? 'KIS 잔고 응답 없음' : '자산 조회 대기', refresh ? 'warn' : 'idle');
+      }
     }
   } catch(e) {
-    if(meta) meta.textContent = '자산 조회 실패';
+    setAssetMeta('자산 API 호출 실패', 'err');
   } finally {
     if(btn) {
       btn.disabled = false;
-      btn.textContent = '↻ 새로고침';
+      btn.textContent = '↻';
     }
   }
 }
@@ -820,6 +954,7 @@ function toggleTheme() {
   localStorage.setItem('theme', next);
   // canvas는 CSS 변수를 읽지 못하므로 재렌더
   drawArc(0);
+  drawPriceFlow(_lastStatus);
   if (_statsData) renderStats(_statsData);
 }
 

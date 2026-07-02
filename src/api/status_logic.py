@@ -24,6 +24,16 @@ def _required_balance_float(source: dict, field: str) -> float:
         raise RuntimeError(f"KIS balance response invalid field {field}={value!r}") from exc
 
 
+def _optional_balance_float(source: dict, field: str) -> float | None:
+    value = source.get(field)
+    if value is None or value == "":
+        return None
+    try:
+        return float(str(value).replace(",", ""))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"KIS balance response invalid field {field}={value!r}") from exc
+
+
 def parse_asset_snapshot_response(resp: dict) -> dict:
     rt_cd = resp.get("rt_cd")
     if rt_cd not in (None, "0", 0):
@@ -46,13 +56,14 @@ def parse_asset_snapshot_response(resp: dict) -> dict:
 
     holdings = [item for item in output1 if int(_required_balance_float(item, "hldg_qty")) > 0]
     cash = _required_balance_float(summary, "dnca_tot_amt")
-    buyable = _required_balance_float(summary, "ord_psbl_cash")
+    buyable = _optional_balance_float(summary, "ord_psbl_cash")
     stock_value = _required_balance_float(summary, "scts_evlu_amt")
     total = _required_balance_float(summary, "tot_evlu_amt")
     pnl = _required_balance_float(summary, "evlu_pfls_smtl_amt")
     return {
         "cash": cash,
-        "buyable_cash": buyable,
+        "buyable_cash": buyable if buyable is not None else cash,
+        "buyable_cash_source": "ord_psbl_cash" if buyable is not None else "dnca_tot_amt",
         "stock_value": stock_value,
         "total_asset": total,
         "pnl_amount": pnl,

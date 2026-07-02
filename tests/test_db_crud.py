@@ -194,3 +194,39 @@ async def test_timeout_close_reason(mem):
         row = await cur.fetchone()
     assert row["close_reason"] == "TIMEOUT"
     assert row["pnl_pct"] == pytest.approx(-0.77)
+
+
+async def test_record_asset_snapshot_inserts_row(mem):
+    snapshot_id = await db.record_asset_snapshot(
+        {
+            "total_asset": 1_500_000.0,
+            "cash": 1_000_000.0,
+            "buyable_cash": 800_000.0,
+            "buyable_cash_source": "ord_psbl_cash",
+            "stock_value": 500_000.0,
+            "pnl_amount": 12_000.0,
+            "holdings_count": 1,
+            "source": "KIS",
+        },
+        raw={"rt_cd": "0"},
+    )
+    conn = db.get()
+    async with conn.execute(
+        "SELECT total_asset, buyable_cash_source, raw_json FROM asset_snapshots WHERE id=?",
+        (snapshot_id,),
+    ) as cur:
+        row = await cur.fetchone()
+
+    assert row["total_asset"] == pytest.approx(1_500_000.0)
+    assert row["buyable_cash_source"] == "ord_psbl_cash"
+    assert row["raw_json"] == '{"rt_cd":"0"}'
+
+
+async def test_latest_asset_snapshot_returns_newest(mem):
+    await db.record_asset_snapshot({"total_asset": 1.0, "source": "KIS"})
+    await db.record_asset_snapshot({"total_asset": 2.0, "source": "KIS"})
+
+    latest = await db.latest_asset_snapshot()
+
+    assert latest["total_asset"] == pytest.approx(2.0)
+    assert latest["snapshot_source"] == "DB"

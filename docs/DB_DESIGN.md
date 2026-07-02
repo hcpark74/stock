@@ -17,7 +17,7 @@
 | 수량 | `INTEGER` |
 | Enum 값 | `TEXT` CHECK 제약으로 강제 |
 | 운영 상태 | `today_state.json` 유지 — crash recovery 전용 |
-| 분석/이력 | SQLite (`trades`, `orders`, `partial_exits`, `daily_skips`) |
+| 분석/이력 | SQLite (`trades`, `orders`, `partial_exits`, `daily_skips`, `asset_snapshots`) |
 
 ---
 
@@ -27,7 +27,92 @@
 trades (1) ──< orders       (N)
 trades (1) ──< partial_exits(N)
 trades (1) ──  daily_skips  (date 기준 선택적)
+asset_snapshots             (KIS 자산 조회 이력)
 ```
+
+### Mermaid ERD
+
+```mermaid
+erDiagram
+    TRADES ||--o{ ORDERS : has
+    TRADES ||--o{ PARTIAL_EXITS : has
+    ORDERS ||--o{ PARTIAL_EXITS : references
+
+    TRADES {
+        integer id PK
+        text date UK
+        text ticker
+        real entry_price
+        integer entry_qty
+        text entry_at
+        real exit_price
+        integer exit_qty
+        text exit_at
+        text close_reason
+        real pnl_pct
+        real pnl_amount
+        real high_price
+        real highest_step
+        integer pyramided
+        text status
+        text created_at
+        text updated_at
+    }
+
+    ORDERS {
+        integer id PK
+        integer trade_id FK
+        text kis_order_id
+        text order_type
+        text order_phase
+        text ticker
+        integer order_qty
+        real order_price
+        real fill_price
+        integer fill_qty
+        integer fill_latency_ms
+        text status
+        text ordered_at
+        text filled_at
+        text error_code
+        text error_msg
+    }
+
+    PARTIAL_EXITS {
+        integer id PK
+        integer trade_id FK
+        integer order_id FK
+        real exit_price
+        integer exit_qty
+        integer remaining_qty
+        real pnl_pct
+        text exited_at
+    }
+
+    DAILY_SKIPS {
+        integer id PK
+        text date UK
+        text reason
+        text detail
+        text created_at
+    }
+
+    ASSET_SNAPSHOTS {
+        integer id PK
+        text captured_at
+        real total_asset
+        real cash
+        real buyable_cash
+        text buyable_cash_source
+        real stock_value
+        real pnl_amount
+        integer holdings_count
+        text source
+        text raw_json
+    }
+```
+
+`daily_skips`는 `trades.date`와 업무적으로 같은 거래일을 공유하지만 FK는 두지 않는다. `asset_snapshots`는 KIS 잔고 조회 시각 기준 이력이므로 거래 테이블과 직접 연결하지 않는다.
 
 ---
 
@@ -138,6 +223,31 @@ CREATE TABLE IF NOT EXISTS orders (
 
 CREATE INDEX IF NOT EXISTS idx_orders_trade_id    ON orders(trade_id);
 CREATE INDEX IF NOT EXISTS idx_orders_kis_order_id ON orders(kis_order_id);
+```
+
+---
+
+### 3-2-1. `asset_snapshots` — KIS 자산 조회 이력
+
+자산 메뉴의 현재값은 KIS 잔고 조회가 원천이지만, 조회 성공 결과는 장애 분석과 감사 추적을 위해 DB에도 저장한다.
+
+```sql
+CREATE TABLE IF NOT EXISTS asset_snapshots (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    captured_at         TEXT NOT NULL,          -- ISO8601 KST
+    total_asset         REAL,                   -- 총평가금액
+    cash                REAL,                   -- 예수금
+    buyable_cash        REAL,                   -- 주문가능금액
+    buyable_cash_source TEXT,                   -- ord_psbl_cash | dnca_tot_amt
+    stock_value         REAL,                   -- 주식평가금액
+    pnl_amount          REAL,                   -- 평가손익
+    holdings_count      INTEGER,                -- 보유종목 수
+    source              TEXT NOT NULL DEFAULT 'KIS',
+    raw_json            TEXT                    -- KIS 원 응답 JSON
+);
+
+CREATE INDEX IF NOT EXISTS idx_asset_snapshots_captured_at
+    ON asset_snapshots(captured_at);
 ```
 
 ---
@@ -357,6 +467,7 @@ F5  execute()           → orders.record_order(TIMEOUT_SELL)
 
 ### UI 메뉴와 데이터 원천
 
-- 자산 메뉴는 DB가 아니라 KIS 잔고 조회(`/api/assets`)의 현재 스냅샷을 원천으로 삼는다.
+- 자산 메뉴의 원천은 KIS 잔고 조회(`/api/assets`)의 현재 스냅샷이며, 조회 성공 결과는 `asset_snapshots` 테이블에 이력으로 저장한다.
+- `/api/assets`는 서버 메모리 캐시가 비어 있으면 마지막 `asset_snapshots` 행을 fallback으로 반환할 수 있다.
 - 주문 메뉴는 `orders` 테이블을 주 원천으로 삼고, 체결조회 타임아웃/취소 전송/실패 사유 같은 진단 정보는 JSONL 이벤트 로그를 보조로 사용한다.
 - `주문가능금액`은 자산 메뉴 데이터로 분류한다. 주문 메뉴에서 표시할 경우 주문 판단용 참조값으로만 사용한다.

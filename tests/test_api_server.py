@@ -116,6 +116,33 @@ async def test_status_does_not_fetch_asset_snapshot(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_status_includes_tick_history_only_while_holding(monkeypatch):
+    s = server.state.get()
+    server.live.clear_tick_history()
+    server.live.push_tick(75_000.0, ticker="005930")
+    server.live.push_tick(75_500.0, ticker="005930")
+    monkeypatch.setattr(server, "_read_today_logs", lambda limit=None: [])
+    monkeypatch.setattr(s, "position_status", "HOLDING")
+    monkeypatch.setattr(s, "target_ticker", "005930")
+    monkeypatch.setattr(s, "entry_price", 75_000.0)
+    monkeypatch.setattr(s, "entry_qty", 1)
+    monkeypatch.setattr(s, "remaining_qty", 1)
+    monkeypatch.setattr(s, "high_price", 75_500.0)
+
+    resp = await server.api_status()
+    body = resp.body.decode("utf-8")
+
+    assert '"tick_history"' in body
+    assert '"price":75500.0' in body
+
+    monkeypatch.setattr(s, "position_status", "IDLE")
+    resp = await server.api_status()
+    assert '"tick_history":[]' in resp.body.decode("utf-8")
+
+    server.live.clear_tick_history()
+
+
+@pytest.mark.asyncio
 async def test_assets_refresh_fetches_asset_snapshot(monkeypatch):
     fetch = AsyncMock(return_value={"cash": 1_000_000.0})
     monkeypatch.setattr(server, "_asset_snapshot_safe", fetch)
@@ -169,15 +196,79 @@ async def test_fetch_asset_snapshot_parses_kis_balance(monkeypatch):
 
     result = await server._fetch_asset_snapshot()
 
-    assert result == {
+    assert result.items() >= {
         "cash": 1_000_000.0,
         "buyable_cash": 800_000.0,
+        "buyable_cash_source": "ord_psbl_cash",
         "stock_value": 500_000.0,
         "total_asset": 1_500_000.0,
         "pnl_amount": 12_000.0,
         "holdings_count": 1,
         "source": "KIS",
-    }
+        "snapshot_source": "KIS",
+    }.items()
+    assert "captured_at" in result
+
+
+@pytest.mark.asyncio
+async def test_fetch_asset_snapshot_saves_to_db(tmp_path, monkeypatch):
+    await db.init(str(tmp_path / "assets.db"))
+
+    async def fake_get(*args, **kwargs):
+        return {
+            "rt_cd": "0",
+            "output1": [{"pdno": "005930", "hldg_qty": "2"}],
+            "output2": [{
+                "dnca_tot_amt": "1000000",
+                "ord_psbl_cash": "800000",
+                "scts_evlu_amt": "500000",
+                "tot_evlu_amt": "1500000",
+                "evlu_pfls_smtl_amt": "12000",
+            }],
+        }
+
+    monkeypatch.setattr(server.kis_rest, "get", fake_get)
+
+    result = await server._fetch_asset_snapshot()
+    conn = db.get()
+    async with conn.execute("SELECT total_asset, raw_json FROM asset_snapshots") as cur:
+        row = await cur.fetchone()
+
+    assert result["asset_snapshot_id"] > 0
+    assert "captured_at" in result
+    assert row["total_asset"] == pytest.approx(1_500_000.0)
+    assert '"rt_cd":"0"' in row["raw_json"]
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_assets_without_cache_falls_back_to_latest_db_snapshot(tmp_path, monkeypatch):
+    await db.init(str(tmp_path / "assets.db"))
+    await db.record_asset_snapshot({"total_asset": 2_000_000.0, "cash": 300_000.0, "source": "KIS"})
+    monkeypatch.setattr(server, "_ASSET_CACHE", None)
+
+    resp = await server.api_assets(refresh=0)
+    body = resp.body.decode("utf-8")
+
+    assert '"total_asset":2000000.0' in body
+    assert '"snapshot_source":"DB"' in body
+    assert '"captured_at"' in body
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_status_without_cache_falls_back_to_latest_db_snapshot(tmp_path, monkeypatch):
+    await db.init(str(tmp_path / "assets.db"))
+    await db.record_asset_snapshot({"total_asset": 2_000_000.0, "cash": 300_000.0, "source": "KIS"})
+    monkeypatch.setattr(server, "_ASSET_CACHE", None)
+
+    resp = await server.api_status()
+    body = resp.body.decode("utf-8")
+
+    assert '"total_asset":2000000.0' in body
+    assert '"snapshot_source":"DB"' in body
+    assert '"captured_at"' in body
+    await db.close()
 
 
 @pytest.mark.asyncio
@@ -251,3 +342,26 @@ async def test_asset_snapshot_safe_first_load_waits_for_inflight_refresh(monkeyp
     release.set()
     assert await asyncio.gather(first, second) == [{"cash": 7.0}, {"cash": 7.0}]
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_asset_snapshot_safe_records_failure_reason(monkeypatch):
+    events = []
+
+    async def fake_fetch():
+        raise RuntimeError("KIS balance error rt_cd=1 msg_cd=EGW00123 msg1=token expired")
+
+    monkeypatch.setattr(server, "_ASSET_CACHE", None)
+    monkeypatch.setattr(server, "_ASSET_CACHE_AT", 0.0)
+    monkeypatch.setattr(server, "_ASSET_LAST_ERROR", None)
+    monkeypatch.setattr(server, "_ASSET_CACHE_LOCK", asyncio.Lock())
+    monkeypatch.setattr(server, "_fetch_asset_snapshot", fake_fetch)
+    monkeypatch.setattr(server, "log", lambda event, **kwargs: events.append((event, kwargs)))
+
+    resp = await server.api_assets(refresh=1)
+    body = resp.body.decode("utf-8")
+
+    assert '"assets":null' in body
+    assert "EGW00123" in body
+    assert events[0][0] == "ASSET_SNAPSHOT_FAILED"
+    assert events[0][1]["error_type"] == "RuntimeError"

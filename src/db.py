@@ -1,6 +1,7 @@
 """SQLite 연결 관리 — DB_DESIGN.md §4 PRAGMA 설정"""
 
 import aiosqlite
+import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -99,6 +100,23 @@ async def init(db_path: str) -> None:
             detail     TEXT,
             created_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS asset_snapshots (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            captured_at         TEXT NOT NULL,
+            total_asset         REAL,
+            cash                REAL,
+            buyable_cash        REAL,
+            buyable_cash_source TEXT,
+            stock_value         REAL,
+            pnl_amount          REAL,
+            holdings_count      INTEGER,
+            source              TEXT NOT NULL DEFAULT 'KIS',
+            raw_json            TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_asset_snapshots_captured_at
+            ON asset_snapshots(captured_at);
     """)
     # 기존 DB 마이그레이션: highest_step 컬럼 추가
     try:
@@ -222,3 +240,49 @@ async def record_skip(date: str, reason: str, detail: str = "") -> None:
         (date, reason, detail, now),
     )
     await conn.commit()
+
+
+async def record_asset_snapshot(snapshot: dict, raw: dict | None = None) -> int:
+    """asset_snapshots 테이블에 KIS 잔고 조회 결과를 저장하고 id를 반환."""
+    now = _now()
+    conn = get()
+    async with conn.execute(
+        """INSERT INTO asset_snapshots
+               (captured_at, total_asset, cash, buyable_cash, buyable_cash_source,
+                stock_value, pnl_amount, holdings_count, source, raw_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            now,
+            snapshot.get("total_asset"),
+            snapshot.get("cash"),
+            snapshot.get("buyable_cash"),
+            snapshot.get("buyable_cash_source"),
+            snapshot.get("stock_value"),
+            snapshot.get("pnl_amount"),
+            snapshot.get("holdings_count"),
+            snapshot.get("source") or "KIS",
+            json.dumps(raw, ensure_ascii=False, separators=(",", ":")) if raw is not None else None,
+        ),
+    ) as cur:
+        snapshot_id = cur.lastrowid
+    await conn.commit()
+    return snapshot_id
+
+
+async def latest_asset_snapshot() -> dict | None:
+    """가장 최근 asset_snapshots 행을 UI/API 응답 형태로 반환."""
+    conn = get()
+    async with conn.execute(
+        """SELECT captured_at, total_asset, cash, buyable_cash, buyable_cash_source,
+                  stock_value, pnl_amount, holdings_count, source
+           FROM asset_snapshots
+           ORDER BY captured_at DESC, id DESC
+           LIMIT 1"""
+    ) as cur:
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    result = dict(row)
+    result["source"] = result.get("source") or "KIS"
+    result["snapshot_source"] = "DB"
+    return result

@@ -1,9 +1,10 @@
 import pytest
 
-from src import state
+from src import live, state
 
 
 def _clear_state() -> None:
+    live.clear_tick_history()
     s = state.get()
     s.trading_date = None
     s.target_ticker = None
@@ -47,6 +48,15 @@ async def test_new_trading_day_resets_daily_skip_state():
     assert s.position_status == "IDLE"
 
 
+async def test_new_trading_day_clears_tick_history():
+    live.push_tick(75_000.0, ticker="005930")
+
+    changed = await state.ensure_trading_day("20260703")
+
+    assert changed is True
+    assert live.tick_history() == []
+
+
 async def test_same_trading_day_does_not_clear_day_skip():
     await state.ensure_trading_day("20260629")
     s = state.get()
@@ -72,6 +82,17 @@ async def test_new_trading_day_does_not_clear_active_position():
     assert s.position_status == "HOLDING"
     assert s.target_ticker == "005930"
     assert s.remaining_qty == 10
+
+
+async def test_set_closed_clears_tick_history():
+    s = state.get()
+    s.position_status = "HOLDING"
+    live.push_tick(75_000.0, ticker="005930")
+
+    changed = await state.set_closed("TRAILING")
+
+    assert changed is True
+    assert live.tick_history() == []
 
 
 async def test_target_candidates_persist_restore_round_trip(tmp_path):

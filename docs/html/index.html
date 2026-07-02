@@ -77,7 +77,7 @@
           <div class="asset-cell"><div class="asset-k">예수금</div><div class="asset-v" id="as-cash">—</div></div>
           <div class="asset-cell"><div class="asset-k">보유</div><div class="asset-v" id="as-holdings">0종목</div></div>
           <div class="asset-cell"><div class="asset-k">평가손익</div><div class="asset-v" id="as-pnl">—</div></div>
-          <div class="asset-cell push"><div class="asset-k">주문가능</div><div class="asset-v" id="as-buyable">—</div><div class="asset-sub">자산 메뉴에서 상세</div></div>
+          <div class="asset-cell push"><div class="asset-k">주문가능</div><div class="asset-v" id="as-buyable">—</div><div class="asset-sub" id="as-source">자산 메뉴에서 상세</div></div>
         </div>
 
         <div class="f1-panel" id="f1-panel">
@@ -88,7 +88,10 @@
           </div>
           <div class="f1-steps" id="f1-steps"></div>
           <div class="f1-grid" id="f1-summary"></div>
-          <div class="f1-table" id="f1-table"></div>
+          <div class="today-note">
+            <span id="f1-today-note">후보 전체 목록은 선정 메뉴에서 확인</span>
+            <button class="text-btn" onclick="go('selection')">선정 보기</button>
+          </div>
         </div>
 
         <div class="pos-wrap">
@@ -107,6 +110,21 @@
             <div class="flag" id="fl-step"><span class="dot off" style="background:var(--s2)"></span>최고 스텝</div>
             <div class="flag" id="fl-stop"><span class="dot off"></span><span id="fl-stop-lbl">Hard Stop —</span></div>
           </div>
+        </div>
+
+        <div class="price-flow">
+          <div class="flow-head">
+            <div>
+              <div class="flow-title">보유 후 가격흐름</div>
+              <div class="flow-sub" id="flow-sub">진입 후 틱 수신 대기</div>
+            </div>
+            <div class="flow-legend">
+              <span><i class="lg-cur"></i>현재</span>
+              <span><i class="lg-entry"></i>진입</span>
+              <span><i class="lg-stop"></i>스탑</span>
+            </div>
+          </div>
+          <canvas id="price-flow" width="760" height="180"></canvas>
         </div>
       </div>
 
@@ -151,18 +169,18 @@
       <div class="hist-inner">
         <div class="view-head">
           <div>
-            <div class="view-title">자산 스냅샷</div>
-            <div class="view-sub">KIS 잔고 조회 기준 현재 계좌 상태</div>
+            <div class="view-title">자산 조회</div>
+            <div class="view-sub">KIS 잔고 기준 현재 계좌 상태</div>
           </div>
-        </div>
-        <div class="frow">
-          <button class="fp on" id="asset-refresh" onclick="refreshAssets()">↻ 새로고침</button>
-          <span class="asset-sub" id="asset-updated">자산 조회 대기</span>
+          <div class="asset-action">
+            <button class="refresh-btn" id="asset-refresh" onclick="refreshAssets()" title="KIS 잔고 다시 조회">↻</button>
+            <span class="status-chip idle" id="asset-updated">자산 조회 대기</span>
+          </div>
         </div>
         <div class="scards asset-cards">
           <div class="sc2"><div class="sc2-lbl">총평가금액</div><div class="sc2-val" id="asset-total">—</div></div>
           <div class="sc2"><div class="sc2-lbl">예수금</div><div class="sc2-val" id="asset-cash" style="color:var(--br)">—</div></div>
-          <div class="sc2"><div class="sc2-lbl">주문가능금액</div><div class="sc2-val" id="asset-buyable" style="color:var(--br)">—</div></div>
+          <div class="sc2"><div class="sc2-lbl">주문가능금액</div><div class="sc2-val" id="asset-buyable" style="color:var(--br)">—</div><div class="sc2-note" id="asset-buyable-source">—</div></div>
           <div class="sc2"><div class="sc2-lbl">유가평가</div><div class="sc2-val" id="asset-stock">—</div></div>
           <div class="sc2"><div class="sc2-lbl">평가손익</div><div class="sc2-val" id="asset-pnl">—</div></div>
         </div>
@@ -196,8 +214,8 @@
         </div>
         <div class="tbl-wrap">
           <table>
-            <thead><tr><th>주문번호</th><th>시간</th><th>종목</th><th>구분</th><th>주문수량</th><th>주문가격</th><th>체결수량</th><th>상태</th><th>단계</th></tr></thead>
-            <tbody id="orders-tbody"><tr><td colspan="9" class="empty">주문 API 연동 대기</td></tr></tbody>
+            <thead><tr><th>주문번호</th><th>시간</th><th>종목</th><th>구분</th><th>주문수량</th><th>주문가격</th><th>체결수량</th><th>상태</th><th>단계</th><th>사유</th></tr></thead>
+            <tbody id="orders-tbody"><tr><td colspan="10" class="empty">주문 API 연동 대기</td></tr></tbody>
           </table>
         </div>
       </div>

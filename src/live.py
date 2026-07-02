@@ -1,11 +1,19 @@
 """모듈 간 공유 라이브 상태 — UI SSE 및 API에서 읽는다."""
 
 import asyncio
+from collections import deque
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from src.utils.logger import event_label
 
+KST = ZoneInfo("Asia/Seoul")
+_TICK_HISTORY_MAX = 120
+
 # 마지막 WebSocket 틱 가격 (HOLDING 중에만 갱신)
 last_tick_price: float | None = None
+last_tick_ticker: str | None = None
+_tick_history: deque[dict] = deque(maxlen=_TICK_HISTORY_MAX)
 
 # WebSocket 연결 상태
 ws_connected: bool = False
@@ -18,11 +26,27 @@ ntp_level: str = "OK"  # OK | WARN | CRIT | ERROR
 _sse_queues: list[asyncio.Queue] = []
 
 
-def push_tick(price: float) -> None:
+def push_tick(price: float, ticker: str | None = None) -> None:
     """F4 on_tick에서 호출 — 틱 가격 갱신 + SSE 브로드캐스트."""
-    global last_tick_price
+    global last_tick_price, last_tick_ticker
     last_tick_price = price
-    _broadcast({"type": "tick", "price": price})
+    last_tick_ticker = ticker
+    _tick_history.append({
+        "ts": datetime.now(KST).isoformat(),
+        "ticker": ticker,
+        "price": price,
+    })
+    _broadcast({"type": "tick", "ticker": ticker, "price": price})
+
+
+def tick_history(ticker: str | None = None) -> list[dict]:
+    if ticker:
+        return [row for row in _tick_history if row.get("ticker") == ticker]
+    return list(_tick_history)
+
+
+def clear_tick_history() -> None:
+    _tick_history.clear()
 
 
 def push_status() -> None:

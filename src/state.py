@@ -3,6 +3,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from src import live
+
 
 @dataclass
 class State:
@@ -33,6 +35,7 @@ def get() -> State:
 
 
 def _clear_for_trading_day(date_str: str) -> None:
+    live.clear_tick_history()
     _state.trading_date = date_str
     _state.target_ticker = None
     _state.target_candidates = None
@@ -93,6 +96,7 @@ async def set_closed(reason: str) -> bool:
             return False
         _state.position_status = "CLOSED"
         _state.close_reason = reason
+        live.clear_tick_history()
         return True
 
 
@@ -104,6 +108,7 @@ async def reset_to_idle(reason: str) -> None:
         _state.target_ticker = None
         _state.target_candidates = None
         _state.order_id = None
+        live.clear_tick_history()
 
 
 def update_high_price(price: float) -> None:
