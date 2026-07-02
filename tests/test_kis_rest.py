@@ -6,6 +6,44 @@ import pytest
 import src.api.kis_rest as kis_rest
 
 
+def test_account_helpers_accept_documented_env_names(monkeypatch):
+    monkeypatch.delenv("KIS_ACCT_NO", raising=False)
+    monkeypatch.delenv("KIS_ACCT_CD", raising=False)
+    monkeypatch.setenv("KIS_ACCOUNT_NO", "12345678")
+    monkeypatch.setenv("KIS_ACCOUNT_TYPE", "01")
+
+    assert kis_rest.account_no() == "12345678"
+    assert kis_rest.account_cd() == "01"
+
+    params = kis_rest.balance_inquiry_params()
+    assert params["CANO"] == "12345678"
+    assert params["ACNT_PRDT_CD"] == "01"
+
+
+def test_account_helpers_prefer_runtime_env_names(monkeypatch):
+    monkeypatch.setenv("KIS_ACCT_NO", "87654321")
+    monkeypatch.setenv("KIS_ACCOUNT_NO", "12345678")
+    monkeypatch.setenv("KIS_ACCT_CD", "02")
+    monkeypatch.setenv("KIS_ACCOUNT_TYPE", "01")
+
+    assert kis_rest.account_no() == "87654321"
+    assert kis_rest.account_cd() == "02"
+
+
+def test_account_helpers_do_not_fallback_from_empty_runtime_env_names(monkeypatch):
+    monkeypatch.setenv("KIS_ACCT_NO", "")
+    monkeypatch.setenv("KIS_ACCOUNT_NO", "12345678")
+    monkeypatch.setenv("KIS_ACCT_CD", "")
+    monkeypatch.setenv("KIS_ACCOUNT_TYPE", "01")
+
+    assert kis_rest.account_no() == ""
+    assert kis_rest.account_cd() == ""
+
+    params = kis_rest.balance_inquiry_params()
+    assert params["CANO"] == ""
+    assert params["ACNT_PRDT_CD"] == ""
+
+
 class _FakeResponse:
     status_code = 200
 

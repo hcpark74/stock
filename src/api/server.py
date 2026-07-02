@@ -23,8 +23,36 @@ from src.api.status_logic import (
     pipeline_from_logs as _pipeline_from_logs,
     sort_f1_candidates_for_display as _sort_f1_candidates_for_display,
 )
-from src.modules.f4_tracking import HARD_STOP_RATIO, STEP_TRAIL
-from src.modules.f1_filter import F1_SNAPSHOT_DIR
+from src.modules.f4_tracking import HARD_STOP_RATIO, STEP_SIZE, STEP_TRAIL
+from src.modules.f1_filter import (
+    F1_DEADLINE_H,
+    F1_DEADLINE_M,
+    F1_EXPECTED_QUOTE_CONCURRENCY,
+    F1_MARKET_INTERVAL_SEC,
+    F1_MIN_CANDIDATES,
+    F1_RETRY_INTERVAL_SEC,
+    F1_SNAPSHOT_DIR,
+    GAP_MAX,
+    GAP_MIN,
+    HIGH_GAP_MAX,
+    HIGH_GAP_MIN_EXPECTED_AMOUNT,
+    HIGH_GAP_MIN_VI_GAP,
+)
+from src.modules.f3_entry import (
+    ALLOC_RATIO,
+    F3_ENTRY_FIRST_FILL_SEC,
+    F3_ENTRY_MAX_ATTEMPTS,
+    F3_ENTRY_RETRY_DEADLINE,
+    F3_ENTRY_RETRY_DELAY_SEC,
+    F3_ENTRY_RETRY_FILL_SEC,
+    F3_FIRST_ORDER_AT,
+    F3_PRE_ORDER_QUIET_SEC,
+    F3_PYRAMID_AT,
+    F3_PYRAMID_FILL_SEC,
+    FIRST_RATIO,
+    PYRAMID_MIN_UP,
+    SLIPPAGE_LIMIT,
+)
 from src.utils.logger import log
 
 KST = ZoneInfo("Asia/Seoul")
@@ -56,6 +84,33 @@ async def index() -> FileResponse:
 
 def _today() -> str:
     return datetime.now(KST).strftime("%Y%m%d")
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default) == "1"
+
+
+def _env_source(primary: str, fallback: str) -> str:
+    if primary in os.environ:
+        return primary
+    if fallback in os.environ:
+        return fallback
+    return "unset"
+
+
+def _env_float(name: str, default: float, errors: list[str]) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        errors.append(f"{name} 값은 숫자여야 합니다: {raw!r}")
+        return default
+
+
+def _db_path() -> str:
+    return str(Path(os.getenv("DB_DIR", "data/db")) / "trading.db")
 
 
 def _read_today_logs(limit: int | None = None) -> list[dict]:
@@ -289,6 +344,113 @@ async def api_status() -> JSONResponse:
 
 # ── /api/logs ────────────────────────────────────────────────────────
 
+@app.get("/api/settings")
+async def api_settings() -> JSONResponse:
+    try:
+        errors: list[str] = []
+        warnings: list[str] = []
+        mode = os.getenv("KIS_MODE", "PAPER")
+        dry_run = _env_flag("DRY_RUN")
+        account_configured = bool(kis_rest.account_no())
+        app_key_configured = bool(os.getenv("KIS_APP_KEY"))
+        app_secret_configured = bool(os.getenv("KIS_APP_SECRET"))
+        kis_rate_interval_sec = _env_float("KIS_RATE_INTERVAL_SEC", 0.10, errors)
+
+        if "KIS_ACCT_NO" in os.environ and not os.getenv("KIS_ACCT_NO", ""):
+            errors.append("KIS_ACCT_NO is set but empty.")
+        if "KIS_ACCT_CD" in os.environ and not os.getenv("KIS_ACCT_CD", ""):
+            errors.append("KIS_ACCT_CD is set but empty.")
+        if mode == "REAL":
+            warnings.append("REAL 모드입니다. 주문 전 계좌와 KIS URL을 확인하세요.")
+        if not account_configured:
+            errors.append("KIS 계좌번호가 설정되지 않았습니다.")
+        if not app_key_configured or not app_secret_configured:
+            errors.append("KIS API 키/시크릿이 모두 설정되지 않았습니다.")
+        if dry_run:
+            warnings.append("DRY_RUN이 켜져 있어 외부 주문/API 경로가 시뮬레이션 또는 우회됩니다.")
+
+        return JSONResponse({
+            "mode": mode,
+            "dry_run": dry_run,
+            "auto_trading": None,
+            "auto_trading_control": "read_only",
+            "valid": not errors,
+            "errors": errors,
+            "warnings": warnings,
+            "paths": {
+                "db": _db_path(),
+                "logs": os.getenv("LOG_DIR", "data/logs"),
+                "state": os.getenv("STATE_DIR", "data/state"),
+                "f1_snapshots": str(_F1_SNAPSHOT_DIR),
+            },
+            "account": {
+                "configured": account_configured,
+                "account_source": _env_source("KIS_ACCT_NO", "KIS_ACCOUNT_NO"),
+                "product_code_source": _env_source("KIS_ACCT_CD", "KIS_ACCOUNT_TYPE"),
+                "app_key_configured": app_key_configured,
+                "app_secret_configured": app_secret_configured,
+            },
+            "f1": {
+                "core_gap_pct": [round(GAP_MIN * 100, 2), round(GAP_MAX * 100, 2)],
+                "high_gap_pct": [round(GAP_MAX * 100, 2), round(HIGH_GAP_MAX * 100, 2)],
+                "high_gap_min_amount": HIGH_GAP_MIN_EXPECTED_AMOUNT,
+                "high_gap_min_vi_gap_pct": round(HIGH_GAP_MIN_VI_GAP * 100, 2),
+                "min_candidates": F1_MIN_CANDIDATES,
+                "retry_deadline": f"{F1_DEADLINE_H:02d}:{F1_DEADLINE_M:02d}",
+                "retry_interval_sec": F1_RETRY_INTERVAL_SEC,
+                "expected_quote_concurrency": F1_EXPECTED_QUOTE_CONCURRENCY,
+                "market_interval_sec": F1_MARKET_INTERVAL_SEC,
+            },
+            "f2": {
+                "lockup": "target selection only",
+                "retry_f1_on_fail_supported": False,
+            },
+            "f3": {
+                "alloc_ratio_pct": round(ALLOC_RATIO * 100, 2),
+                "first_ratio_pct": round(FIRST_RATIO * 100, 2),
+                "pyramid_ratio_pct": round((1 - FIRST_RATIO) * 100, 2),
+                "pyramid_min_up_pct": round(PYRAMID_MIN_UP * 100, 2),
+                "slippage_limit_pct": round(SLIPPAGE_LIMIT * 100, 2),
+                "first_order_at": F3_FIRST_ORDER_AT,
+                "pyramid_at": F3_PYRAMID_AT,
+                "max_attempts": F3_ENTRY_MAX_ATTEMPTS,
+                "retry_delay_sec": F3_ENTRY_RETRY_DELAY_SEC,
+                "first_fill_sec": F3_ENTRY_FIRST_FILL_SEC,
+                "retry_fill_sec": F3_ENTRY_RETRY_FILL_SEC,
+                "retry_deadline": F3_ENTRY_RETRY_DEADLINE,
+                "pre_order_quiet_sec": F3_PRE_ORDER_QUIET_SEC,
+                "pyramid_fill_sec": F3_PYRAMID_FILL_SEC,
+            },
+            "f4": {
+                "hard_stop_pct": round(HARD_STOP_RATIO * 100, 2),
+                "step_size_pct": round(STEP_SIZE * 100, 2),
+                "step_trail_pct": round(STEP_TRAIL * 100, 2),
+            },
+            "safety": {
+                "real_mode_warning": mode == "REAL",
+                "kis_rate_interval_sec": kis_rate_interval_sec,
+            },
+        })
+    except Exception as exc:
+        log("API_SETTINGS_FAILED", level="WARN", error=repr(exc))
+        return JSONResponse({
+            "mode": os.getenv("KIS_MODE", "PAPER"),
+            "dry_run": _env_flag("DRY_RUN"),
+            "auto_trading": None,
+            "auto_trading_control": "read_only",
+            "valid": False,
+            "errors": [f"설정 API 처리 실패: {type(exc).__name__}"],
+            "warnings": [],
+            "paths": {},
+            "account": {"configured": False},
+            "f1": {},
+            "f2": {"retry_f1_on_fail_supported": False},
+            "f3": {},
+            "f4": {},
+            "safety": {},
+        })
+
+
 @app.get("/api/assets")
 async def api_assets(refresh: int = 0) -> JSONResponse:
     assets = await _asset_snapshot_safe() if refresh else _asset_snapshot_cached()
@@ -416,6 +578,55 @@ async def api_stats() -> JSONResponse:
         monthly = [{"ym": r["ym"], "n": r["n"], "sum_pnl": round(r["sum_pnl"] or 0, 2)}
                    for r in rows]
 
+        async with conn.execute(
+            """SELECT pyramided,
+                      COUNT(*) as n,
+                      AVG(pnl_pct) as avg_pnl
+               FROM trades WHERE status='CLOSED'
+               GROUP BY pyramided"""
+        ) as cur:
+            rows = await cur.fetchall()
+        by_pyramided = {
+            ("피라미딩" if r["pyramided"] else "1차만"): {
+                "n": r["n"],
+                "avg_pnl": round(r["avg_pnl"] or 0, 2),
+            }
+            for r in rows
+        }
+
+        async with conn.execute(
+            """SELECT
+                  CASE
+                    WHEN highest_step IS NULL OR highest_step <= 0 THEN '스텝 없음'
+                    WHEN highest_step < 0.05 THEN '1스텝'
+                    WHEN highest_step < 0.075 THEN '2스텝'
+                    ELSE '3스텝 이상'
+                  END as step_bucket,
+                  COUNT(*) as n,
+                  AVG(pnl_pct) as avg_pnl
+               FROM trades WHERE status='CLOSED'
+               GROUP BY step_bucket"""
+        ) as cur:
+            rows = await cur.fetchall()
+        by_step = {
+            r["step_bucket"]: {"n": r["n"], "avg_pnl": round(r["avg_pnl"] or 0, 2)}
+            for r in rows
+        }
+
+        async with conn.execute(
+            """SELECT substr(entry_at,12,2) as hour,
+                      COUNT(*) as n,
+                      AVG(pnl_pct) as avg_pnl
+               FROM trades
+               WHERE status='CLOSED' AND entry_at IS NOT NULL
+               GROUP BY hour ORDER BY hour"""
+        ) as cur:
+            rows = await cur.fetchall()
+        by_entry_hour = [
+            {"hour": r["hour"], "n": r["n"], "avg_pnl": round(r["avg_pnl"] or 0, 2)}
+            for r in rows
+        ]
+
         total = agg.get("total") or 0
         wins = agg.get("wins") or 0
         return JSONResponse({
@@ -428,12 +639,16 @@ async def api_stats() -> JSONResponse:
             "max_gain": round(agg.get("max_gain") or 0, 2),
             "by_reason": by_reason,
             "monthly": monthly,
+            "by_pyramided": by_pyramided,
+            "by_step": by_step,
+            "by_entry_hour": by_entry_hour,
         })
     except Exception as exc:
         log("API_STATS_FAILED", level="WARN", error=repr(exc))
         return JSONResponse({"total": 0, "wins": 0, "losses": 0, "win_rate": 0,
                              "avg_pnl": 0, "max_loss": 0, "max_gain": 0,
-                             "by_reason": {}, "monthly": []})
+                             "by_reason": {}, "monthly": [], "by_pyramided": {},
+                             "by_step": {}, "by_entry_hour": []})
 
 
 # ── /api/stream (SSE) ────────────────────────────────────────────────

@@ -181,8 +181,13 @@ requirements-dev.txt (개발/테스트 전용)
   # ── KIS API ──────────────────────────────────────
   KIS_APP_KEY=your_app_key_here
   KIS_APP_SECRET=your_app_secret_here
+  # Account env priority: KIS_ACCT_NO/KIS_ACCT_CD override KIS_ACCOUNT_NO/KIS_ACCOUNT_TYPE.
+  # Use one pair only in normal operation; KIS_ACCOUNT_* is the documented default.
+  # Empty KIS_ACCT_* values do not fall back; they are treated as invalid configuration.
   KIS_ACCOUNT_NO=your_account_number         # 예: 12345678-01
   KIS_ACCOUNT_TYPE=01                        # 01: 종합, 03: 선물옵션
+  # KIS_ACCT_NO=your_account_number
+  # KIS_ACCT_CD=01
   KIS_BASE_URL=https://openapi.koreainvestment.com:9443
 
   # ── 운영 모드 ──────────────────────────────────────
@@ -238,7 +243,7 @@ requirements-dev.txt (개발/테스트 전용)
   ● REAL 전환 전 아래 항목 최종 확인:
     □ .env의 KIS_MODE=REAL로 변경
     □ KIS_BASE_URL을 실계좌 URL로 변경
-    □ 계좌번호(KIS_ACCOUNT_NO) 실계좌 번호로 변경
+    □ 계좌번호(KIS_ACCOUNT_NO 또는 우선 적용되는 KIS_ACCT_NO) 실계좌 번호로 변경
     □ 잔고 확인 (소액 테스트 권장)
 
 ──────────────────────────────────────────────────

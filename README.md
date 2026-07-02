@@ -39,8 +39,13 @@ copy .env.example .env
 KIS_MODE=PAPER
 KIS_APP_KEY=your_app_key_here
 KIS_APP_SECRET=your_app_secret_here
+# Account env priority: KIS_ACCT_NO/KIS_ACCT_CD override KIS_ACCOUNT_NO/KIS_ACCOUNT_TYPE.
+# Use one pair only in normal operation; KIS_ACCOUNT_* is the documented default.
+# Empty KIS_ACCT_* values do not fall back; they are treated as invalid configuration.
 KIS_ACCOUNT_NO=12345678-01
 KIS_ACCOUNT_TYPE=01
+# KIS_ACCT_NO=12345678-01
+# KIS_ACCT_CD=01
 KIS_BASE_URL=https://openapivts.koreainvestment.com:29443
 KIS_WS_URL=ws://ops.koreainvestment.com:31000
 

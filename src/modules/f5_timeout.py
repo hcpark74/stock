@@ -32,8 +32,8 @@ async def precheck() -> None:
             "/uapi/domestic-stock/v1/trading/inquire-balance",
             tr_id=_BAL_TR[mode],
             params={
-                "CANO": os.getenv("KIS_ACCT_NO", ""),
-                "ACNT_PRDT_CD": os.getenv("KIS_ACCT_CD", "01"),
+                "CANO": kis_rest.account_no(),
+                "ACNT_PRDT_CD": kis_rest.account_cd(),
                 "AFHR_FLPR_YN": "N",
                 "OFL_YN": "",
                 "INQR_DVSN": "01",
@@ -113,8 +113,8 @@ async def _send_sell(ticker: str, qty: int, mode: str) -> dict:
         "/uapi/domestic-stock/v1/trading/order-cash",
         tr_id=_SELL_TR[mode],
         body={
-            "CANO": os.getenv("KIS_ACCT_NO", ""),
-            "ACNT_PRDT_CD": os.getenv("KIS_ACCT_CD", "01"),
+            "CANO": kis_rest.account_no(),
+            "ACNT_PRDT_CD": kis_rest.account_cd(),
             "PDNO": ticker,
             "ORD_DVSN": "01",
             "ORD_QTY": str(qty),
@@ -133,8 +133,8 @@ async def _poll_fill(order_id: str, timeout_sec: int = 30) -> dict | None:
                 "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
                 tr_id=_CCLD_TR[mode],
                 params={
-                    "CANO": os.getenv("KIS_ACCT_NO", ""),
-                    "ACNT_PRDT_CD": os.getenv("KIS_ACCT_CD", "01"),
+                    "CANO": kis_rest.account_no(),
+                    "ACNT_PRDT_CD": kis_rest.account_cd(),
                     "INQR_STRT_DT": today,
                     "INQR_END_DT": today,
                     "SLL_BUY_DVSN_CD": "01",

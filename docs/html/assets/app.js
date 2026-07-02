@@ -39,6 +39,7 @@ function go(id, btn) {
   if (id==='orders') loadOrders();
   if (id==='history') loadHistory();
   if (id==='stats')   loadStats();
+  if (id==='settings') loadSettings();
 }
 
 // ── 시계 ─────────────────────────────────────────────────────────────────
@@ -780,9 +781,13 @@ let _statsData = null;
 function renderStats(s) {
   _statsData = s;
   $('d-pct').textContent = (s.win_rate||0)+'%';
+  $('d-pct').className = 'd-pct ' + (s.total < 5 ? '' : s.win_rate>=50 ? 'pup' : 'pdn');
   $('d-lbl').textContent = `${s.wins}승 ${s.losses}패`;
   $('d-wins').textContent = `승 (${s.wins})`;
   $('d-losses').textContent = `패 (${s.losses})`;
+  if($('stats-sample-note')) {
+    $('stats-sample-note').textContent = sampleNote(s.total || 0);
+  }
 
   // 월별 그리드
   const grid=$('monthly-grid');
@@ -797,6 +802,15 @@ function renderStats(s) {
 
   drawDonut(s.wins, s.losses);
   drawBar(s.by_reason);
+  renderStatsHints(s);
+  renderFactorGrid(s);
+}
+
+function sampleNote(total) {
+  if(!total) return '폐쇄 거래가 아직 없어 통계 판단을 대기합니다.';
+  if(total < 5) return `표본 ${total}건: 이상 징후만 참고하고 전략 변경은 보류하세요.`;
+  if(total < 20) return `표본 ${total}건: 경향 확인 단계입니다. 20건 이상부터 조정 판단을 권장합니다.`;
+  return `표본 ${total}건: 전략 비교에 사용할 수 있는 구간입니다.`;
 }
 
 function drawDonut(wins, losses) {
@@ -818,11 +832,18 @@ function drawBar(byReason) {
   const c=$('bar'); if(!c) return;
   const ctx=c.getContext('2d');
   ctx.clearRect(0,0,420,192);
-  const data=[
-    {lbl:'트레일링', val:byReason.TRAILING?.avg_pnl||0, color:'#26a69a', n:byReason.TRAILING?.n||0},
-    {lbl:'시간 청산', val:byReason.TIMEOUT?.avg_pnl||0, color:'#787b86', n:byReason.TIMEOUT?.n||0},
-    {lbl:'손절 청산', val:byReason.HARD_STOP?.avg_pnl||0,color:'#ef5350', n:byReason.HARD_STOP?.n||0},
-  ];
+  const reasonLabel = {TRAILING:'트레일링',TIMEOUT:'시간 청산',HARD_STOP:'손절 청산',SLIPPAGE_GUARD:'슬리피지',ENTRY_FAIL:'진입 실패',MANUAL:'수동 청산'};
+  const reasonColor = {TRAILING:'#26a69a',TIMEOUT:'#787b86',HARD_STOP:'#ef5350',SLIPPAGE_GUARD:'#f7a600',ENTRY_FAIL:'#d65dff',MANUAL:'#7b9ef9'};
+  const order = ['TRAILING','TIMEOUT','HARD_STOP','SLIPPAGE_GUARD','ENTRY_FAIL','MANUAL'];
+  const keys = Object.keys(byReason || {}).sort((a,b)=>(order.indexOf(a)<0?99:order.indexOf(a))-(order.indexOf(b)<0?99:order.indexOf(b)));
+  const data = keys.map((key,i)=>({lbl:reasonLabel[key]||key, val:byReason[key]?.avg_pnl||0, color:reasonColor[key]||['#26a69a','#787b86','#ef5350','#f7a600','#7b9ef9'][i%5], n:byReason[key]?.n||0}));
+  if(!data.length) {
+    ctx.fillStyle = themeVal('#787b86','#4f5260');
+    ctx.font='12px Noto Sans KR,sans-serif';
+    ctx.textAlign='center';
+    ctx.fillText('데이터 없음',210,96);
+    return;
+  }
   const pad={t:24,r:20,b:48,l:48};
   const W=420,H=192,cW=W-pad.l-pad.r,cH=H-pad.t-pad.b;
   const allVals=data.map(d=>Math.abs(d.val)).filter(v=>v>0);
@@ -847,15 +868,126 @@ function drawBar(byReason) {
     ctx.fillText('('+d.n+'건)',x+bW/2,H-pad.b+25);
   });
   ctx.textAlign='right'; ctx.font='10px Noto Sans KR,sans-serif'; ctx.fillStyle=themeVal('#787b86','#4f5260');
-  [-2,-1,0,1,2].forEach(v=>{
+  [-maxA,-maxA/2,0,maxA/2,maxA].forEach(v=>{
     const yp=pad.t+(maxA-v)/(2*maxA)*cH;
-    ctx.fillText((v>0?'+':'')+v+'%',pad.l-6,yp+3);
+    ctx.fillText((v>0?'+':'')+v.toFixed(maxA>=10?0:1)+'%',pad.l-6,yp+3);
     ctx.beginPath(); ctx.moveTo(pad.l,yp); ctx.lineTo(pad.l+cW,yp);
     ctx.strokeStyle='#363a4540'; ctx.lineWidth=1; ctx.stroke();
   });
 }
 
+function renderStatsHints(s) {
+  const el = $('stats-hints'); if(!el) return;
+  const hints = [];
+  const total = s.total || 0;
+  if(total < 20) hints.push(['표본', sampleNote(total)]);
+  if(total && s.max_loss <= -2) hints.push(['손실', `최대 손실 ${fmtPct(s.max_loss)}입니다. 손절 폭과 진입 직후 변동성을 우선 점검하세요.`]);
+  const reasons = Object.entries(s.by_reason || {});
+  const worst = reasons.slice().sort((a,b)=>(a[1].avg_pnl||0)-(b[1].avg_pnl||0))[0];
+  if(worst) hints.push(['청산', `${reasonName(worst[0])} 평균 손익이 ${fmtPct(worst[1].avg_pnl)}로 가장 낮습니다.`]);
+  const stepWin = s.by_step || {};
+  if(stepWin['스텝 없음'] && stepWin['스텝 없음'].avg_pnl < 0) hints.push(['스텝', `스텝 미도달 거래 평균이 ${fmtPct(stepWin['스텝 없음'].avg_pnl)}입니다. 진입 후보 품질이나 초기 손절 조건을 확인하세요.`]);
+  if(!hints.length) hints.push(['상태', '현재 통계에서 뚜렷한 경고 신호는 없습니다. 표본을 계속 누적하세요.']);
+  el.innerHTML = hints.map(([k,v])=>`<div class="hint-item"><div class="hint-k">${esc(k)}</div><div class="hint-v">${esc(v)}</div></div>`).join('');
+}
+
+function renderFactorGrid(s) {
+  const el = $('stats-factor-grid'); if(!el) return;
+  const groups = [
+    ['피라미딩', s.by_pyramided || {}],
+    ['Step 도달', s.by_step || {}],
+    ['진입 시간', Object.fromEntries((s.by_entry_hour || []).map(r => [r.hour + '시', {n:r.n, avg_pnl:r.avg_pnl}]))],
+  ];
+  el.innerHTML = groups.map(([name, rows]) => {
+    const entries = Object.entries(rows);
+    const body = entries.length
+      ? entries.map(([k,v])=>`<div class="factor-row"><span>${esc(k)}</span><span class="${(v.avg_pnl||0)>=0?'pup':'pdn'}">${fmtPct(v.avg_pnl)} · ${fmt(v.n)}건</span></div>`).join('')
+      : '<div class="empty">데이터 없음</div>';
+    return `<div class="factor-cell"><div class="factor-name">${esc(name)}</div>${body}</div>`;
+  }).join('');
+}
+
+function reasonName(reason) {
+  return {TRAILING:'트레일링 청산',TIMEOUT:'시간 청산',HARD_STOP:'손절 청산',SLIPPAGE_GUARD:'슬리피지 차단',ENTRY_FAIL:'진입 실패',MANUAL:'수동 청산'}[reason] || reason;
+}
+
+function yn(v) {
+  return v ? 'ON' : 'OFF';
+}
+
+function pctRange(v) {
+  return Array.isArray(v) ? `${fmt(v[0], 1)}~${fmt(v[1], 1)}%` : '—';
+}
+
+function settingBox(title, rows) {
+  return `<div class="settings-box">
+    <div class="settings-title">${esc(title)}</div>
+    ${rows.map(([k,v,cls=''])=>`<div class="settings-row"><div class="settings-k">${esc(k)}</div><div class="settings-v ${cls}">${esc(v)}</div></div>`).join('')}
+  </div>`;
+}
+
+function renderSettings(s) {
+  if(!s) return;
+  $('set-mode').textContent = s.mode || 'PAPER';
+  $('set-mode').className = 'sc2-val ' + (s.mode === 'REAL' ? 'pdn' : '');
+  $('set-runtime').textContent = s.dry_run ? 'DRY_RUN' : 'LIVE';
+  $('set-runtime').className = 'sc2-val ' + (s.dry_run ? 'pup' : '');
+  $('set-db').textContent = s.paths?.db || '—';
+  $('set-auto').textContent = s.auto_trading_control === 'read_only' ? '조회 전용' : yn(s.auto_trading);
+  $('set-auto').className = 'sc2-val';
+
+  const grid = $('settings-grid');
+  if(grid) {
+    grid.innerHTML = [
+      settingBox('F1 선정', [
+        ['핵심 갭', pctRange(s.f1?.core_gap_pct)],
+        ['고갭 조건', `${pctRange(s.f1?.high_gap_pct)} · 대금 ${fmt((s.f1?.high_gap_min_amount||0)/1e8, 0)}억 이상`],
+        ['VI 여유', `${fmt(s.f1?.high_gap_min_vi_gap_pct, 1)}% 이상`],
+        ['최소 후보', `${fmt(s.f1?.min_candidates)}개`],
+        ['재시도', `${s.f1?.retry_deadline || '—'}까지 · ${fmt(s.f1?.retry_interval_sec)}초 간격`],
+      ]),
+      settingBox('F2/F3 진입', [
+        ['F2 역할', '대상 락업'],
+        ['투입 비중', `${fmt(s.f3?.alloc_ratio_pct, 1)}%`],
+        ['1차/2차', `${fmt(s.f3?.first_ratio_pct, 0)}% / ${fmt(s.f3?.pyramid_ratio_pct, 0)}%`],
+        ['주문 시각', `${s.f3?.first_order_at || '—'} · 2차 ${s.f3?.pyramid_at || '—'}`],
+        ['재시도', `${fmt(s.f3?.max_attempts)}회 · ${s.f3?.retry_deadline || '—'}까지`],
+        ['슬리피지 제한', `${fmt(s.f3?.slippage_limit_pct, 2)}%`],
+      ]),
+      settingBox('F4 청산', [
+        ['Hard Stop', `-${fmt(s.f4?.hard_stop_pct, 1)}%`],
+        ['Step 간격', `+${fmt(s.f4?.step_size_pct, 1)}%`],
+        ['Trail 폭', `-${fmt(s.f4?.step_trail_pct, 1)}%`],
+      ]),
+      settingBox('경로/계정', [
+        ['로그', s.paths?.logs || '—'],
+        ['상태', s.paths?.state || '—'],
+        ['F1 스냅샷', s.paths?.f1_snapshots || '—'],
+        ['계좌번호', s.account?.configured ? `설정됨 (${s.account.account_source})` : '미설정', s.account?.configured ? 'pup' : 'pdn'],
+        ['API 키', s.account?.app_key_configured && s.account?.app_secret_configured ? '설정됨' : '미설정', s.account?.app_key_configured && s.account?.app_secret_configured ? 'pup' : 'pdn'],
+      ]),
+    ].join('');
+  }
+
+  const alerts = [];
+  (s.errors || []).forEach(v => alerts.push(['오류', v]));
+  (s.warnings || []).forEach(v => alerts.push(['주의', v]));
+  if(!alerts.length) alerts.push(['상태', '현재 설정에서 즉시 확인할 경고는 없습니다.']);
+  const alertEl = $('settings-alerts');
+  if(alertEl) {
+    alertEl.innerHTML = alerts.map(([k,v])=>`<div class="hint-item"><div class="hint-k">${esc(k)}</div><div class="hint-v">${esc(v)}</div></div>`).join('');
+  }
+}
+
 // ── API 호출 ─────────────────────────────────────────────────────────────
+async function loadSettings() {
+  try {
+    const r = await fetch('/api/settings');
+    if(!r.ok) return;
+    renderSettings(await r.json());
+  } catch(e){}
+}
+
 async function loadStatus() {
   try {
     const r = await fetch('/api/status');

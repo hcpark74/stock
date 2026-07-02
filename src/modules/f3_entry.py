@@ -739,8 +739,8 @@ async def _send_buy(ticker: str, qty: int, mode: str) -> dict:
         "/uapi/domestic-stock/v1/trading/order-cash",
         tr_id=_BUY_TR[mode],
         body={
-            "CANO": os.getenv("KIS_ACCT_NO", ""),
-            "ACNT_PRDT_CD": os.getenv("KIS_ACCT_CD", "01"),
+            "CANO": kis_rest.account_no(),
+            "ACNT_PRDT_CD": kis_rest.account_cd(),
             "PDNO": ticker,
             "ORD_DVSN": "01",
             "ORD_QTY": str(qty),
@@ -755,8 +755,8 @@ async def _send_sell(ticker: str, qty: int, mode: str) -> dict:
         "/uapi/domestic-stock/v1/trading/order-cash",
         tr_id=_SELL_TR[mode],
         body={
-            "CANO": os.getenv("KIS_ACCT_NO", ""),
-            "ACNT_PRDT_CD": os.getenv("KIS_ACCT_CD", "01"),
+            "CANO": kis_rest.account_no(),
+            "ACNT_PRDT_CD": kis_rest.account_cd(),
             "PDNO": ticker,
             "ORD_DVSN": "01",
             "ORD_QTY": str(qty),
@@ -771,8 +771,8 @@ async def _cancel_order(order_id: str, org_no: str, mode: str) -> dict:
         "/uapi/domestic-stock/v1/trading/order-rvsecncl",
         tr_id=_CANCEL_TR[mode],
         body={
-            "CANO": os.getenv("KIS_ACCT_NO", ""),
-            "ACNT_PRDT_CD": os.getenv("KIS_ACCT_CD", "01"),
+            "CANO": kis_rest.account_no(),
+            "ACNT_PRDT_CD": kis_rest.account_cd(),
             "KRX_FWDG_ORD_ORGNO": org_no,
             "ORGN_ODNO": order_id,
             "ORD_DVSN": "01",
@@ -819,8 +819,8 @@ async def _poll_fill(
                 "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
                 tr_id=_CCLD_TR[mode],
                 params={
-                    "CANO": os.getenv("KIS_ACCT_NO", ""),
-                    "ACNT_PRDT_CD": os.getenv("KIS_ACCT_CD", "01"),
+                    "CANO": kis_rest.account_no(),
+                    "ACNT_PRDT_CD": kis_rest.account_cd(),
                     "INQR_STRT_DT": today,
                     "INQR_END_DT": today,
                     "SLL_BUY_DVSN_CD": "00",

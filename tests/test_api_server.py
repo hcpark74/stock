@@ -144,6 +144,84 @@ async def test_status_includes_tick_history_only_while_holding(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_api_settings_survives_invalid_numeric_env(monkeypatch):
+    monkeypatch.setenv("KIS_ACCOUNT_NO", "12345678")
+    monkeypatch.setenv("KIS_APP_KEY", "key")
+    monkeypatch.setenv("KIS_APP_SECRET", "secret")
+    monkeypatch.setenv("KIS_RATE_INTERVAL_SEC", "not-a-number")
+    monkeypatch.setenv("F2_RETRY_F1_INTERVAL_SEC", "also-not-a-number")
+
+    resp = await server.api_settings()
+    payload = json.loads(resp.body.decode("utf-8"))
+
+    assert payload["valid"] is False
+    assert any("KIS_RATE_INTERVAL_SEC" in err for err in payload["errors"])
+    assert payload["safety"]["kis_rate_interval_sec"] == 0.10
+
+
+@pytest.mark.asyncio
+async def test_api_settings_returns_contract(monkeypatch):
+    monkeypatch.setenv("KIS_ACCOUNT_NO", "12345678")
+    monkeypatch.setenv("KIS_APP_KEY", "key")
+    monkeypatch.setenv("KIS_APP_SECRET", "secret")
+    monkeypatch.setenv("KIS_MODE", "PAPER")
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setenv("KIS_RATE_INTERVAL_SEC", "0.2")
+
+    resp = await server.api_settings()
+    payload = json.loads(resp.body.decode("utf-8"))
+
+    assert payload.items() >= {
+        "mode": "PAPER",
+        "dry_run": False,
+        "auto_trading": None,
+        "auto_trading_control": "read_only",
+        "valid": True,
+        "errors": [],
+    }.items()
+    assert payload["account"].items() >= {
+        "configured": True,
+        "account_source": "KIS_ACCOUNT_NO",
+        "app_key_configured": True,
+        "app_secret_configured": True,
+    }.items()
+    assert {"paths", "f1", "f2", "f3", "f4", "safety"} <= payload.keys()
+    assert payload["f2"]["retry_f1_on_fail_supported"] is False
+    assert payload["safety"]["kis_rate_interval_sec"] == 0.2
+
+
+@pytest.mark.asyncio
+async def test_api_settings_reports_empty_priority_account_env(monkeypatch):
+    monkeypatch.setenv("KIS_ACCT_NO", "")
+    monkeypatch.setenv("KIS_ACCOUNT_NO", "12345678")
+    monkeypatch.setenv("KIS_ACCT_CD", "")
+    monkeypatch.setenv("KIS_ACCOUNT_TYPE", "01")
+    monkeypatch.setenv("KIS_APP_KEY", "key")
+    monkeypatch.setenv("KIS_APP_SECRET", "secret")
+
+    resp = await server.api_settings()
+    payload = json.loads(resp.body.decode("utf-8"))
+
+    assert payload["valid"] is False
+    assert payload["account"]["configured"] is False
+    assert payload["account"]["account_source"] == "KIS_ACCT_NO"
+    assert any("KIS_ACCT_NO" in err for err in payload["errors"])
+    assert any("KIS_ACCT_CD" in err for err in payload["errors"])
+
+
+@pytest.mark.asyncio
+async def test_api_settings_does_not_expose_unwired_f2_retry_flag(monkeypatch):
+    monkeypatch.setenv("F2_RETRY_F1_ON_FAIL", "1")
+
+    resp = await server.api_settings()
+    payload = json.loads(resp.body.decode("utf-8"))
+
+    assert "retry_f1_on_fail" not in payload["f2"]
+    assert payload["f2"]["retry_f1_on_fail_supported"] is False
+    assert not any("F2_RETRY_F1_ON_FAIL" in warning for warning in payload["warnings"])
+
+
+@pytest.mark.asyncio
 async def test_assets_refresh_fetches_asset_snapshot(monkeypatch):
     fetch = AsyncMock(return_value={"cash": 1_000_000.0})
     monkeypatch.setattr(server, "_asset_snapshot_safe", fetch)
@@ -200,6 +278,44 @@ async def test_api_history_returns_recent_trade_contract(tmp_path):
         "pyramided": 1,
         "status": "CLOSED",
     }.items()
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_api_stats_returns_strategy_breakdowns_contract(tmp_path):
+    await db.init(str(tmp_path / "stats.db"))
+    first_id = await db.open_trade("20260701", "005930", 75_000.0, 10)
+    await db.mark_pyramided(first_id)
+    await db.close_trade(first_id, 78_750.0, "TRAILING", 5.0, 0.05)
+
+    second_id = await db.open_trade("20260702", "000660", 120_000.0, 1)
+    await db.close_trade(second_id, 118_800.0, "HARD_STOP", -1.0, 0.0)
+
+    third_id = await db.open_trade("20260703", "035420", 200_000.0, 1)
+    await db.close_trade(third_id, 204_000.0, "TIMEOUT", 2.0, 0.075)
+
+    conn = db.get()
+    await conn.execute("UPDATE trades SET entry_at=? WHERE id=?", ("2026-07-01T09:10:00+09:00", first_id))
+    await conn.execute("UPDATE trades SET entry_at=? WHERE id=?", ("2026-07-02T10:10:00+09:00", second_id))
+    await conn.execute("UPDATE trades SET entry_at=? WHERE id=?", ("2026-07-03T09:20:00+09:00", third_id))
+    await conn.commit()
+
+    resp = await server.api_stats()
+    payload = json.loads(resp.body.decode("utf-8"))
+
+    assert payload["total"] == 3
+    assert payload["wins"] == 2
+    assert payload["losses"] == 1
+    assert payload["by_reason"]["TRAILING"] == {"n": 1, "avg_pnl": 5.0}
+    assert payload["by_reason"]["HARD_STOP"] == {"n": 1, "avg_pnl": -1.0}
+    assert "by_pyramided" in payload
+    assert "by_step" in payload
+    assert payload["by_entry_hour"] == [
+        {"hour": "09", "n": 2, "avg_pnl": 3.5},
+        {"hour": "10", "n": 1, "avg_pnl": -1.0},
+    ]
+    assert sum(v["n"] for v in payload["by_pyramided"].values()) == 3
+    assert sum(v["n"] for v in payload["by_step"].values()) == 3
     await db.close()
 
 

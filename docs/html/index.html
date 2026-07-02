@@ -222,9 +222,15 @@
       <div class="hist-inner">
         <div class="scards">
           <div class="sc2"><div class="sc2-lbl">계좌 모드</div><div class="sc2-val" id="set-mode" style="color:var(--br)">PAPER</div></div>
-          <div class="sc2"><div class="sc2-lbl">F1 갭 구간</div><div class="sc2-val">3~10%</div></div>
-          <div class="sc2"><div class="sc2-lbl">HIGH 조건</div><div class="sc2-val">20억</div></div>
-          <div class="sc2"><div class="sc2-lbl">자동매매</div><div class="sc2-val pup">ON</div></div>
+          <div class="sc2"><div class="sc2-lbl">실행 모드</div><div class="sc2-val" id="set-runtime">—</div></div>
+          <div class="sc2"><div class="sc2-lbl">DB 경로</div><div class="sc2-val" id="set-db" style="font-size:13px">—</div></div>
+          <div class="sc2"><div class="sc2-lbl">운영 제어</div><div class="sc2-val" id="set-auto">—</div></div>
+        </div>
+        <div class="settings-grid" id="settings-grid">
+          <div class="empty">설정 로딩 중...</div>
+        </div>
+        <div class="settings-alerts" id="settings-alerts">
+          <div class="empty">안전 점검 대기</div>
         </div>
       </div>
     </div>
@@ -280,15 +286,28 @@
             <div class="dleg-i"><div class="dleg-dot" style="background:var(--up)"></div><span id="d-wins">승 (0)</span></div>
             <div class="dleg-i"><div class="dleg-dot" style="background:var(--s2)"></div><span id="d-losses">패 (0)</span></div>
           </div>
+          <div class="stats-note" id="stats-sample-note">표본 대기</div>
         </div>
         <div class="scard">
           <div class="card-ttl">청산 사유별 평균 손익</div>
           <canvas id="bar" width="420" height="192"></canvas>
         </div>
         <div class="scard full">
+          <div class="card-ttl">개선 힌트</div>
+          <div class="hint-list" id="stats-hints">
+            <div class="empty">통계 로딩 중...</div>
+          </div>
+        </div>
+        <div class="scard full">
           <div class="card-ttl">월별 누적 손익</div>
           <div class="mgrid" id="monthly-grid">
             <div class="empty">로딩 중...</div>
+          </div>
+        </div>
+        <div class="scard full">
+          <div class="card-ttl">전략 축별 평균 손익</div>
+          <div class="factor-grid" id="stats-factor-grid">
+            <div class="empty">통계 로딩 중...</div>
           </div>
         </div>
       </div>
