@@ -12,10 +12,10 @@ KST = pytz.timezone("Asia/Seoul")
 Job = Callable[[], Coroutine[Any, Any, None]]
 
 # 스케줄 시각 — catchup 로직과 단일 출처 공유
-F1_H, F1_M = 8, 40
-F2_H, F2_M = 8, 58
-F3_H, F3_M, F3_S = 8, 59, 40
-F3_FILL_DEADLINE_H, F3_FILL_DEADLINE_M = 9, 0
+F1_H, F1_M = 9, 0
+F2_H, F2_M = 9, 10
+F3_H, F3_M, F3_S = 9, 10, 10
+F3_FILL_DEADLINE_H, F3_FILL_DEADLINE_M = 9, 11
 F5_PRECHECK_H, F5_PRECHECK_M, F5_PRECHECK_S = 10, 59, 50
 F5_EXEC_H, F5_EXEC_M, F5_EXEC_S = 11, 0, 0
 

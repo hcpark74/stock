@@ -5,10 +5,10 @@ KOSPI/KOSDAQ 장전 갭업 후보를 자동으로 찾고, 09:00 전후 진입부
 ## 핵심 흐름
 
 ```text
-F1 08:40        장전 후보 스캔: 갭/유동성 필터 + 예상체결가 보강
-F2 08:58        대상 종목 잠금: 유동성, 예상금액, VI 근접 여부 확인
-F3 08:59:40     진입: 갭 재검증, 매수 주문, 미체결 시 짧은 재시도
-F4 09:00~       보유 추적: WebSocket/REST 가격 추적, Step Trailing, Hard Stop
+F1 09:00~09:10  후보 스캔: 갭/유동성 필터 + 예상체결가 보강
+F2 09:10        대상 종목 잠금: 유동성, 예상금액, VI 근접 여부 확인
+F3 09:10:10     진입: 갭 재검증, 매수 주문, 미체결 시 짧은 재시도
+F4 진입 후       보유 추적: WebSocket/REST 가격 추적, Step Trailing, Hard Stop
 F5 11:00        타임아웃 청산: 남은 수량 시장가 전량 청산
 ```
 
@@ -47,15 +47,19 @@ KIS_WS_URL=ws://ops.koreainvestment.com:31000
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 TELEGRAM_CHAT_ID=your_chat_id_here
 
-KIS_RATE_INTERVAL_SEC=0.10
-F1_EXPECTED_QUOTE_CONCURRENCY=2
-F1_MARKET_INTERVAL_SEC=2.0
+KIS_RATE_INTERVAL_SEC=0.20
+F1_EXPECTED_QUOTE_CONCURRENCY=1
+F1_MARKET_INTERVAL_SEC=3.0
 
 F3_ENTRY_MAX_ATTEMPTS=2
 F3_ENTRY_RETRY_DELAY_SEC=0.5
-F3_ENTRY_RETRY_FILL_SEC=3.0
-F3_ENTRY_RETRY_DEADLINE=09:00:08
+F3_ENTRY_FIRST_FILL_SEC=12.0
+F3_ENTRY_RETRY_FILL_SEC=8.0
+F3_ENTRY_RETRY_DEADLINE=09:11:00
 F3_PRE_ORDER_QUIET_SEC=1.5
+F3_FIRST_ORDER_AT=09:10:20
+F3_PYRAMID_AT=09:10:40
+F3_PYRAMID_FILL_SEC=10.0
 ```
 
 실계좌 전환 시에는 `KIS_MODE=REAL`, 실계좌 URL, 실계좌 번호를 모두 확인한 뒤 소액으로 검증하세요.
@@ -70,7 +74,7 @@ python main.py
 실행 후:
 
 - 스케줄러가 KST 기준으로 F1~F5 작업을 자동 실행합니다.
-- 08:40~09:00 사이에 켜면 catch-up으로 F1/F2/F3를 보완 실행합니다.
+- 09:00~09:11 사이에 켜면 catch-up으로 F1/F2/F3를 보완 실행합니다.
 - Web UI는 기본 `http://localhost:8080`에서 열립니다.
 - Security: `/api/status` and `/api/assets` can expose account asset values. The UI server binds to `127.0.0.1` by default; set `UI_HOST=0.0.0.0` only on a trusted network.
 - 로그는 `data/logs/YYYYMMDD.jsonl`에 기록됩니다.

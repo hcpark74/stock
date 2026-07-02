@@ -44,6 +44,25 @@ def test_parse_deadline_logs_invalid_value(monkeypatch):
     assert events[0][1]["default"] == "09:00:08"
 
 
+def test_entry_fill_deadline_is_relative_to_now(monkeypatch):
+    monkeypatch.setattr(f3, "F3_ENTRY_FIRST_FILL_SEC", 12.0)
+
+    now = f3.datetime.now(f3.KST)
+    deadline = f3._deadline_datetime(f3._entry_fill_deadline(attempt=1, force=False))
+
+    assert deadline > now
+    assert (deadline - now).total_seconds() <= 13
+
+
+def test_entry_first_fill_deadline_uses_wider_initial_window(monkeypatch):
+    monkeypatch.setattr(f3, "F3_ENTRY_FIRST_FILL_SEC", 12.0)
+
+    now = f3.datetime.now(f3.KST)
+    first_deadline = f3._deadline_datetime(f3._entry_fill_deadline(attempt=1, force=False))
+
+    assert 10 <= (first_deadline - now).total_seconds() <= 13
+
+
 @pytest.mark.asyncio
 async def test_pre_order_quiet_wait_logs_and_sleeps(monkeypatch):
     events = []
@@ -71,6 +90,76 @@ async def test_pre_order_quiet_wait_logs_and_sleeps(monkeypatch):
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_available_cash_prefers_orderable_cash(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        f3.kis_rest,
+        "get",
+        AsyncMock(return_value={
+            "rt_cd": "0",
+            "output2": [{
+                "ord_psbl_cash": "1,234",
+                "dnca_tot_amt": "9,999",
+                "prvs_rcdl_excc_amt": "8,888",
+            }],
+        }),
+    )
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+
+    assert await f3._fetch_available_cash() == 1234.0
+    assert events == [
+        (
+            "BALANCE_CASH_CHECK",
+            {
+                "level": "DEBUG",
+                "cash": 1234.0,
+                "ord_psbl_cash": 1234.0,
+                "dnca_tot_amt": 9999.0,
+                "prvs_rcdl_excc_amt": 8888.0,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_available_cash_falls_back_to_deposit_amount(monkeypatch):
+    monkeypatch.setattr(
+        f3.kis_rest,
+        "get",
+        AsyncMock(return_value={
+            "rt_cd": "0",
+            "output2": [{
+                "ord_psbl_cash": "0",
+                "dnca_tot_amt": "2,345",
+                "prvs_rcdl_excc_amt": "8,888",
+            }],
+        }),
+    )
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+
+    assert await f3._fetch_available_cash() == 2345.0
+
+
+@pytest.mark.asyncio
+async def test_fetch_available_cash_falls_back_to_previous_receivable(monkeypatch):
+    monkeypatch.setattr(
+        f3.kis_rest,
+        "get",
+        AsyncMock(return_value={
+            "rt_cd": "0",
+            "output2": [{
+                "ord_psbl_cash": "0",
+                "dnca_tot_amt": "0",
+                "prvs_rcdl_excc_amt": "3,456",
+            }],
+        }),
+    )
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+
+    assert await f3._fetch_available_cash() == 3456.0
 
 
 @pytest.mark.asyncio

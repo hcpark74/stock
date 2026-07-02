@@ -1,4 +1,4 @@
-"""F3. 진입 주문 모듈 (08:59:40 ~ 09:00:10) — PRD §F3"""
+"""F3. 진입 주문 모듈 (09:10 이후) — PRD §F3"""
 
 import asyncio
 import os
@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from src import db, notifier, state
 from src.api import kis_rest
 from src.utils.logger import log
+from src.utils.number import to_float
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -19,9 +20,14 @@ SLIPPAGE_LIMIT = 0.005     # 슬리피지 허용 +0.5%
 PYRAMID_MIN_UP = 0.005     # 피라미딩 조건 +0.5% 이상 유지
 F3_ENTRY_MAX_ATTEMPTS = max(1, int(os.getenv("F3_ENTRY_MAX_ATTEMPTS", "2")))
 F3_ENTRY_RETRY_DELAY_SEC = float(os.getenv("F3_ENTRY_RETRY_DELAY_SEC", "0.5"))
-F3_ENTRY_RETRY_FILL_SEC = float(os.getenv("F3_ENTRY_RETRY_FILL_SEC", "3.0"))
-F3_ENTRY_RETRY_DEADLINE = os.getenv("F3_ENTRY_RETRY_DEADLINE", "09:00:08")
+# First order gets a wider polling window to absorb KIS/order fill latency after the open.
+F3_ENTRY_FIRST_FILL_SEC = float(os.getenv("F3_ENTRY_FIRST_FILL_SEC", "12.0"))
+F3_ENTRY_RETRY_FILL_SEC = float(os.getenv("F3_ENTRY_RETRY_FILL_SEC", "8.0"))
+F3_ENTRY_RETRY_DEADLINE = os.getenv("F3_ENTRY_RETRY_DEADLINE", "09:11:00")
 F3_PRE_ORDER_QUIET_SEC = float(os.getenv("F3_PRE_ORDER_QUIET_SEC", "1.5"))
+F3_FIRST_ORDER_AT = os.getenv("F3_FIRST_ORDER_AT", "09:10:20")
+F3_PYRAMID_AT = os.getenv("F3_PYRAMID_AT", "09:10:40")
+F3_PYRAMID_FILL_SEC = float(os.getenv("F3_PYRAMID_FILL_SEC", "10.0"))
 
 # KIS TR ID (PAPER/REAL 분기) — 신TR 기준
 _BUY_TR    = {"REAL": "TTTC0012U", "PAPER": "VTTC0012U"}
@@ -48,15 +54,13 @@ async def run(force: bool = False) -> None:
     s = state.get()
     s.target_ticker = picked["ticker"]
     s.target_candidates = [picked["candidate"]]
-    await _run_single(force=force)
+    await _run_single(force=force, picked=picked)
 
 
-async def _run_single(force: bool = False) -> None:
+async def _run_single(force: bool = False, picked: dict | None = None) -> None:
     """
-    [08:59:40] 갭 재검증
-    [08:59:50] 1차 70% 시장가 매수
-    [09:00:00] 체결 확인 / 슬리피지 가드
-    [09:00:10] 2차 30% 피라미딩 (조건부)
+    갭 재검증 후 설정된 시각에 1차 70% 시장가 매수,
+    체결 확인 / 슬리피지 가드, 2차 30% 피라미딩을 수행한다.
     force=True: FORCE_CATCHUP 모드. 시각 제약 없이 실행, fill 마감을 실행 시점 +30초로 설정.
     """
     s = state.get()
@@ -74,8 +78,12 @@ async def _run_single(force: bool = False) -> None:
         await _run_dry_entry(ticker)
         return
 
-    # ── [08:59:40] 갭 재검증 ─────────────────────────────────────────
-    expected_price, prev_close = await _fetch_expected_price(ticker)
+    # ── 진입 직전 갭 재검증 ─────────────────────────────────────────
+    if picked and picked.get("ticker") == ticker:
+        expected_price = float(picked["expected_price"])
+        prev_close = float(picked.get("prev_close") or 0)
+    else:
+        expected_price, prev_close = await _fetch_expected_price(ticker)
     if prev_close and expected_price:
         gap = (expected_price / prev_close) - 1
         log(
@@ -111,8 +119,14 @@ async def _run_single(force: bool = False) -> None:
             return
 
     # ── 잔고 조회 및 수량 산정 ────────────────────────────────────────
-    cash = await _fetch_available_cash()
-    total_amount = int(cash * ALLOC_RATIO)
+    if picked and picked.get("ticker") == ticker:
+        cash = float(picked["cash"])
+        total_amount = int(picked["total_amount"])
+        total_qty = int(picked["total_qty"])
+    else:
+        cash = await _fetch_available_cash()
+        total_amount = int(cash * ALLOC_RATIO)
+        total_qty = int(total_amount / expected_price) if expected_price else 0
     if not expected_price or expected_price == 0:
         s.day_skip = True
         s.close_reason = "PRICE_UNAVAILABLE"
@@ -138,7 +152,6 @@ async def _run_single(force: bool = False) -> None:
             f"reason=PRICE_UNAVAILABLE,cash={cash}",
         )
         return
-    total_qty = int(total_amount / expected_price)
     if total_qty == 0:
         s.day_skip = True
         s.close_reason = "INSUFFICIENT_BALANCE"
@@ -166,8 +179,9 @@ async def _run_single(force: bool = False) -> None:
     first_qty = max(1, int(total_qty * FIRST_RATIO))
     second_qty = total_qty - first_qty
 
-    # ── [08:59:50] 1차 70% 시장가 매수 ──────────────────────────────
-    await _sleep_until(8, 59, 50)
+    # ── 1차 70% 시장가 매수 ────────────────────────────────────────
+    if not force:
+        await _sleep_until(*_first_order_at())
     if not await state.set_entering():
         _log_entry_blocked(
             ticker,
@@ -322,8 +336,9 @@ async def _run_single(force: bool = False) -> None:
     await notifier.send("ENTRY_EXECUTED", level="INFO",
                         message=f"진입: {ticker} {fill_qty}주 @ {fill_price:,}원")
 
-    # ── [09:00:10] 2차 30% 피라미딩 ──────────────────────────────────
-    await _sleep_until(9, 0, 10)
+    # ── 2차 30% 피라미딩 ────────────────────────────────────────────
+    if not force:
+        await _sleep_until(*_pyramid_at())
     if state.get().position_status != "HOLDING":
         return
 
@@ -333,7 +348,7 @@ async def _run_single(force: bool = False) -> None:
         py_resp = await _send_buy(ticker, second_qty, mode)
         py_id     = py_resp.get("output", {}).get("ODNO", "")
         py_org_no = py_resp.get("output", {}).get("KRX_FWDG_ORD_ORGNO", "")
-        py_fill = await _poll_fill(py_id, deadline=(9, 0, 20), ticker=ticker)
+        py_fill = await _poll_fill(py_id, deadline=_pyramid_fill_deadline(), ticker=ticker)
         if not py_fill:
             if py_id and py_org_no:
                 await _cancel_order(py_id, py_org_no, mode)
@@ -467,6 +482,9 @@ async def _pick_final_entry_candidate(s: state.State) -> dict | None:
                 "candidate": candidate,
                 "candidate_rank": rank,
                 "expected_price": expected_price,
+                "prev_close": prev_close,
+                "cash": cash,
+                "total_amount": total_amount,
                 "total_qty": total_qty,
             }
         )
@@ -525,6 +543,8 @@ def _log_entry_blocked(ticker: str | None, reason: str, **extra: object) -> None
 
 
 async def _sleep_until(h: int, m: int, s: int) -> None:
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return
     now = datetime.now(KST)
     target = now.replace(hour=h, minute=m, second=s, microsecond=0)
     delta = (target - now).total_seconds()
@@ -578,7 +598,19 @@ def _deadline_datetime(deadline: tuple[int, int, int]) -> datetime:
 
 
 def _entry_retry_deadline() -> tuple[int, int, int]:
-    return _parse_deadline(F3_ENTRY_RETRY_DEADLINE, (9, 0, 8))
+    return _parse_deadline(F3_ENTRY_RETRY_DEADLINE, (9, 11, 0))
+
+
+def _first_order_at() -> tuple[int, int, int]:
+    return _parse_deadline(F3_FIRST_ORDER_AT, (9, 10, 20))
+
+
+def _pyramid_at() -> tuple[int, int, int]:
+    return _parse_deadline(F3_PYRAMID_AT, (9, 10, 40))
+
+
+def _pyramid_fill_deadline() -> tuple[int, int, int]:
+    return _deadline_after_seconds(F3_PYRAMID_FILL_SEC)
 
 
 def _before_deadline(deadline: tuple[int, int, int]) -> bool:
@@ -594,10 +626,7 @@ def _entry_fill_deadline(attempt: int, force: bool) -> tuple[int, int, int]:
     if force:
         return _deadline_after_seconds(30)
     if attempt == 1:
-        # Normal scheduled entry is intentionally narrow: the first market order
-        # is sent after _sleep_until(08:59:50) plus F3_PRE_ORDER_QUIET_SEC, then
-        # only polled until 09:00:00 before retry logic takes over.
-        return 9, 0, 0
+        return _deadline_after_seconds(F3_ENTRY_FIRST_FILL_SEC)
 
     retry_deadline = _deadline_datetime(_entry_retry_deadline())
     target = min(datetime.now(KST) + timedelta(seconds=F3_ENTRY_RETRY_FILL_SEC), retry_deadline)
@@ -663,8 +692,44 @@ async def _fetch_available_cash() -> float:
         tr_id=_BAL_TR[mode],
         params=kis_rest.balance_inquiry_params(),
     )
-    summary = (resp.get("output2") or [{}])[0]
-    return float(summary.get("dnca_tot_amt") or 0)
+    if str(resp.get("rt_cd", "0")) != "0":
+        log(
+            "BALANCE_QUERY_ERROR",
+            level="WARN",
+            rt_cd=resp.get("rt_cd"),
+            msg_cd=resp.get("msg_cd"),
+            msg1=resp.get("msg1"),
+        )
+        return 0.0
+
+    output2 = resp.get("output2")
+    if not isinstance(output2, list) or not output2 or not isinstance(output2[0], dict):
+        log(
+            "BALANCE_QUERY_ERROR",
+            level="WARN",
+            reason="MISSING_OUTPUT2",
+            rt_cd=resp.get("rt_cd"),
+            msg_cd=resp.get("msg_cd"),
+            msg1=resp.get("msg1"),
+        )
+        return 0.0
+
+    summary = output2[0]
+    cash = to_float(summary.get("ord_psbl_cash"))
+    if cash <= 0:
+        cash = to_float(summary.get("dnca_tot_amt"))
+    if cash <= 0:
+        cash = to_float(summary.get("prvs_rcdl_excc_amt"))
+
+    log(
+        "BALANCE_CASH_CHECK",
+        level="DEBUG",
+        cash=cash,
+        ord_psbl_cash=to_float(summary.get("ord_psbl_cash")),
+        dnca_tot_amt=to_float(summary.get("dnca_tot_amt")),
+        prvs_rcdl_excc_amt=to_float(summary.get("prvs_rcdl_excc_amt")),
+    )
+    return cash
 
 
 async def _send_buy(ticker: str, qty: int, mode: str) -> dict:

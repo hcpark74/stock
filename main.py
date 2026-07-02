@@ -32,17 +32,29 @@ DB_PATH = os.path.join(os.getenv("DB_DIR", "data/db"), "trading.db")
 
 # F1 결과를 F2에 전달하기 위한 세션 변수
 _f1_result: list[dict] = []
+_f2_done = False
+_f3_started = False
 
 
 def _today() -> str:
     return datetime.now(KST).strftime("%Y%m%d")
 
 
+def _scheduled_at(hour: int, minute: int, second: int = 0) -> datetime:
+    return datetime.now(KST).replace(hour=hour, minute=minute, second=second, microsecond=0)
+
+
+def _past_f3_schedule() -> bool:
+    return datetime.now(KST) >= _scheduled_at(F3_H, F3_M, F3_S)
+
+
 async def _ensure_trading_day() -> None:
-    global _f1_result
+    global _f1_result, _f2_done, _f3_started
     today = _today()
     if await state.ensure_trading_day(today):
         _f1_result = []
+        _f2_done = False
+        _f3_started = False
         logger.log("DAILY_STATE_RESET", level="INFO", date=today)
 
 
@@ -62,15 +74,30 @@ async def job_f1() -> None:
     global _f1_result
     await _ensure_trading_day()
     _f1_result = await f1_filter.run()
+    await _run_f2_f3_after_f1(immediate=_past_f3_schedule())
 
 
 async def job_f2() -> None:
+    global _f2_done
     await _ensure_trading_day()
+    # F1 completion can trigger F2/F3 immediately; this scheduled job is a safety net.
+    if _f2_done:
+        return
+    if not _f1_result:
+        return
     await f2_lockup.run(_f1_result)
+    _f2_done = True
 
 
 async def job_f3() -> None:
+    global _f3_started
     await _ensure_trading_day()
+    # Keep the scheduled F3 job as a fallback when F2 locked a target but chaining did not start F3.
+    if _f3_started:
+        return
+    if not state.get().target_ticker or state.get().day_skip:
+        return
+    _f3_started = True
     await f3_entry.run()
 
 
@@ -84,23 +111,44 @@ async def job_f5_exec() -> None:
     await f5_timeout.execute()
 
 
+async def _run_f2_f3_after_f1(*, immediate: bool = False) -> None:
+    """
+    Chain F2/F3 after F1 produced candidates.
+
+    Normal F1 calls this right away; F3 only uses force mode if the scheduled F3
+    time has already passed. Catch-up calls it only inside the missed-run window
+    and can force F3 when explicitly catching up after the scheduled F3 time.
+    """
+    global _f2_done, _f3_started
+    if not _f1_result or state.get().day_skip:
+        return
+
+    if not _f2_done:
+        await f2_lockup.run(_f1_result)
+        _f2_done = True
+
+    if _f2_done and not _f3_started and state.get().target_ticker and not state.get().day_skip:
+        _f3_started = True
+        await f3_entry.run(force=immediate)
+
+
 # ── F1 missed 보완 실행 ──────────────────────────────────────────────
 
 async def _run_catchup() -> None:
     """
-    08:40~09:00 사이에 기동하면 F1(~F3)이 missed 상태.
+    F1 start 이후 F3 fill deadline 전에 기동하면 F1(~F3)이 missed 상태.
     즉시 보완 실행해 당일 파이프라인을 복구한다.
-    09:00 이후엔 F3 진입 마감이 지났으므로 catchup 불가.
+    F3 fill deadline 이후엔 진입 마감이 지났으므로 catchup 불가.
     """
     await _ensure_trading_day()
     dry_run = os.getenv("DRY_RUN", "0") == "1"
     force = dry_run or os.getenv("FORCE_CATCHUP", "0") == "1"
 
     now = datetime.now(KST)
-    f1_sched         = now.replace(hour=F1_H,                minute=F1_M,               second=0,    microsecond=0)
-    f2_sched         = now.replace(hour=F2_H,                minute=F2_M,               second=0,    microsecond=0)
-    f3_sched         = now.replace(hour=F3_H,                minute=F3_M,               second=F3_S, microsecond=0)
-    f3_fill_deadline = now.replace(hour=F3_FILL_DEADLINE_H,  minute=F3_FILL_DEADLINE_M, second=0,    microsecond=0)
+    f1_sched = _scheduled_at(F1_H, F1_M)
+    f2_sched = _scheduled_at(F2_H, F2_M)
+    f3_sched = _scheduled_at(F3_H, F3_M, F3_S)
+    f3_fill_deadline = _scheduled_at(F3_FILL_DEADLINE_H, F3_FILL_DEADLINE_M)
 
     if not force and not (f1_sched <= now < f3_fill_deadline):
         return
@@ -115,11 +163,7 @@ async def _run_catchup() -> None:
 
     now = datetime.now(KST)
     if force or now >= f2_sched:
-        await f2_lockup.run(_f1_result)
-
-    now = datetime.now(KST)
-    if force or now >= f3_sched:
-        await f3_entry.run(force=force)
+        await _run_f2_f3_after_f1(immediate=force or now >= f3_sched)
 
 
 # ── 재시작 복구 ──────────────────────────────────────────────────────
@@ -160,14 +204,17 @@ async def _recover_state() -> None:
 # ── PID 파일 관리 ────────────────────────────────────────────────────
 
 def _write_pid() -> None:
-    with open("main.pid", "w") as f:
-        f.write(str(os.getpid()))
+    try:
+        with open("main.pid", "w") as f:
+            f.write(str(os.getpid()))
+    except OSError as e:
+        logger.log("PID_WRITE_ERROR", level="WARN", path="main.pid", error=repr(e))
 
 
 def _clear_pid() -> None:
     try:
         os.remove("main.pid")
-    except FileNotFoundError:
+    except OSError:
         pass
 
 

@@ -60,7 +60,7 @@ _ALERT_RULES = {
     "TARGET_LOCKED": {
         "title": "대상 종목 확정",
         "situation": "F2에서 오늘 매매 후보가 확정되었습니다.",
-        "action": "09:00 진입 전까지 종목과 예상 갭을 확인하세요.",
+        "action": "09:10 진입 전까지 종목과 예상 갭을 확인하세요.",
     },
     "NO_TARGET": {
         "title": "오늘 매매 대상 없음",

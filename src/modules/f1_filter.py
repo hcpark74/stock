@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from src import db, notifier, state
 from src.api import kis_rest
 from src.utils.logger import log
+from src.utils.number import to_float as _to_float, to_int as _to_int
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -22,13 +23,13 @@ HIGH_GAP_MIN_VI_GAP = 0.010
 LIQUIDITY_TOP_PCT = 0.10
 F1_MIN_CANDIDATES = max(1, int(os.getenv("F1_MIN_CANDIDATES", "10")))
 
-F1_DEADLINE_H = 8
-F1_DEADLINE_M = 58
+F1_DEADLINE_H = 9
+F1_DEADLINE_M = 10
 F1_RETRY_INTERVAL_SEC = int(os.getenv("F1_RETRY_INTERVAL_SEC", "30"))
 F1_SNAPSHOT_DIR = os.getenv("F1_SNAPSHOT_DIR", "data/f1_snapshots")
 F1_SNAPSHOT_KEEP = int(os.getenv("F1_SNAPSHOT_KEEP", "20"))
-F1_EXPECTED_QUOTE_CONCURRENCY = int(os.getenv("F1_EXPECTED_QUOTE_CONCURRENCY", "2"))
-F1_MARKET_INTERVAL_SEC = float(os.getenv("F1_MARKET_INTERVAL_SEC", "2.0"))
+F1_EXPECTED_QUOTE_CONCURRENCY = int(os.getenv("F1_EXPECTED_QUOTE_CONCURRENCY", "1"))
+F1_MARKET_INTERVAL_SEC = float(os.getenv("F1_MARKET_INTERVAL_SEC", "3.0"))
 
 # KIS ranking uses J+input market buckets, and expected-quote accepts J for both KOSPI/KOSDAQ.
 _PREMARKET_MARKETS = (
@@ -445,20 +446,6 @@ def _rotate_candidate_snapshots(snapshot_dir: Path, keep: int = F1_SNAPSHOT_KEEP
             old.unlink()
         except OSError as e:
             log("F1_SNAPSHOT_ROTATE_ERROR", level="WARN", path=str(old), error=repr(e))
-
-
-def _to_float(value: object) -> float:
-    try:
-        return float(value or 0)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _to_int(value: object) -> int:
-    try:
-        return int(float(value or 0))
-    except (TypeError, ValueError):
-        return 0
 
 
 def _calc_vi_gap(expected_price: float, prev_close: float) -> float | None:

@@ -41,7 +41,14 @@ def _headers(tr_id: str = "") -> dict:
     }
 
 
-async def _request(method: str, path: str, tr_id: str = "", timeout: float = _TIMEOUT, **kwargs) -> dict:
+async def _request(
+    method: str,
+    path: str,
+    tr_id: str = "",
+    timeout: float = _TIMEOUT,
+    _app_retry: int = 0,
+    **kwargs,
+) -> dict:
     """Rate-limited KIS REST 요청. 401/429 자동 처리."""
     global _last_call_at
 
@@ -71,16 +78,29 @@ async def _request(method: str, path: str, tr_id: str = "", timeout: float = _TI
     if resp.status_code == 429:
         log("RATE_LIMIT_HIT", level="WARN", path=path)
         await asyncio.sleep(1)
-        return await _request(method, path, tr_id, timeout=timeout, **kwargs)
+        return await _request(method, path, tr_id, timeout=timeout, _app_retry=_app_retry, **kwargs)
 
     # 401 — 토큰 만료 → 즉시 재발급 후 1회 재시도
     if resp.status_code == 401:
         log("TOKEN_EXPIRED", level="WARN", path=path)
         new_token = await auth.refresh()
         if new_token:
-            return await _request(method, path, tr_id, timeout=timeout, **kwargs)
+            return await _request(method, path, tr_id, timeout=timeout, _app_retry=_app_retry, **kwargs)
 
-    return resp.json()
+    data = resp.json()
+    if data.get("msg_cd") == "EGW00201" and _app_retry < 3:
+        log("RATE_LIMIT_HIT", level="WARN", path=path, msg_cd=data.get("msg_cd"), msg1=data.get("msg1"))
+        await asyncio.sleep(1.0)
+        return await _request(
+            method,
+            path,
+            tr_id,
+            timeout=timeout,
+            _app_retry=_app_retry + 1,
+            **kwargs,
+        )
+
+    return data
 
 
 async def get(path: str, params: dict | None = None, tr_id: str = "", timeout: float = _TIMEOUT) -> dict:
