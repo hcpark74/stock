@@ -183,6 +183,17 @@ async def test_pyramid_buy_creates_two_buy_orders(mem):
         assert (await cur.fetchone())[0] == 2
 
 
+async def test_mark_pyramided_updates_trade_flag(mem):
+    trade_id = await db.open_trade("20260623", "035420", 180_000.0, 7)
+
+    await db.mark_pyramided(trade_id)
+
+    conn = db.get()
+    async with conn.execute("SELECT pyramided FROM trades WHERE id=?", (trade_id,)) as cur:
+        row = await cur.fetchone()
+    assert row["pyramided"] == 1
+
+
 async def test_timeout_close_reason(mem):
     """TIMEOUT으로 close_trade → close_reason 정상 기록."""
     trade_id = await db.open_trade("20260623", "000660", 130_000.0, 5)

@@ -7,7 +7,7 @@ const TICKER_NAMES = {
   '035720':'카카오','003550':'LG',
 };
 const REASON_CLS = {TRAILING:'b-tr',HARD_STOP:'b-hs',TIMEOUT:'b-to',OPEN:'b-op'};
-const REASON_LBL = {TRAILING:'TRAILING',HARD_STOP:'HARD_STOP',TIMEOUT:'TIMEOUT',OPEN:'진행 중'};
+const REASON_LBL = {TRAILING:'트레일링 청산',HARD_STOP:'손절 청산',TIMEOUT:'시간 청산',OPEN:'진행 중'};
 
 // ── 유틸 ─────────────────────────────────────────────────────────────────
 const $  = id => document.getElementById(id);
@@ -15,6 +15,7 @@ const fmt = (n, dec=0) => n==null ? '—' : Number(n).toLocaleString('ko-KR',{mi
 const fmtPct = n => n==null ? '—' : (n>=0?'+':'')+Number(n).toFixed(2)+'%';
 const fmtM = n => n==null ? '—' : (n>=1e6 ? (n/1e6).toFixed(2)+'M' : fmt(n))+'원';
 const fmtWon = n => n==null ? '—' : `${fmt(n)}<span class="u">원</span>`;
+const fmtStep = n => n ? fmtPct(Number(n) * 100) : '<span style="color:var(--mu)">—</span>';
 const cls = (el, c) => { el.className = el.className.replace(/\b(up|dn|flat)\b/g,''); el.classList.add(c); };
 const esc = s => String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 
@@ -230,6 +231,7 @@ function updatePipeline(status, pipeline) {
 
 // ── F1 스캔 패널 ─────────────────────────────────────────────────────────
 let _lastF1 = null;
+let _selectionVerdictFilter = 'all';
 
 const F1_STATUS_LABEL = {
   IDLE:'대기',
@@ -401,9 +403,11 @@ function renderSelection(d) {
   const rows = d?.candidates || [];
   const processRows = d?.selection_process || [];
   if(!rows.length) {
+    renderSelectionFilters([]);
     $('sel-tbody').innerHTML = '<tr><td colspan="10" class="empty">F1 후보 스냅샷 없음</td></tr>';
     return;
   }
+  renderSelectionFilters(rows);
   const stepByKey = Object.fromEntries(processRows.map(step => [step.key, step]));
   const picked = key => new Set((stepByKey[key]?.tickers || []).map(String));
   const selectedTickers = picked('f1');
@@ -417,9 +421,17 @@ function renderSelection(d) {
     if(finalTickers.has(key)) badges.push('<span class="badge b-hs">최종</span>');
     return badges.length ? `<div class="sel-badges">${badges.join('')}</div>` : '—';
   };
-  const candidateHtml = rows.map(c=>{
+  const rowsWithVerdict = rows.map(c => ({...c, _verdict: selectionVerdict(c)}));
+  const visibleRows = _selectionVerdictFilter === 'all'
+    ? rowsWithVerdict
+    : rowsWithVerdict.filter(c => c._verdict === _selectionVerdictFilter);
+  if(!visibleRows.length) {
+    $('sel-tbody').innerHTML = '<tr><td colspan="10" class="empty">해당 판정 후보 없음</td></tr>';
+    return;
+  }
+  const candidateHtml = visibleRows.map(c=>{
     const isFinal = finalTickers.has(String(c.ticker || ''));
-    const verdict = c.verdict || '';
+    const verdict = c._verdict;
     const pass = c.gap_allowed === true || verdict === '통과' || verdict === '고갭통과';
     const band = c.gap_band || ((c.gap_source || '').startsWith('expected') ? '예상체결' : '등락률');
     const amount = c.expected_amount || c.avg_amount_5d || null;
@@ -438,6 +450,31 @@ function renderSelection(d) {
     </tr>`;
   }).join('');
   $('sel-tbody').innerHTML = candidateHtml;
+}
+
+function selectionVerdict(c) {
+  const verdict = c?.verdict || '';
+  const pass = c?.gap_allowed === true;
+  return verdict || (pass ? '통과' : '제외');
+}
+
+function renderSelectionFilters(rows) {
+  const el = $('sel-filters');
+  if(!el) return;
+  const verdicts = [...new Set(rows.map(selectionVerdict).filter(Boolean))];
+  if(_selectionVerdictFilter !== 'all' && !verdicts.includes(_selectionVerdictFilter)) {
+    _selectionVerdictFilter = 'all';
+  }
+  el.innerHTML = [
+    `<button class="fp ${_selectionVerdictFilter==='all'?'on':''}" data-s-value="all">전체</button>`,
+    ...verdicts.map(v => `<button class="fp ${_selectionVerdictFilter===v?'on':''}" data-s-value="${esc(v)}">${esc(v)}</button>`),
+  ].join('');
+  el.querySelectorAll('[data-s-value]').forEach(btn => {
+    btn.onclick = () => {
+      _selectionVerdictFilter = btn.dataset.sValue || 'all';
+      renderSelection(_lastF1);
+    };
+  });
 }
 
 function positionAssetValues(d) {
@@ -680,6 +717,32 @@ function buildLogDetail(l) {
 }
 
 // ── 이력 렌더 ────────────────────────────────────────────────────────────
+let _historyTrades = [];
+let _historyStats = null;
+let _historyFilters = {period:'all', reason:'all'};
+
+function historyMonthKey() {
+  const now = new Date();
+  const kst = new Date(now.getTime()+9*3600*1000);
+  return String(kst.getUTCFullYear()) + String(kst.getUTCMonth()+1).padStart(2,'0');
+}
+
+function filteredHistoryTrades() {
+  const ym = historyMonthKey();
+  return _historyTrades.filter(t => {
+    if(_historyFilters.period === 'month' && String(t.date||'').substring(0,6) !== ym) return false;
+    if(_historyFilters.reason !== 'all' && t.close_reason !== _historyFilters.reason) return false;
+    return true;
+  });
+}
+
+function setHistoryFilter(type, value, btn) {
+  _historyFilters[type] = value;
+  document.querySelectorAll(`[data-h-filter="${type}"]`).forEach(b=>b.classList.remove('on'));
+  if(btn) btn.classList.add('on');
+  renderHistory(filteredHistoryTrades(), _historyStats);
+}
+
 function renderHistory(trades, stats) {
   if(stats){
     $('h-total').textContent = stats.total||0;
@@ -704,7 +767,7 @@ function renderHistory(trades, stats) {
       <td>${t.entry_price?fmt(t.entry_price):'—'}</td>
       <td>${t.exit_price?fmt(t.exit_price):'<span style="color:var(--mu)">—</span>'}</td>
       <td class="${pnlCls}">${fmtPct(t.pnl_pct)}</td>
-      <td class="${t.highest_step?'pup':''}">${t.highest_step?'✓':'<span style="color:var(--mu)">—</span>'}</td>
+      <td class="${t.highest_step?'pup':''}">${fmtStep(t.highest_step)}</td>
       <td class="${t.pyramided?'pup':''}">${t.pyramided?'✓':'<span style="color:var(--mu)">—</span>'}</td>
       <td><span class="badge ${rc}">${rl}</span></td>
     </tr>`;
@@ -756,9 +819,9 @@ function drawBar(byReason) {
   const ctx=c.getContext('2d');
   ctx.clearRect(0,0,420,192);
   const data=[
-    {lbl:'TRAILING', val:byReason.TRAILING?.avg_pnl||0, color:'#26a69a', n:byReason.TRAILING?.n||0},
-    {lbl:'TIMEOUT',  val:byReason.TIMEOUT?.avg_pnl||0,  color:'#787b86', n:byReason.TIMEOUT?.n||0},
-    {lbl:'HARD_STOP',val:byReason.HARD_STOP?.avg_pnl||0,color:'#ef5350', n:byReason.HARD_STOP?.n||0},
+    {lbl:'트레일링', val:byReason.TRAILING?.avg_pnl||0, color:'#26a69a', n:byReason.TRAILING?.n||0},
+    {lbl:'시간 청산', val:byReason.TIMEOUT?.avg_pnl||0, color:'#787b86', n:byReason.TIMEOUT?.n||0},
+    {lbl:'손절 청산', val:byReason.HARD_STOP?.avg_pnl||0,color:'#ef5350', n:byReason.HARD_STOP?.n||0},
   ];
   const pad={t:24,r:20,b:48,l:48};
   const W=420,H=192,cW=W-pad.l-pad.r,cH=H-pad.t-pad.b;
@@ -905,9 +968,10 @@ async function loadOrders() {
 async function loadHistory() {
   try {
     const [hr, sr] = await Promise.all([fetch('/api/history'), fetch('/api/stats')]);
-    const trades = hr.ok ? await hr.json() : [];
-    const stats  = sr.ok ? await sr.json() : null;
-    renderHistory(trades, stats);
+    _historyTrades = hr.ok ? await hr.json() : [];
+    _historyStats = sr.ok ? await sr.json() : null;
+    const trades = filteredHistoryTrades();
+    renderHistory(trades, _historyStats);
   } catch(e){}
 }
 

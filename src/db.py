@@ -210,6 +210,19 @@ async def update_order_fill(
     await conn.commit()
 
 
+async def mark_pyramided(trade_id: int) -> None:
+    """Mark a trade as having a filled pyramid buy."""
+    now = _now()
+    conn = get()
+    await conn.execute(
+        """UPDATE trades
+           SET pyramided=1, updated_at=?
+           WHERE id=?""",
+        (now, trade_id),
+    )
+    await conn.commit()
+
+
 async def close_trade(
     trade_id: int,
     exit_price: float,

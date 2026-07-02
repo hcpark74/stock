@@ -188,7 +188,9 @@ body{background:var(--g);color:var(--tx);font-family:-apple-system,'Segoe UI',sy
 .sc2-lbl{font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;}
 .sc2-val{font-family:var(--mn);font-size:20px;font-weight:700;}
 .sc2-note{font-family:var(--mn);font-size:9px;color:var(--mu);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.frow{display:flex;gap:4px;margin-bottom:10px;flex-wrap:wrap;}
+.frow,.hist-filters{display:flex;gap:8px 12px;margin-bottom:10px;flex-wrap:wrap;align-items:center;}
+.filter-group{display:flex;align-items:center;gap:4px;flex-wrap:wrap;min-width:0;}
+.filter-label{font-size:10px;color:var(--mu);margin-right:2px;white-space:nowrap;}
 .fp{padding:2px 8px;border:1px solid var(--bd);font-size:10px;color:var(--mu);cursor:pointer;background:transparent;transition:all .1s;}
 .fp:hover{border-color:var(--mu);color:var(--tx);}
 .fp.on{background:rgba(41,98,255,.1);border-color:rgba(41,98,255,.35);color:var(--tx);}
@@ -438,9 +440,7 @@ tr:hover td{background:var(--s2);}
         <div class="frow">
           <button class="fp on">전체</button>
           <button class="fp">통과</button>
-          <button class="fp">갭미달</button>
-          <button class="fp">HIGH 제외</button>
-          <button class="fp">유동성 부족</button>
+          <button class="fp">제외</button>
         </div>
         <div class="tbl-wrap">
           <table>
@@ -539,31 +539,38 @@ tr:hover td{background:var(--s2);}
           <div class="sc2"><div class="sc2-lbl">평균 손익</div><div class="sc2-val pup">+0.85%</div></div>
           <div class="sc2"><div class="sc2-lbl">최대 손실</div><div class="sc2-val pdn">−2.35%</div></div>
         </div>
-        <div class="frow">
-          <button class="fp on">전체</button>
-          <button class="fp">이번 달</button>
-          <button class="fp">TRAILING</button>
-          <button class="fp">HARD_STOP</button>
-          <button class="fp">TIMEOUT</button>
+        <div class="hist-filters">
+          <div class="filter-group">
+            <span class="filter-label">기간</span>
+            <button class="fp on">전체 기간</button>
+            <button class="fp">이번 달</button>
+          </div>
+          <div class="filter-group">
+            <span class="filter-label">청산 사유</span>
+            <button class="fp on">모든 사유</button>
+            <button class="fp">트레일링 청산</button>
+            <button class="fp">손절 청산</button>
+            <button class="fp">시간 청산</button>
+          </div>
         </div>
         <div class="tbl-wrap">
           <table>
             <thead><tr>
               <th>날짜</th><th>종목</th><th>진입가</th><th>청산가</th>
-              <th>손익</th><th>Step Trail</th><th>피라미딩</th><th>청산 사유</th>
+              <th>손익</th><th>최고 Step</th><th>피라미딩</th><th>청산 사유</th>
             </tr></thead>
             <tbody>
               <tr><td>20260623</td><td>005930 <span style="color:var(--mu);font-size:10px">삼성전자</span></td><td>75,800</td><td style="color:var(--mu)">—</td><td class="pup">+1.84%</td><td class="pup">✓</td><td class="pup">✓</td><td><span class="badge b-op">진행 중</span></td></tr>
-              <tr><td>20260620</td><td>000660 <span style="color:var(--mu);font-size:10px">SK하이닉스</span></td><td>185,000</td><td>189,200</td><td class="pup">+2.27%</td><td class="pup">✓</td><td style="color:var(--mu)">—</td><td><span class="badge b-tr">TRAILING</span></td></tr>
-              <tr><td>20260619</td><td>035420 <span style="color:var(--mu);font-size:10px">NAVER</span></td><td>342,000</td><td>335,200</td><td class="pdn">−1.99%</td><td style="color:var(--mu)">—</td><td style="color:var(--mu)">—</td><td><span class="badge b-hs">HARD_STOP</span></td></tr>
-              <tr><td>20260618</td><td>005380 <span style="color:var(--mu);font-size:10px">현대차</span></td><td>23,500</td><td>24,150</td><td class="pup">+2.77%</td><td class="pup">✓</td><td class="pup">✓</td><td><span class="badge b-tr">TRAILING</span></td></tr>
-              <tr><td>20260617</td><td>000270 <span style="color:var(--mu);font-size:10px">기아</span></td><td>42,800</td><td>43,400</td><td class="pup">+1.40%</td><td style="color:var(--mu)">—</td><td style="color:var(--mu)">—</td><td><span class="badge b-to">TIMEOUT</span></td></tr>
-              <tr><td>20260613</td><td>028260 <span style="color:var(--mu);font-size:10px">삼성물산</span></td><td>192,000</td><td>195,800</td><td class="pup">+1.98%</td><td class="pup">✓</td><td style="color:var(--mu)">—</td><td><span class="badge b-tr">TRAILING</span></td></tr>
-              <tr><td>20260612</td><td>000660 <span style="color:var(--mu);font-size:10px">SK하이닉스</span></td><td>178,500</td><td>174,300</td><td class="pdn">−2.35%</td><td style="color:var(--mu)">—</td><td style="color:var(--mu)">—</td><td><span class="badge b-hs">HARD_STOP</span></td></tr>
-              <tr><td>20260611</td><td>035720 <span style="color:var(--mu);font-size:10px">카카오</span></td><td>438,000</td><td>444,500</td><td class="pup">+1.48%</td><td style="color:var(--mu)">—</td><td style="color:var(--mu)">—</td><td><span class="badge b-to">TIMEOUT</span></td></tr>
-              <tr><td>20260610</td><td>000270 <span style="color:var(--mu);font-size:10px">기아</span></td><td>41,200</td><td>42,100</td><td class="pup">+2.18%</td><td class="pup">✓</td><td style="color:var(--mu)">—</td><td><span class="badge b-tr">TRAILING</span></td></tr>
-              <tr><td>20260609</td><td>005380 <span style="color:var(--mu);font-size:10px">현대차</span></td><td>24,200</td><td>23,900</td><td class="pdn">−1.24%</td><td style="color:var(--mu)">—</td><td style="color:var(--mu)">—</td><td><span class="badge b-hs">HARD_STOP</span></td></tr>
-              <tr><td>20260605</td><td>003550 <span style="color:var(--mu);font-size:10px">LG</span></td><td>93,000</td><td>95,100</td><td class="pup">+2.26%</td><td class="pup">✓</td><td style="color:var(--mu)">—</td><td><span class="badge b-tr">TRAILING</span></td></tr>
+              <tr><td>20260620</td><td>000660 <span style="color:var(--mu);font-size:10px">SK하이닉스</span></td><td>185,000</td><td>189,200</td><td class="pup">+2.27%</td><td class="pup">✓</td><td style="color:var(--mu)">—</td><td><span class="badge b-tr">트레일링 청산</span></td></tr>
+              <tr><td>20260619</td><td>035420 <span style="color:var(--mu);font-size:10px">NAVER</span></td><td>342,000</td><td>335,200</td><td class="pdn">−1.99%</td><td style="color:var(--mu)">—</td><td style="color:var(--mu)">—</td><td><span class="badge b-hs">손절 청산</span></td></tr>
+              <tr><td>20260618</td><td>005380 <span style="color:var(--mu);font-size:10px">현대차</span></td><td>23,500</td><td>24,150</td><td class="pup">+2.77%</td><td class="pup">✓</td><td class="pup">✓</td><td><span class="badge b-tr">트레일링 청산</span></td></tr>
+              <tr><td>20260617</td><td>000270 <span style="color:var(--mu);font-size:10px">기아</span></td><td>42,800</td><td>43,400</td><td class="pup">+1.40%</td><td style="color:var(--mu)">—</td><td style="color:var(--mu)">—</td><td><span class="badge b-to">시간 청산</span></td></tr>
+              <tr><td>20260613</td><td>028260 <span style="color:var(--mu);font-size:10px">삼성물산</span></td><td>192,000</td><td>195,800</td><td class="pup">+1.98%</td><td class="pup">✓</td><td style="color:var(--mu)">—</td><td><span class="badge b-tr">트레일링 청산</span></td></tr>
+              <tr><td>20260612</td><td>000660 <span style="color:var(--mu);font-size:10px">SK하이닉스</span></td><td>178,500</td><td>174,300</td><td class="pdn">−2.35%</td><td style="color:var(--mu)">—</td><td style="color:var(--mu)">—</td><td><span class="badge b-hs">손절 청산</span></td></tr>
+              <tr><td>20260611</td><td>035720 <span style="color:var(--mu);font-size:10px">카카오</span></td><td>438,000</td><td>444,500</td><td class="pup">+1.48%</td><td style="color:var(--mu)">—</td><td style="color:var(--mu)">—</td><td><span class="badge b-to">시간 청산</span></td></tr>
+              <tr><td>20260610</td><td>000270 <span style="color:var(--mu);font-size:10px">기아</span></td><td>41,200</td><td>42,100</td><td class="pup">+2.18%</td><td class="pup">✓</td><td style="color:var(--mu)">—</td><td><span class="badge b-tr">트레일링 청산</span></td></tr>
+              <tr><td>20260609</td><td>005380 <span style="color:var(--mu);font-size:10px">현대차</span></td><td>24,200</td><td>23,900</td><td class="pdn">−1.24%</td><td style="color:var(--mu)">—</td><td style="color:var(--mu)">—</td><td><span class="badge b-hs">손절 청산</span></td></tr>
+              <tr><td>20260605</td><td>003550 <span style="color:var(--mu);font-size:10px">LG</span></td><td>93,000</td><td>95,100</td><td class="pup">+2.26%</td><td class="pup">✓</td><td style="color:var(--mu)">—</td><td><span class="badge b-tr">트레일링 청산</span></td></tr>
             </tbody>
           </table>
         </div>
@@ -725,9 +732,9 @@ function drawBar() {
   ctx.strokeStyle='#363a45'; ctx.lineWidth=1; ctx.stroke();
 
   const data=[
-    {lbl:'TRAILING', val:1.82, color:'#26a69a', n:5},
-    {lbl:'TIMEOUT',  val:1.44, color:'#787b86', n:2},
-    {lbl:'HARD_STOP',val:-2.17,color:'#ef5350', n:2},
+    {lbl:'트레일링', val:1.82, color:'#26a69a', n:5},
+    {lbl:'시간 청산',  val:1.44, color:'#787b86', n:2},
+    {lbl:'손절 청산',val:-2.17,color:'#ef5350', n:2},
   ];
   const slot=cW/data.length, bW=slot*0.38;
 
@@ -755,3 +762,4 @@ function drawBar() {
   });
 }
 </script>
+

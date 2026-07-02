@@ -364,6 +364,7 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
             await db.update_order_fill(
                 py_order_db_id, py_fill["fill_price"], py_fill["fill_qty"], 0,
             )
+            await db.mark_pyramided(trade_id)
             await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
             log("PYRAMID_EXECUTED", level="INFO", ticker=ticker,
                 fill_price=py_fill["fill_price"], fill_qty=py_fill["fill_qty"])

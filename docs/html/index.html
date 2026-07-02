@@ -145,12 +145,8 @@
           <div class="sc2"><div class="sc2-lbl">예상체결 보강</div><div class="sc2-val" id="sel-expected">—</div></div>
           <div class="sc2"><div class="sc2-lbl">최종 후보</div><div class="sc2-val pup" id="sel-selected">—</div></div>
         </div>
-        <div class="frow">
-          <button class="fp on">전체</button>
-          <button class="fp">통과</button>
-          <button class="fp">갭미달</button>
-          <button class="fp">HIGH 제외</button>
-          <button class="fp">유동성 부족</button>
+        <div class="frow" id="sel-filters" aria-label="선정 판정 필터">
+          <button class="fp on" data-s-value="all">전체</button>
         </div>
         <div class="tbl-wrap">
           <table>
@@ -242,11 +238,25 @@
           <div class="sc2"><div class="sc2-lbl">평균 손익</div><div class="sc2-val" id="h-avg">—</div></div>
           <div class="sc2"><div class="sc2-lbl">최대 손실</div><div class="sc2-val pdn" id="h-maxloss">—</div></div>
         </div>
+        <div class="hist-filters" aria-label="이력 필터">
+          <div class="filter-group" aria-label="기간">
+            <span class="filter-label">기간</span>
+            <button class="fp on" data-h-filter="period" data-h-value="all" onclick="setHistoryFilter('period','all',this)">전체 기간</button>
+            <button class="fp" data-h-filter="period" data-h-value="month" onclick="setHistoryFilter('period','month',this)">이번 달</button>
+          </div>
+          <div class="filter-group" aria-label="청산 사유">
+            <span class="filter-label">청산 사유</span>
+            <button class="fp on" data-h-filter="reason" data-h-value="all" onclick="setHistoryFilter('reason','all',this)">모든 사유</button>
+            <button class="fp" data-h-filter="reason" data-h-value="TRAILING" onclick="setHistoryFilter('reason','TRAILING',this)">트레일링 청산</button>
+            <button class="fp" data-h-filter="reason" data-h-value="HARD_STOP" onclick="setHistoryFilter('reason','HARD_STOP',this)">손절 청산</button>
+            <button class="fp" data-h-filter="reason" data-h-value="TIMEOUT" onclick="setHistoryFilter('reason','TIMEOUT',this)">시간 청산</button>
+          </div>
+        </div>
         <div class="tbl-wrap">
           <table>
             <thead><tr>
               <th>날짜</th><th>종목</th><th>진입가</th><th>청산가</th>
-              <th>손익</th><th>Step Trail</th><th>피라미딩</th><th>청산 사유</th>
+              <th>손익</th><th>최고 Step</th><th>피라미딩</th><th>청산 사유</th>
             </tr></thead>
             <tbody id="h-tbody"><tr><td colspan="8" class="empty">로딩 중...</td></tr></tbody>
           </table>
