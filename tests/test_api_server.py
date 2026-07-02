@@ -7,6 +7,7 @@ import pytest
 pytest.importorskip("fastapi")
 
 import src.api.server as server
+from src import db
 import src.modules.f1_filter as f1_filter
 
 
@@ -124,6 +125,27 @@ async def test_assets_refresh_fetches_asset_snapshot(monkeypatch):
 
     fetch.assert_awaited_once()
     assert '"cash":1000000.0' in body
+
+
+@pytest.mark.asyncio
+async def test_api_orders_returns_today_orders(tmp_path, monkeypatch):
+    await db.init(str(tmp_path / "orders.db"))
+    today = "20260702"
+    monkeypatch.setattr(server, "_today", lambda: today)
+    trade_id = await db.open_trade(today, "005930", 75_000.0, 10)
+    order_id = await db.record_order(trade_id, "ORD001", "BUY", 10, 75_000.0, "FIRST_BUY", "005930")
+    await db.update_order_fill(order_id, 75_100.0, 10, 120)
+    old_trade_id = await db.open_trade("20260701", "000660", 120_000.0, 1)
+    await db.record_order(old_trade_id, "OLD001", "BUY", 1, 120_000.0, "FIRST_BUY", "000660")
+
+    resp = await server.api_orders()
+    body = resp.body.decode("utf-8")
+
+    assert '"kis_order_id":"ORD001"' in body
+    assert '"order_phase":"FIRST_BUY"' in body
+    assert '"status":"FILLED"' in body
+    assert "OLD001" not in body
+    await db.close()
 
 
 @pytest.mark.asyncio

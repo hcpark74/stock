@@ -156,7 +156,14 @@ body{background:var(--g);color:var(--tx);font-family:'Noto Sans KR',system-ui,sa
 /* HISTORY */
 .sc-hist{flex-direction:column;}
 .hist-inner{padding:16px 20px;overflow-y:auto;flex:1;}
+.view-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:12px;min-width:0;}
+.view-title{font-size:15px;font-weight:700;letter-spacing:0;color:var(--tx);}
+.view-sub{font-size:11px;color:var(--mu);margin-top:2px;}
+.ref-pill{display:flex;align-items:center;gap:7px;border:1px solid var(--bd);background:rgba(255,255,255,.018);padding:5px 8px;white-space:nowrap;min-height:30px;}
+.ref-k{font-size:10px;color:var(--mu);letter-spacing:.04em;text-transform:uppercase;}
+.ref-v{font-family:var(--mn);font-size:12px;font-weight:700;color:var(--br);}
 .scards{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px;}
+.scards.asset-cards{grid-template-columns:repeat(5,minmax(128px,1fr));}
 .sc2{background:var(--s);border:1px solid var(--bd);padding:12px 14px;}
 .sc2-lbl{font-size:11px;color:var(--mu);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;}
 .sc2-val{font-family:var(--mn);font-size:21px;font-weight:700;}
@@ -226,4 +233,6 @@ tr:hover td{background:var(--s2);}
   .asset-strip{flex-wrap:wrap;height:auto;padding:7px 16px;gap:6px 12px;}
   .asset-cell.push{margin-left:0;}
   .t-right{width:280px;}
+  .scards.asset-cards{grid-template-columns:repeat(2,minmax(0,1fr));}
+  .view-head{flex-direction:column;}
 }

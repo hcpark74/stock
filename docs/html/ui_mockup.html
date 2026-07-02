@@ -152,7 +152,14 @@ body{background:var(--g);color:var(--tx);font-family:-apple-system,'Segoe UI',sy
 /* ── HISTORY ── */
 .sc-hist{flex-direction:column;}
 .hist-inner{padding:16px 20px;overflow-y:auto;flex:1;}
+.view-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:12px;min-width:0;}
+.view-title{font-size:15px;font-weight:700;letter-spacing:0;color:var(--tx);}
+.view-sub{font-size:10px;color:var(--mu);margin-top:2px;}
+.ref-pill{display:flex;align-items:center;gap:7px;border:1px solid var(--bd);background:rgba(255,255,255,.018);padding:5px 8px;white-space:nowrap;min-height:30px;}
+.ref-k{font-size:9px;color:var(--mu);letter-spacing:.04em;text-transform:uppercase;}
+.ref-v{font-family:var(--mn);font-size:12px;font-weight:700;color:var(--br);}
 .scards{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px;}
+.scards.asset-cards{grid-template-columns:repeat(5,minmax(128px,1fr));}
 .sc2{background:var(--s);border:1px solid var(--bd);padding:12px 14px;}
 .sc2-lbl{font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;}
 .sc2-val{font-family:var(--mn);font-size:20px;font-weight:700;}
@@ -170,6 +177,11 @@ tr:hover td{background:var(--s2);}
 .b-hs{background:rgba(239,83,80,.12);color:var(--dn);}
 .b-to{background:rgba(120,123,134,.1);color:var(--mu);}
 .b-op{background:rgba(41,98,255,.1);color:#7b9ef9;border:1px solid rgba(41,98,255,.2);}
+
+@media (max-width:980px){
+  .scards.asset-cards{grid-template-columns:repeat(2,minmax(0,1fr));}
+  .view-head{flex-direction:column;}
+}
 
 /* ── STATS ── */
 .sc-stats{flex-direction:column;}
@@ -289,7 +301,7 @@ tr:hover td{background:var(--s2);}
             <div class="asset-v sm up">+174,600<span class="u">원</span></div>
           </div>
           <div class="asset-cell push">
-            <div class="asset-k">가용주문</div>
+            <div class="asset-k">주문가능</div>
             <div class="asset-v sm">492K<span class="u">원</span></div>
             <div class="asset-sub">자산 메뉴에서 상세</div>
           </div>
@@ -420,9 +432,16 @@ tr:hover td{background:var(--s2);}
     <!-- ASSETS -->
     <div id="sc-assets" class="sc sc-hist">
       <div class="hist-inner">
-        <div class="scards">
+        <div class="view-head">
+          <div>
+            <div class="view-title">자산 스냅샷</div>
+            <div class="view-sub">KIS 잔고 조회 기준 현재 계좌 상태</div>
+          </div>
+        </div>
+        <div class="scards asset-cards">
           <div class="sc2"><div class="sc2-lbl">총평가금액</div><div class="sc2-val">9,987,445</div></div>
           <div class="sc2"><div class="sc2-lbl">예수금</div><div class="sc2-val" style="color:var(--br)">492,845</div></div>
+          <div class="sc2"><div class="sc2-lbl">주문가능금액</div><div class="sc2-val" style="color:var(--br)">492,845</div></div>
           <div class="sc2"><div class="sc2-lbl">유가평가</div><div class="sc2-val">9.49M</div></div>
           <div class="sc2"><div class="sc2-lbl">당일손익</div><div class="sc2-val pup">+1.84%</div></div>
         </div>
@@ -442,18 +461,28 @@ tr:hover td{background:var(--s2);}
     <!-- ORDERS -->
     <div id="sc-orders" class="sc sc-hist">
       <div class="hist-inner">
+        <div class="view-head">
+          <div>
+            <div class="view-title">주문/체결 내역</div>
+            <div class="view-sub">F3/F4/F5 주문 실행과 처리 결과</div>
+          </div>
+          <div class="ref-pill">
+            <span class="ref-k">주문가능 참조</span>
+            <span class="ref-v">492K</span>
+          </div>
+        </div>
         <div class="scards">
+          <div class="sc2"><div class="sc2-lbl">금일 주문</div><div class="sc2-val">2</div></div>
+          <div class="sc2"><div class="sc2-lbl">체결</div><div class="sc2-val pup">2</div></div>
           <div class="sc2"><div class="sc2-lbl">미체결</div><div class="sc2-val">0</div></div>
-          <div class="sc2"><div class="sc2-lbl">금일매수</div><div class="sc2-val">9.49M</div></div>
-          <div class="sc2"><div class="sc2-lbl">금일매도</div><div class="sc2-val">0</div></div>
-          <div class="sc2"><div class="sc2-lbl">주문가능</div><div class="sc2-val" style="color:var(--br)">492K</div></div>
+          <div class="sc2"><div class="sc2-lbl">취소/실패</div><div class="sc2-val pdn">0</div></div>
         </div>
         <div class="tbl-wrap">
           <table>
-            <thead><tr><th>시간</th><th>종목</th><th>구분</th><th>수량</th><th>가격</th><th>상태</th></tr></thead>
+            <thead><tr><th>주문번호</th><th>시간</th><th>종목</th><th>구분</th><th>주문수량</th><th>주문가격</th><th>체결수량</th><th>상태</th><th>단계</th></tr></thead>
             <tbody>
-              <tr><td>08:59:52</td><td>005930 삼성전자</td><td>매수</td><td>89</td><td>75,800</td><td><span class="badge b-tr">체결</span></td></tr>
-              <tr><td>09:00:12</td><td>005930 삼성전자</td><td>피라미딩</td><td>18</td><td>76,100</td><td><span class="badge b-tr">체결</span></td></tr>
+              <tr><td>0000000937</td><td>08:59:52</td><td>005930 삼성전자</td><td>매수</td><td>89</td><td>75,800</td><td>89</td><td><span class="badge b-tr">체결</span></td><td>FIRST_BUY</td></tr>
+              <tr><td>0000000938</td><td>09:00:12</td><td>005930 삼성전자</td><td>매수</td><td>18</td><td>76,100</td><td>18</td><td><span class="badge b-tr">체결</span></td><td>PYRAMID_BUY</td></tr>
             </tbody>
           </table>
         </div>

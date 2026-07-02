@@ -35,6 +35,7 @@ function go(id, btn) {
     renderAssets(_lastStatus);
     loadAssets(false);
   }
+  if (id==='orders') loadOrders();
   if (id==='history') loadHistory();
   if (id==='stats')   loadStats();
 }
@@ -397,13 +398,14 @@ function renderAssets(d) {
   const v = positionAssetValues(d);
   $('asset-total').textContent = v.total == null ? '—' : fmt(v.total);
   $('asset-cash').textContent = v.cash == null ? '—' : fmt(v.cash);
+  $('asset-buyable').textContent = v.buyable == null ? '—' : fmt(v.buyable);
   $('asset-stock').textContent = v.stockValue == null ? '—' : fmtM(v.stockValue);
   $('asset-pnl').textContent = v.pnlAmount == null ? '—' : fmt(v.pnlAmount);
   $('asset-pnl').className = 'sc2-val ' + (v.pnlAmount == null ? '' : v.pnlAmount >= 0 ? 'pup' : 'pdn');
 
   const rows = [];
   rows.push(`<tr><td>예수금</td><td>${v.cash == null ? '—' : fmt(v.cash)}</td><td>—</td><td><span class="badge ${v.cash == null ? 'b-to' : 'b-op'}">${v.cash == null ? 'API 대기' : '연동'}</span></td></tr>`);
-  rows.push(`<tr><td>가용주문</td><td>${v.buyable == null ? '—' : fmt(v.buyable)}</td><td>—</td><td><span class="badge ${v.buyable == null ? 'b-to' : 'b-op'}">${v.buyable == null ? 'API 대기' : '주문가능'}</span></td></tr>`);
+  rows.push(`<tr><td>주문가능금액</td><td>${v.buyable == null ? '—' : fmt(v.buyable)}</td><td>—</td><td><span class="badge ${v.buyable == null ? 'b-to' : 'b-op'}">${v.buyable == null ? 'API 대기' : '주문가능'}</span></td></tr>`);
   if(v.holdings && d?.ticker) {
     rows.push(`<tr><td>${esc(d.ticker)} ${esc(TICKER_NAMES[d.ticker] || '')}</td><td>${fmt(v.stockValue)}</td><td>—</td><td><span class="badge b-tr">보유중</span></td></tr>`);
     rows.push(`<tr><td>평가손익</td><td class="${v.pnlAmount >= 0 ? 'pup' : 'pdn'}">${fmt(v.pnlAmount)}</td><td>${fmtPct(d.pnl_pct)}</td><td><span class="badge ${v.pnlAmount >= 0 ? 'b-tr' : 'b-hs'}">${v.pnlAmount >= 0 ? '수익' : '손실'}</span></td></tr>`);
@@ -414,6 +416,59 @@ function renderAssets(d) {
   }
   $('asset-tbody').innerHTML = rows.join('');
   $('set-mode').textContent = d?.mode || 'PAPER';
+}
+
+function shortTime(s) {
+  if(!s) return '—';
+  const m = String(s).match(/T(\d{2}:\d{2}:\d{2})/);
+  return m ? m[1] : String(s).slice(0, 8);
+}
+
+function orderStatusBadge(status) {
+  const s = String(status || 'PENDING');
+  if(s === 'FILLED') return '<span class="badge b-tr">체결</span>';
+  if(s === 'PARTIAL_FILL') return '<span class="badge b-op">부분체결</span>';
+  if(s === 'CANCELLED') return '<span class="badge b-to">취소</span>';
+  if(s === 'FAILED') return '<span class="badge b-hs">실패</span>';
+  return '<span class="badge b-op">대기</span>';
+}
+
+function orderSideLabel(order) {
+  const phase = String(order.order_phase || '');
+  if(phase === 'CANCEL') return '취소';
+  if(phase === 'PYRAMID_BUY') return '피라미딩';
+  if(phase.includes('SELL')) return '매도';
+  if(order.order_type === 'SELL') return '매도';
+  return '매수';
+}
+
+function renderOrders(rows) {
+  const orders = Array.isArray(rows) ? rows : [];
+  if($('order-total')) $('order-total').textContent = fmt(orders.length);
+  if($('order-filled')) $('order-filled').textContent = fmt(orders.filter(o=>o.status === 'FILLED').length);
+  if($('order-pending')) $('order-pending').textContent = fmt(orders.filter(o=>o.status === 'PENDING' || o.status === 'PARTIAL_FILL').length);
+  if($('order-closed')) $('order-closed').textContent = fmt(orders.filter(o=>o.status === 'CANCELLED' || o.status === 'FAILED').length);
+
+  const body = $('orders-tbody');
+  if(!body) return;
+  if(!orders.length) {
+    body.innerHTML = '<tr><td colspan="9" class="empty">오늘 주문 내역 없음</td></tr>';
+    return;
+  }
+  body.innerHTML = orders.map(o => {
+    const tickerName = TICKER_NAMES[o.ticker] || '';
+    return `<tr>
+      <td>${esc(o.kis_order_id || (o.id ? `DB#${o.id}` : '—'))}</td>
+      <td>${esc(shortTime(o.ordered_at))}</td>
+      <td>${esc(o.ticker || '—')} ${esc(tickerName)}</td>
+      <td>${esc(orderSideLabel(o))}</td>
+      <td>${fmt(o.order_qty)}</td>
+      <td>${o.order_price == null ? '—' : fmt(o.order_price)}</td>
+      <td>${o.fill_qty == null ? '—' : fmt(o.fill_qty)}</td>
+      <td>${orderStatusBadge(o.status)}</td>
+      <td>${esc(o.order_phase || '—')}</td>
+    </tr>`;
+  }).join('');
 }
 
 // ── 이벤트 로그 렌더 ─────────────────────────────────────────────────────
@@ -705,6 +760,14 @@ async function loadF1() {
   } catch(e){}
 }
 
+async function loadOrders() {
+  try {
+    const r = await fetch('/api/orders');
+    if(!r.ok) return;
+    renderOrders(await r.json());
+  } catch(e){}
+}
+
 async function loadHistory() {
   try {
     const [hr, sr] = await Promise.all([fetch('/api/history'), fetch('/api/stats')]);
@@ -740,6 +803,7 @@ function connectSSE() {
       } else if(d.type==='log') {
         loadLogs();
         loadF1();
+        loadOrders();
       }
     } catch(err){}
   };
@@ -774,9 +838,11 @@ function toggleTheme() {
 loadStatus();
 loadF1();
 loadLogs();
+loadOrders();
 connectSSE();
 
 // 폴링 백업 (SSE가 오래된 이벤트를 놓칠 경우 대비)
 setInterval(loadStatus, 3000);
 setInterval(loadF1, 5000);
 setInterval(loadLogs, 10000);
+setInterval(loadOrders, 5000);
