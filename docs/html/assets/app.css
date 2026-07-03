@@ -152,7 +152,7 @@ body{background:var(--g);color:var(--tx);font-family:'Noto Sans KR',system-ui,sa
 .lg-cur{background:var(--up);}
 .lg-entry{background:var(--br);}
 .lg-stop{background:var(--dn);}
-#price-flow{width:100%;height:180px;border:1px solid var(--bd);background:rgba(255,255,255,.01);display:block;}
+#price-flow{width:min(100%,760px);height:180px;border:1px solid var(--bd);background:rgba(255,255,255,.01);display:block;}
 
 /* Event log panel */
 .ev-hdr{height:30px;padding:0 12px;display:flex;align-items:center;border-bottom:1px solid var(--bd);font-size:11px;color:var(--mu);text-transform:uppercase;letter-spacing:.08em;flex-shrink:0;}

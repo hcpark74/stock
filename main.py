@@ -20,7 +20,16 @@ import uvicorn  # noqa: E402
 from src import db, notifier, state  # noqa: E402
 from src.api import auth, server  # noqa: E402
 from src.modules import f1_filter, f2_lockup, f3_entry, f4_tracking, f5_timeout  # noqa: E402
-from src.scheduler import build, F1_H, F1_M, F2_H, F2_M, F3_H, F3_M, F3_S, F3_FILL_DEADLINE_H, F3_FILL_DEADLINE_M  # noqa: E402
+from src.scheduler import (  # noqa: E402
+    F1_H,
+    F1_M,
+    F3_FILL_DEADLINE_H,
+    F3_FILL_DEADLINE_M,
+    F3_H,
+    F3_M,
+    F3_S,
+    build,
+)
 from src.utils import logger, time_sync  # noqa: E402
 
 KST = ZoneInfo("Asia/Seoul")
@@ -217,7 +226,7 @@ def _should_retry_f1_after_f2_fail() -> bool:
 async def _run_catchup() -> None:
     """
     F1 start 이후 F3 fill deadline 전에 기동하면 F1(~F3)이 missed 상태.
-    즉시 보완 실행해 당일 파이프라인을 복구한다.
+    F1 결과가 나오면 F2/F3 체인을 즉시 이어서 당일 파이프라인을 복구한다.
     F3 fill deadline 이후엔 진입 마감이 지났으므로 catchup 불가.
     """
     await _ensure_trading_day()
@@ -226,24 +235,34 @@ async def _run_catchup() -> None:
 
     now = datetime.now(KST)
     f1_sched = _scheduled_at(F1_H, F1_M)
-    f2_sched = _scheduled_at(F2_H, F2_M)
     f3_sched = _scheduled_at(F3_H, F3_M, F3_S)
     f3_fill_deadline = _scheduled_at(F3_FILL_DEADLINE_H, F3_FILL_DEADLINE_M)
 
     if not force and not (f1_sched <= now < f3_fill_deadline):
         return
 
-    logger.log("CATCHUP_START", level="WARN",
-               message=f"{'[FORCE] ' if force else ''}F1 missed 감지. 보완 실행 ({now.strftime('%H:%M:%S')} 기동)")
-    await notifier.send("CATCHUP_START", level="WARN",
-                        message=f"{'[FORCE] ' if force else ''}F1 missed 감지 ({now.strftime('%H:%M:%S')} 기동). 보완 실행 중...")
+    logger.log(
+        "CATCHUP_START",
+        level="WARN",
+        message=(
+            f"{'[FORCE] ' if force else ''}F1 missed 감지. "
+            f"보완 실행 ({now.strftime('%H:%M:%S')} 기동)"
+        ),
+    )
+    await notifier.send(
+        "CATCHUP_START",
+        level="WARN",
+        message=(
+            f"{'[FORCE] ' if force else ''}F1 missed 감지 "
+            f"({now.strftime('%H:%M:%S')} 기동). 보완 실행 중..."
+        ),
+    )
 
     global _f1_result
     _f1_result = await f1_filter.run()
 
     now = datetime.now(KST)
-    if force or now >= f2_sched:
-        await _run_f2_f3_after_f1(immediate=force or now >= f3_sched)
+    await _run_f2_f3_after_f1(immediate=force or now >= f3_sched)
 
 
 # ── 재시작 복구 ──────────────────────────────────────────────────────
@@ -315,7 +334,6 @@ async def main() -> None:
         await auth.load_or_refresh()
         time_sync.check_ntp(NTP_SERVERS)
     await _recover_state()
-    await _run_catchup()
 
     # F4: WebSocket 기반 장기 실행 (HOLDING 전까지 내부에서 대기)
     f4_task = asyncio.create_task(f4_tracking.run(), name="f4_tracking")
@@ -333,6 +351,10 @@ async def main() -> None:
     uvi = uvicorn.Server(config)
     uvi.install_signal_handlers = lambda: None  # uvicorn의 시그널 핸들러 비활성화
     ui_task = asyncio.create_task(uvi.serve(), name="ui_server")
+
+    # Catchup은 F3 진입(실주문)까지 인라인 수행할 수 있으므로 F4 손절 추적·알림·UI가
+    # 살아있는 상태에서 실행한다. 스케줄러보다는 먼저 완료해 예약 잡과의 중복 실행을 막는다.
+    await _run_catchup()
 
     scheduler = None
     if not dry_run:

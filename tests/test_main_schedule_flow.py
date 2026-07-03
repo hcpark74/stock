@@ -1,10 +1,10 @@
+from datetime import timedelta
 from unittest.mock import AsyncMock
 
 import pytest
 
 import main
 from src import state as state_mod
-
 
 _REAL_ENSURE_TRADING_DAY = main._ensure_trading_day
 
@@ -82,6 +82,71 @@ async def test_scheduled_f2_without_f1_result_does_not_mark_done(monkeypatch):
 
     f2_run.assert_not_awaited()
     assert main._f2_done is False
+
+
+async def test_catchup_chains_f2_f3_before_scheduled_f2(monkeypatch):
+    now = main.datetime.now(main.KST)
+
+    def fake_scheduled_at(hour, minute, second=0):
+        key = (hour, minute, second)
+        if key == (main.F1_H, main.F1_M, 0):
+            return now - timedelta(minutes=1)
+        if key == (main.F3_H, main.F3_M, main.F3_S):
+            return now + timedelta(minutes=8)
+        if key == (main.F3_FILL_DEADLINE_H, main.F3_FILL_DEADLINE_M, 0):
+            return now + timedelta(minutes=9)
+        return now
+
+    async def fake_f2_run(_candidates):
+        state_mod.get().target_ticker = "005930"
+
+    f3_run = AsyncMock()
+    send = AsyncMock()
+    monkeypatch.delenv("DRY_RUN", raising=False)
+    monkeypatch.delenv("FORCE_CATCHUP", raising=False)
+    monkeypatch.setattr(main, "_scheduled_at", fake_scheduled_at)
+    monkeypatch.setattr(main.f1_filter, "run", AsyncMock(return_value=[{"ticker": "005930"}]))
+    monkeypatch.setattr(main.f2_lockup, "run", fake_f2_run)
+    monkeypatch.setattr(main.f3_entry, "run", f3_run)
+    monkeypatch.setattr(main.notifier, "send", send)
+
+    await main._run_catchup()
+
+    main.f1_filter.run.assert_awaited_once()
+    f3_run.assert_awaited_once_with(force=False)
+    assert main._f2_done is True
+    assert main._f3_started is True
+
+
+async def test_catchup_with_empty_f1_result_skips_f2_f3(monkeypatch):
+    now = main.datetime.now(main.KST)
+
+    def fake_scheduled_at(hour, minute, second=0):
+        key = (hour, minute, second)
+        if key == (main.F1_H, main.F1_M, 0):
+            return now - timedelta(minutes=1)
+        if key == (main.F3_H, main.F3_M, main.F3_S):
+            return now + timedelta(minutes=8)
+        if key == (main.F3_FILL_DEADLINE_H, main.F3_FILL_DEADLINE_M, 0):
+            return now + timedelta(minutes=9)
+        return now
+
+    f2_run = AsyncMock()
+    f3_run = AsyncMock()
+    monkeypatch.delenv("DRY_RUN", raising=False)
+    monkeypatch.delenv("FORCE_CATCHUP", raising=False)
+    monkeypatch.setattr(main, "_scheduled_at", fake_scheduled_at)
+    monkeypatch.setattr(main.f1_filter, "run", AsyncMock(return_value=[]))
+    monkeypatch.setattr(main.f2_lockup, "run", f2_run)
+    monkeypatch.setattr(main.f3_entry, "run", f3_run)
+    monkeypatch.setattr(main.notifier, "send", AsyncMock())
+
+    await main._run_catchup()
+
+    f2_run.assert_not_awaited()
+    f3_run.assert_not_awaited()
+    assert main._f2_done is False
+    assert main._f3_started is False
 
 
 async def test_f2_failure_retries_f1_before_deadline(monkeypatch):

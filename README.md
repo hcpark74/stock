@@ -14,6 +14,8 @@ F5 11:00        타임아웃 청산: 남은 수량 시장가 전량 청산
 
 F2에서 대상 종목이 잠기면 F3는 기본적으로 매수 실행을 시도합니다. 단, 당일 스킵, 대상 없음, 갭 재검증 실패, 가격 조회 불가, 주문가능수량 0, 상태 충돌처럼 명확한 사유가 있으면 `F3_ENTRY_BLOCKED`로 이유를 남기고 진입을 막습니다. F3 진입이 실패하면 주문 취소와 실패 사유를 로그로 남기고 당일 진입을 종료합니다. UI 하단 파이프라인은 현재 포지션 상태뿐 아니라 오늘 로그 기준 진행 단계도 반영하므로, 진입 실패 후 `IDLE`로 돌아가도 F3 실패까지 진행된 것으로 표시됩니다.
 
+09:00 이후 F1이 끝나면 F2/F3는 예약 시각만 기다리지 않고 즉시 체인 실행됩니다. 프로세스를 09:00~09:11 사이에 다시 켜는 catch-up 경로도 같은 규칙을 사용하며, F3 예정 시각이 이미 지난 경우에는 `force=True`로 시간 대기 없이 진입 절차를 이어갑니다.
+
 ## 설치
 
 Python 3.12 기준으로 개발되었습니다.
@@ -84,7 +86,7 @@ python main.py
 실행 후:
 
 - 스케줄러가 KST 기준으로 F1~F5 작업을 자동 실행합니다.
-- 09:00~09:11 사이에 켜면 catch-up으로 F1/F2/F3를 보완 실행합니다.
+- 09:00~09:11 사이에 켜면 catch-up으로 F1/F2/F3를 보완 실행하며, F1 결과가 나오면 F2/F3를 즉시 이어서 실행합니다.
 - Web UI는 기본 `http://localhost:8080`에서 열립니다.
 - Security: `/api/status` and `/api/assets` can expose account asset values. The UI server binds to `127.0.0.1` by default; set `UI_HOST=0.0.0.0` only on a trusted network.
 - 로그는 `data/logs/YYYYMMDD.jsonl`에 기록됩니다.
@@ -145,7 +147,7 @@ FastAPI 서버가 봇과 같은 이벤트 루프에서 실행됩니다.
 주문/체결 내역은 `/api/orders`를 조회해 표시합니다. `/api/stream`의 로그 이벤트가 들어오면 즉시 재조회하고, 5초 폴링을 백업으로 사용합니다.
 
 오늘 화면은 운영 상태 확인에 집중합니다. 후보 전체 리스트는 선정 메뉴에서 확인하고, 오늘 화면에는 최종 후보 요약과 보유 후 가격흐름을 표시합니다.
-보유 후 가격흐름은 서버의 최근 tick 버퍼를 함께 사용하므로 UI를 새로고침해도 보유 중 수신된 최근 흐름을 복원합니다.
+보유 후 가격흐름은 서버의 최근 tick 버퍼를 함께 사용하므로 UI를 새로고침해도 보유 중 수신된 최근 흐름을 복원합니다. 가로축은 실제 tick 수신 시각(`HH:mm:ss`) 기준이며, 짧은 보유 구간에서도 과하게 퍼져 보이지 않도록 최소 1분 시간창과 최대 760px 차트 폭을 사용합니다.
 
 하단 파이프라인은 `/api/status`의 `pipeline_stage`, `pipeline_failed`를 사용합니다. 예를 들어 오늘 F3에서 미체결 실패가 발생하면 상태가 다시 `IDLE`이어도 F3 실패 단계가 유지됩니다.
 
@@ -207,6 +209,14 @@ tests/
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests\test_kis_rest.py tests\test_f1_filter.py tests\test_f2_lockup.py tests\test_f3_entry.py tests\test_f4_step_trailing.py tests\test_api_server.py tests\test_notifier.py -q -p no:cacheprovider
 .\.venv\Scripts\python.exe -m ruff check src\notifier.py tests\test_notifier.py
+```
+
+최근 catch-up/token/UI 변경 검증:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_main_schedule_flow.py tests\test_kis_rest.py -q -p no:cacheprovider
+.\.venv\Scripts\python.exe -m ruff check main.py src\api\kis_rest.py src\utils\logger.py tests\test_kis_rest.py tests\test_main_schedule_flow.py
+node --check docs\html\assets\app.js
 ```
 
 ## 주의사항

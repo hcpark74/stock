@@ -320,13 +320,20 @@ function updatePriceFlow(d) {
   drawPriceFlow(d);
 }
 
+function fmtFlowTime(ts) {
+  const dt = new Date(ts);
+  if(Number.isNaN(dt.getTime())) return '--:--';
+  const p = n => String(n).padStart(2, '0');
+  return `${p(dt.getHours())}:${p(dt.getMinutes())}:${p(dt.getSeconds())}`;
+}
+
 function drawPriceFlow(d) {
   const c = $('price-flow');
   if(!c) return;
   const ctx = c.getContext('2d');
   const W = c.width, H = c.height;
   ctx.clearRect(0, 0, W, H);
-  const pad = {l:46,r:14,t:14,b:24};
+  const pad = {l:46,r:14,t:14,b:36};
   const chartW = W - pad.l - pad.r;
   const chartH = H - pad.t - pad.b;
   const points = _priceFlow;
@@ -343,12 +350,22 @@ function drawPriceFlow(d) {
     ctx.fillText(emptyText, W / 2, H / 2);
     return;
   }
-  if(sub) sub.textContent = `${points.length} ticks · 현재 ${fmt(d.current_price)}원`;
+  const firstTs = points[0]?.ts;
+  const lastTs = points[points.length - 1]?.ts;
+  const timeLabel = firstTs && lastTs ? `${fmtFlowTime(firstTs)}–${fmtFlowTime(lastTs)}` : '시간 대기';
+  if(sub) sub.textContent = `${points.length} ticks · ${timeLabel} · 현재 ${fmt(d.current_price)}원`;
   let min = Math.min(...values), max = Math.max(...values);
   if(min === max) { min *= .998; max *= 1.002; }
   const span = max - min;
   min -= span * .12; max += span * .12;
-  const xAt = i => pad.l + (points.length <= 1 ? chartW : chartW * i / (points.length - 1));
+  const nowTs = Date.now();
+  const latestTs = Number(lastTs || nowTs);
+  const earliestTs = Number(firstTs || latestTs);
+  const minWindowMs = 60 * 1000;
+  const actualWindowMs = Math.max(latestTs - earliestTs, minWindowMs);
+  const endTs = latestTs;
+  const startTs = endTs - actualWindowMs;
+  const xAtTs = ts => pad.l + Math.max(0, Math.min(1, (Number(ts) - startTs) / (endTs - startTs || 1))) * chartW;
   const yAt = v => pad.t + (max - v) / (max - min) * chartH;
 
   ctx.strokeStyle = themeVal('rgba(120,123,134,.18)', 'rgba(79,82,96,.18)');
@@ -357,6 +374,19 @@ function drawPriceFlow(d) {
     const y = pad.t + chartH * i / 3;
     ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
   }
+  ctx.fillStyle = themeVal('#787b86', '#4f5260');
+  ctx.font = '10px Noto Sans KR,sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  for(let i=0;i<4;i++){
+    const ratio = i / 3;
+    const x = pad.l + chartW * ratio;
+    const ts = startTs + (endTs - startTs) * ratio;
+    ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, pad.t + chartH); ctx.stroke();
+    ctx.textAlign = i === 0 ? 'left' : (i === 3 ? 'right' : 'center');
+    ctx.fillText(fmtFlowTime(ts), x, pad.t + chartH + 8);
+  }
+  ctx.textBaseline = 'alphabetic';
 
   const drawRef = (value, color, label) => {
     if(!value) return;
@@ -375,7 +405,7 @@ function drawPriceFlow(d) {
     ctx.lineWidth = 2;
     ctx.beginPath();
     points.forEach((p,i) => {
-      const x = xAt(i), y = yAt(p.price);
+      const x = xAtTs(p.ts), y = yAt(p.price);
       if(i === 0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
     });
     ctx.stroke();
@@ -383,11 +413,12 @@ function drawPriceFlow(d) {
   const last = points[points.length - 1];
   if(last) {
     ctx.fillStyle = Number(last.price) >= Number(d.entry_price || last.price) ? '#26a69a' : '#ef5350';
-    ctx.beginPath(); ctx.arc(xAt(points.length - 1), yAt(last.price), 4, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(xAtTs(last.ts), yAt(last.price), 4, 0, Math.PI * 2); ctx.fill();
   }
   ctx.fillStyle = themeVal('#787b86', '#4f5260');
   ctx.font = '10px Noto Sans KR,sans-serif';
   ctx.textAlign = 'right';
+  ctx.textBaseline = 'alphabetic';
   ctx.fillText(fmt(max), pad.l - 6, pad.t + 4);
   ctx.fillText(fmt(min), pad.l - 6, pad.t + chartH);
 }

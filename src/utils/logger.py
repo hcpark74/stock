@@ -37,6 +37,8 @@ EVENT_LABELS = {
     "API_ORDERS_FAILED": "주문 내역 조회 실패(API Orders Failed)",
     "API_HISTORY_FAILED": "거래 이력 조회 실패(API History Failed)",
     "API_STATS_FAILED": "통계 조회 실패(API Stats Failed)",
+    "BALANCE_QUERY_ERROR": "잔고 조회 오류(Balance Query Error)",
+    "BALANCE_CASH_CHECK": "매수 가능 금액 확인(Balance Cash Check)",
     "F1_DONE": "F1 필터 완료(F1 Done)",
     "F1_API_ERROR": "F1 API 오류(F1 API Error)",
     "F1_FETCH_DONE": "F1 API 조회 완료(F1 Fetch Done)",

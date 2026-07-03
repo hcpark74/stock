@@ -301,3 +301,34 @@ Sprint 4까지 완료 + 아래 항목 모두 확인 후 진행.
 
 - [x] 관련 테스트 67개 통과
 - [x] `ruff check src/notifier.py tests/test_notifier.py` 통과
+
+---
+
+## 2026-07-03 운영 보강 — 토큰 만료 재시도 + Catch-up 체인 + UI 시간축 [완료]
+
+### KIS 토큰 만료 처리
+
+- [x] KIS REST 응답 본문 `msg_cd=EGW00123`을 토큰 만료로 처리
+- [x] HTTP 401과 `EGW00123` 모두 토큰 갱신 후 동일 요청을 1회만 재시도
+- [x] 반복 만료, 갱신 실패, 429 조합 재시도 회귀 테스트 추가
+- [x] `BALANCE_QUERY_ERROR`, `BALANCE_CASH_CHECK` 로그 라벨 추가
+
+### Catch-up 체인
+
+- [x] 09:00 이후 F3 체결 확인 마감 전 재시작 시 F1 보완 실행
+- [x] catch-up F1 결과가 나오면 예약 F2 시각을 기다리지 않고 F2/F3 즉시 체인
+- [x] F3 예정 시각 이후 catch-up은 `force=True`로 내부 시각 대기 생략
+- [x] F1 결과 없음/즉시 체인 경로 회귀 테스트 추가
+
+### Web UI
+
+- [x] 오늘 화면 `보유 후 가격흐름` 차트 x축을 실제 tick 수신 시각으로 변경
+- [x] x축 라벨을 `HH:mm:ss` 형식으로 표시
+- [x] 짧은 보유 구간의 과도한 가로 퍼짐을 줄이기 위해 최소 1분 시간창 적용
+- [x] 차트 표시 폭을 최대 760px로 제한
+
+### 검증
+
+- [x] `pytest tests/test_main_schedule_flow.py tests/test_kis_rest.py -q -p no:cacheprovider` 통과
+- [x] `ruff check main.py src/api/kis_rest.py src/utils/logger.py tests/test_kis_rest.py tests/test_main_schedule_flow.py` 통과
+- [x] `node --check docs/html/assets/app.js` 통과

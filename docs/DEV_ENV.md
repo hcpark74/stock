@@ -402,9 +402,12 @@ requirements-dev.txt (개발/테스트 전용)
   # 실행
   python main.py
 
-  ● main.py는 08:30에 KIS 토큰 갱신 및 NTP 검증을 수행하고,
+● main.py는 08:30에 KIS 토큰 갱신 및 NTP 검증을 수행하고,
     이후 APScheduler에 F1~F5를 등록한 뒤 이벤트 루프를 유지한다.
   ● 11:00 청산 완료 후 다음 날 08:30까지 대기 상태로 유지된다 (종료 안 함).
+  ● 09:00 이후 F3 체결 확인 마감 전 재시작하면 catch-up으로 F1을 보완 실행하고,
+    F1 결과가 나오면 F2/F3 체인을 즉시 이어서 실행한다.
+    F3 예정 시각이 이미 지났으면 force 모드로 F3 내부 시각 대기를 건너뛴다.
 
 ──────────────────────────────────────────────────
 12-2. 개발/테스트 실행
@@ -466,6 +469,13 @@ requirements-dev.txt (개발/테스트 전용)
   평일 05:00~07:00 (API 정기 점검 가능).
   08:30 토큰 갱신 로직이 이 시간대 이후 실행되므로 일반적으로 무관.
   그러나 점검 연장 시 08:30 토큰 갱신 실패 가능 → CRIT 알림으로 감지.
+
+● KIS 토큰 만료 응답:
+  REST 래퍼는 HTTP 401뿐 아니라 KIS 응답 본문 `msg_cd=EGW00123`
+  ("기간이 만료된 token 입니다.")도 토큰 만료로 처리한다.
+  이 경우 `TOKEN_EXPIRED` 로그를 남기고 `auth.refresh()` 후 동일 요청을 1회 재시도한다.
+  재시도 후에도 같은 응답이면 원 응답을 반환하고, 호출 모듈이 `BALANCE_QUERY_ERROR` 등
+  업무 로그를 남긴다.
 
 ● 방화벽:
   KIS REST API (포트 9443) 및 WebSocket (포트 21000/31000) 아웃바운드 허용 필요.
@@ -540,6 +550,9 @@ F3_PYRAMID_FILL_SEC=10.0
 - `주문가능금액`은 자산 데이터이므로 `/api/assets`가 원천이다. 주문 메뉴에서는 주문 판단용 보조 참조값으로만 노출한다.
 - KIS 잔고 조회 응답에 `ord_psbl_cash`가 없으면 UI의 주문가능금액은 `dnca_tot_amt`를 fallback으로 사용한다. 종목별 정확한 주문가능수량/금액 판단은 F3의 매수가능조회 경로를 우선한다.
 - 보유 후 가격흐름은 `live.push_tick()`이 관리하는 최근 tick ring buffer를 `/api/status.tick_history`로 내려받아 표시한다.
+  - 차트의 가로축은 tick 순번이 아니라 실제 tick 수신 시각(`HH:mm:ss`)이다.
+  - 최소 1분 시간창을 사용해 짧은 보유 구간에서도 선이 화면 전체로 과도하게 벌어지지 않게 한다.
+  - 캔버스 표시 폭은 최대 760px로 제한한다.
 
 ### 테스트 명령
 
@@ -548,6 +561,14 @@ F3_PYRAMID_FILL_SEC=10.0
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests\test_kis_rest.py tests\test_f1_filter.py tests\test_f2_lockup.py tests\test_f3_entry.py tests\test_f4_step_trailing.py tests\test_api_server.py tests\test_notifier.py -q -p no:cacheprovider
 .\.venv\Scripts\python.exe -m ruff check src\notifier.py tests\test_notifier.py
+```
+
+운영 보강 변경만 빠르게 확인할 때:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_main_schedule_flow.py tests\test_kis_rest.py -q -p no:cacheprovider
+.\.venv\Scripts\python.exe -m ruff check main.py src\api\kis_rest.py src\utils\logger.py tests\test_kis_rest.py tests\test_main_schedule_flow.py
+node --check docs\html\assets\app.js
 ```
 
 ### Telegram 알림 확인
