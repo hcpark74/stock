@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from src import notifier
 from src.utils.logger import log
 
 KST = ZoneInfo("Asia/Seoul")
@@ -91,6 +92,7 @@ async def refresh() -> str:
             await asyncio.sleep(2)
 
     log("TOKEN_REFRESH_FAIL", level="CRIT")
+    await notifier.send("TOKEN_REFRESH_FAIL", level="CRIT", message="KIS 토큰 갱신 실패")
     return ""
 
 
@@ -134,6 +136,7 @@ async def refresh_ws_key() -> str:
             await asyncio.sleep(2)
 
     log("WS_KEY_REFRESH_FAIL", level="CRIT")
+    await notifier.send("WS_KEY_REFRESH_FAIL", level="CRIT", message="실시간 접속키 갱신 실패")
     return ""
 
 

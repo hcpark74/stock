@@ -289,11 +289,12 @@ async def _recover_state() -> None:
         actual_qty = data.get("remaining_qty", 0)
         if actual_qty and actual_qty > 0:
             state.restore_from(data)
-            logger.log("PROCESS_RESTART_DETECTED", level="WARN",
+            logger.log("PROCESS_RESTART_DETECTED", level="CRIT",
                        recovered_status="HOLDING_RESUMED", actual_qty=actual_qty)
             await notifier.send(
-                "PROCESS_RESTART_DETECTED", level="WARN",
+                "PROCESS_RESTART_DETECTED", level="CRIT",
                 message=f"재시작 감지. 포지션 복구: {data.get('ticker')} {actual_qty}주",
+                ticker=data.get("ticker"),
             )
         else:
             logger.log("PROCESS_RESTART_DETECTED", level="WARN",

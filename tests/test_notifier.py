@@ -1,32 +1,95 @@
+import asyncio
+
+import pytest
+
 from src import notifier
 
 
-def test_stale_position_alert_is_operator_friendly():
+def test_alert_text_is_simple_three_line_format():
     text = notifier._format_alert_text(
-        "STALE_POSITION_DETECTED",
-        level="CRIT",
-        message="전일 상태 오류 발견. date=20260630",
+        "ENTRY_EXECUTED",
+        level="INFO",
+        message="진입: 005930 10주 @ 75,000원",
+        ticker="005930",
+        name="삼성전자",
     )
 
-    assert "[CRIT] 긴급: 전일 포지션 오류 발견" in text
-    assert "상황: 이전 거래일의 상태 파일이나 포지션 정보가 남아 있습니다." in text
-    assert "조치: 계좌 보유 수량과 미체결 주문을 확인" in text
-    assert "메모: 전일 상태 오류 발견. date=20260630" in text
-    assert "코드: STALE_POSITION_DETECTED" in text
+    assert text == "\n".join([
+        "[알림] 매수 체결",
+        "종목 : 005930 삼성전자",
+        "내용 : 진입: 005930 10주 @ 75,000원",
+    ])
 
 
-def test_unknown_alert_keeps_event_code_but_still_has_readable_header():
+def test_unknown_alert_uses_event_title_and_empty_stock():
     text = notifier._format_alert_text("SOME_NEW_EVENT", level="WARN")
 
-    assert "[WARN] 확인: Some New Event" in text
-    assert "코드: SOME_NEW_EVENT" in text
+    assert text == "\n".join([
+        "[확인] Some New Event",
+        "종목 : -",
+        "내용 : Some New Event",
+    ])
 
 
-def test_f2_retry_alerts_are_operator_friendly():
-    retry = notifier._format_alert_text("F2_FAIL_F1_RETRY", level="WARN")
-    exhausted = notifier._format_alert_text("F2_RETRY_EXHAUSTED", level="WARN")
+def test_format_stock_accepts_code_only_and_name_only():
+    code_only = notifier._format_alert_text(
+        "TRAILING_STOP",
+        level="INFO",
+        message="TRAILING 청산",
+        ticker="005930",
+    )
+    name_only = notifier._format_alert_text(
+        "TRAILING_STOP",
+        level="INFO",
+        message="TRAILING 청산",
+        name="삼성전자",
+    )
 
-    assert "F2 실패 후 F1 재시도" in retry
-    assert "TARGET_LOCKED 또는 F2_RETRY_EXHAUSTED" in retry
-    assert "F1 재시도 후 대상 없음" in exhausted
-    assert "오늘 자동 진입은 종료" in exhausted
+    assert "종목 : 005930" in code_only
+    assert "종목 : 삼성전자" in name_only
+
+
+@pytest.mark.asyncio
+async def test_send_filters_non_actionable_alerts():
+    notifier._queue = asyncio.Queue()
+
+    await notifier.send("TARGET_LOCKED", level="INFO", message="target locked")
+    await notifier.send("F2_FAIL_F1_RETRY", level="WARN", message="retrying")
+
+    assert notifier._queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_send_allows_trade_no_trade_and_failure_alerts():
+    notifier._queue = asyncio.Queue()
+
+    await notifier.send("ENTRY_EXECUTED", level="INFO", message="buy filled", ticker="005930")
+    await notifier.send("TRAILING_STOP", level="INFO", message="sell filled", ticker="005930")
+    await notifier.send("ENTRY_FAIL", level="WARN", message="entry failed", ticker="005930")
+    await notifier.send("NO_TARGET", level="INFO", message="no target")
+    await notifier.send("VI_FILTER_ALL_EXCLUDED", level="WARN", message="vi excluded")
+    await notifier.send("GAP_CHANGED", level="WARN", message="gap changed", ticker="005930")
+    await notifier.send("F2_RETRY_EXHAUSTED", level="WARN", message="no final target")
+    await notifier.send("TIMEOUT_ORDER_FAILED", level="CRIT", message="manual close required")
+
+    assert notifier._queue.qsize() == 8
+
+
+@pytest.mark.asyncio
+async def test_send_allows_error_level_alerts():
+    notifier._queue = asyncio.Queue()
+
+    await notifier.send("SOME_ERROR", level="ERROR", message="boom")
+
+    assert notifier._queue.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_process_restart_alert_requires_critical_level():
+    notifier._queue = asyncio.Queue()
+
+    await notifier.send("PROCESS_RESTART_DETECTED", level="WARN", message="restart")
+    assert notifier._queue.empty()
+
+    await notifier.send("PROCESS_RESTART_DETECTED", level="CRIT", message="restart")
+    assert notifier._queue.qsize() == 1

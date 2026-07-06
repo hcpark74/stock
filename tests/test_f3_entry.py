@@ -375,6 +375,63 @@ async def test_full_first_entry_skips_pyramid_wait_when_no_second_qty(monkeypatc
         event == "PYRAMID_SKIPPED" and kwargs.get("reason") == "NO_SECOND_QTY"
         for event, kwargs in events
     )
+
+
+@pytest.mark.asyncio
+async def test_pyramid_fill_sends_executed_alert(monkeypatch):
+    _reset_state()
+    notify = AsyncMock()
+
+    monkeypatch.setattr(f3, "FIRST_RATIO", 0.7)
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(1000.0, 970.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=10_000.0))
+    monkeypatch.setattr(
+        f3,
+        "_send_buy",
+        AsyncMock(side_effect=[
+            {
+                "rt_cd": "0",
+                "msg_cd": "MCA00000",
+                "msg1": "OK",
+                "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
+            },
+            {
+                "rt_cd": "0",
+                "msg_cd": "MCA00000",
+                "msg1": "OK",
+                "output": {"ODNO": "0000000938", "KRX_FWDG_ORD_ORGNO": "001"},
+            },
+        ]),
+    )
+    monkeypatch.setattr(
+        f3,
+        "_poll_fill",
+        AsyncMock(side_effect=[
+            {"fill_price": 1000, "fill_qty": 7},
+            {"fill_price": 1006, "fill_qty": 3},
+        ]),
+    )
+    monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=1006))
+    monkeypatch.setattr(f3.notifier, "send", notify)
+    monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "record_order", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "update_order_fill", AsyncMock())
+    monkeypatch.setattr(f3.db, "mark_pyramided", AsyncMock())
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+
+    await f3.run(force=True)
+
+    notify.assert_any_await(
+        "PYRAMID_EXECUTED",
+        level="INFO",
+        message="추가 매수: 006340 3주 @ 1,006원",
+        ticker="006340",
+    )
+
+
 @pytest.mark.asyncio
 async def test_entry_rechecks_all_candidates_and_picks_one_before_order(monkeypatch):
     events = []
@@ -443,7 +500,8 @@ async def test_entry_all_candidates_fail_recheck_skips_without_order(monkeypatch
     )
     monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
     monkeypatch.setattr(f3, "_send_buy", send_buy)
-    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    notify = AsyncMock()
+    monkeypatch.setattr(f3.notifier, "send", notify)
     monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
 
     await f3.run(force=True)
@@ -454,6 +512,48 @@ async def test_entry_all_candidates_fail_recheck_skips_without_order(monkeypatch
     send_buy.assert_not_awaited()
     f3.db.record_skip.assert_awaited_once()
     assert f3.db.record_skip.await_args.args[1] == "GAP_CHANGED"
+    notify.assert_awaited_once()
+    assert notify.await_args.args[0] == "GAP_CHANGED"
+    assert notify.await_args.kwargs["ticker"] == "BAD001"
+
+
+@pytest.mark.asyncio
+async def test_entry_all_candidates_price_unavailable_alerts_entry_fail(monkeypatch):
+    _reset_state()
+    state.get().target_ticker = "BAD001"
+    state.get().target_candidates = [
+        {"ticker": "BAD001"},
+        {"ticker": "BAD002"},
+    ]
+    send_buy = AsyncMock()
+    notify = AsyncMock()
+
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        f3,
+        "_fetch_expected_price",
+        AsyncMock(side_effect=[
+            (0.0, 10000.0),
+            (0.0, 10000.0),
+        ]),
+    )
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3.notifier, "send", notify)
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3.run(force=True)
+
+    assert state.get().day_skip is True
+    assert state.get().target_ticker is None
+    assert state.get().close_reason == "PRICE_UNAVAILABLE"
+    send_buy.assert_not_awaited()
+    f3.db.record_skip.assert_awaited_once()
+    assert f3.db.record_skip.await_args.args[1] == "ENTRY_FAIL"
+    notify.assert_awaited_once()
+    assert notify.await_args.args[0] == "ENTRY_FAIL"
+    assert notify.await_args.kwargs["ticker"] == "BAD001"
+    assert "PRICE_UNAVAILABLE" in notify.await_args.kwargs["message"]
 
 
 @pytest.mark.asyncio

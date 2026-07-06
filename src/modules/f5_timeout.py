@@ -92,7 +92,8 @@ async def execute() -> None:
                 entry_price=entry, exit_price=exit_price, exit_qty=qty,
                 pnl_pct=pnl_pct, fill_latency_ms=0)
             await notifier.send("TIMEOUT_CLOSE", level="INFO",
-                                message=f"11시 청산: {ticker} {qty}주 @ {exit_price:,.0f}원")
+                                message=f"11시 청산: {ticker} {qty}주 @ {exit_price:,.0f}원",
+                                ticker=ticker)
             await state.persist(os.getenv("STATE_DIR", "data/state"),
                                 datetime.now(KST).strftime("%Y%m%d"))
             return
@@ -105,7 +106,8 @@ async def execute() -> None:
     log("TIMEOUT_ORDER_FAILED", level="CRIT", ticker=ticker,
         attempt_count=_RETRY, last_error_code="", last_error_msg="Max retries exceeded")
     await notifier.send("TIMEOUT_ORDER_FAILED", level="CRIT",
-                        message=f"11시 청산 실패! 수동 청산 필요. {ticker} {qty}주")
+                        message=f"11시 청산 실패! 수동 청산 필요. {ticker} {qty}주",
+                        ticker=ticker)
 
 
 async def _send_sell(ticker: str, qty: int, mode: str) -> dict:

@@ -244,3 +244,26 @@ async def test_dry_run_ticks_finish_below_trailing_stop(monkeypatch):
     start_event = [kwargs for event, kwargs in events if event == "DRY_RUN_F4_START"][0]
     prices = start_event["prices"]
     assert prices[-1] < ENTRY * (1 + STEP_SIZE - STEP_TRAIL)
+
+@pytest.mark.asyncio
+async def test_execute_close_sends_critical_alert_on_sell_error(monkeypatch):
+    notify = AsyncMock()
+    record_order = AsyncMock()
+    persist = AsyncMock()
+
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setattr("src.modules.f4_tracking._send_sell", AsyncMock(side_effect=RuntimeError("sell failed")))
+    monkeypatch.setattr("src.modules.f4_tracking.notifier.send", notify)
+    monkeypatch.setattr("src.modules.f4_tracking.db.record_order", record_order)
+    monkeypatch.setattr("src.modules.f4_tracking.state.persist", persist)
+
+    await _execute_close(ENTRY * 0.98, "HARD_STOP")
+
+    notify.assert_awaited_once_with(
+        "F4_SELL_ERROR",
+        level="CRIT",
+        message="매도 주문 오류: 005930 RuntimeError('sell failed'). 수동 청산 필요",
+        ticker="005930",
+    )
+    record_order.assert_not_awaited()
+    persist.assert_not_awaited()

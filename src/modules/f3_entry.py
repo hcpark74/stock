@@ -114,7 +114,8 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
                 gap_reason=gap_reason,
             )
             await notifier.send("GAP_CHANGED", level="WARN",
-                                message=f"진입 직전 갭 변동({gap*100:.1f}%). 거래 스킵.")
+                                message=f"진입 직전 갭 변동({gap*100:.1f}%). 거래 스킵.",
+                                ticker=ticker)
             await db.record_skip(_today(), "GAP_CHANGED", f"gap={gap*100:.2f}%")
             return
 
@@ -290,7 +291,8 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
             max_attempts=max_attempts, reason="UNFILLED",
             **_last_fill_poll_summary)
         await notifier.send("ENTRY_FAIL", level="WARN",
-                            message=f"진입 미체결. {ticker}")
+                            message=f"진입 미체결. {ticker}",
+                            ticker=ticker)
         await db.record_skip(
             _today(),
             "ENTRY_FAIL",
@@ -311,7 +313,8 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
             expected_price=expected_price, fill_price=fill_price,
             slippage_pct=round(slippage_pct, 3))
         await notifier.send("SLIPPAGE_GUARD", level="WARN",
-                            message=f"슬리피지 {slippage_pct:.2f}% 초과. 즉시 청산.")
+                            message=f"슬리피지 {slippage_pct:.2f}% 초과. 즉시 청산.",
+                            ticker=ticker)
         await _send_sell(ticker, fill_qty, mode)
         s.day_skip = True
         s.close_reason = "SLIPPAGE_GUARD"
@@ -332,7 +335,8 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
         order_id=order_id, order_price=expected_price, order_qty=first_qty,
         fill_price=fill_price, fill_qty=fill_qty, fill_latency_ms=0)
     await notifier.send("ENTRY_EXECUTED", level="INFO",
-                        message=f"진입: {ticker} {fill_qty}주 @ {fill_price:,}원")
+                        message=f"진입: {ticker} {fill_qty}주 @ {fill_price:,}원",
+                        ticker=ticker)
 
     # 2nd buy is inactive while FIRST_RATIO is 1.00.
     if second_qty <= 0:
@@ -377,6 +381,12 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
             await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
             log("PYRAMID_EXECUTED", level="INFO", ticker=ticker,
                 fill_price=py_fill["fill_price"], fill_qty=py_fill["fill_qty"])
+            await notifier.send(
+                "PYRAMID_EXECUTED",
+                level="INFO",
+                message=f"추가 매수: {ticker} {py_fill['fill_qty']}주 @ {py_fill['fill_price']:,}원",
+                ticker=ticker,
+            )
     elif second_qty > 0:
         diff_pct = ((current_price or 0.0) / fill_price - 1) * 100
         log("PYRAMID_SKIPPED", level="INFO", ticker=ticker,
@@ -504,10 +514,13 @@ async def _pick_final_entry_candidate(s: state.State) -> dict | None:
         s.day_skip = True
         s.close_reason = reason
         s.target_ticker = None
+        alert_event = "GAP_CHANGED" if reason == "GAP_CHANGED" else "ENTRY_FAIL"
+        alert_ticker = tickers[0] if tickers else None
         await notifier.send(
-            reason,
+            alert_event,
             level="WARN",
-            message="F3 후보 전체가 주문 전 재검증에서 제외되었습니다.",
+            message=f"F3 후보 전체가 주문 전 재검증에서 제외되었습니다. 사유={reason}",
+            ticker=alert_ticker,
         )
         await db.record_skip(
             _today(),

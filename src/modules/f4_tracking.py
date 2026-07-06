@@ -131,6 +131,13 @@ async def _execute_close(price: float, reason: str) -> None:
             exit_price = fill["fill_price"]
     except Exception as e:
         log("F4_SELL_ERROR", level="CRIT", ticker=s.target_ticker, error=repr(e))
+        await notifier.send(
+            "F4_SELL_ERROR",
+            level="CRIT",
+            message=f"매도 주문 오류: {s.target_ticker} {repr(e)}. 수동 청산 필요",
+            ticker=s.target_ticker,
+        )
+        return
 
     pnl_pct = round((exit_price / entry - 1) * 100, 2) if entry else 0.0
 
@@ -155,6 +162,7 @@ async def _execute_close(price: float, reason: str) -> None:
     await notifier.send(
         event_name, level=level,
         message=f"{reason} 청산: {s.target_ticker} @ {exit_price:,}원 (P&L {pnl_pct:+.2f}%)",
+        ticker=s.target_ticker,
     )
     await state.persist(os.getenv("STATE_DIR", "data/state"),
                         datetime.now(KST).strftime("%Y%m%d"))
