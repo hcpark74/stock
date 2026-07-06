@@ -1,6 +1,7 @@
 import asyncio
 import time
 
+import httpx
 import pytest
 
 import src.api.kis_rest as kis_rest
@@ -303,3 +304,94 @@ async def test_kis_rest_429_retry_preserves_token_refresh_budget(monkeypatch):
     assert resp["msg_cd"] == "EGW00123"
     assert refresh_calls == 1
     assert _TokenExpired429TokenExpiredClient.calls == 3
+
+
+def test_transient_sleep_seconds_exponential_backoff_with_cap(monkeypatch):
+    monkeypatch.setattr(kis_rest, "_TRANSIENT_RETRY_BASE_SEC", 1.0)
+    monkeypatch.setattr(kis_rest, "_TRANSIENT_RETRY_MAX_SEC", 8.0)
+
+    assert kis_rest._transient_sleep_seconds(0) == 1.0
+    assert kis_rest._transient_sleep_seconds(1) == 2.0
+    assert kis_rest._transient_sleep_seconds(2) == 4.0
+    assert kis_rest._transient_sleep_seconds(3) == 8.0
+    assert kis_rest._transient_sleep_seconds(4) == 8.0
+
+
+class _TransientErrorClient:
+    """지정한 예외를 fail_count번 던진 뒤 성공 응답."""
+
+    calls = 0
+    fail_count = 0
+    exc_factory = staticmethod(lambda: httpx.ConnectError("connection refused"))
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def request(self, *args, **kwargs):
+        cls = self.__class__
+        cls.calls += 1
+        if cls.calls <= cls.fail_count:
+            raise cls.exc_factory()
+        return _FakeResponse()
+
+
+def _patch_transient(monkeypatch, fail_count, exc_factory):
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 0.0)
+    monkeypatch.setattr(kis_rest, "_last_call_at", 0.0)
+    monkeypatch.setattr(kis_rest, "_TRANSIENT_RETRY_BASE_SEC", 0.0)
+    monkeypatch.setattr(kis_rest.httpx, "AsyncClient", _TransientErrorClient)
+    _TransientErrorClient.calls = 0
+    _TransientErrorClient.fail_count = fail_count
+    _TransientErrorClient.exc_factory = staticmethod(exc_factory)
+
+
+@pytest.mark.asyncio
+async def test_get_retries_transient_error_then_succeeds(monkeypatch):
+    _patch_transient(monkeypatch, 2, lambda: httpx.ReadTimeout("timed out"))
+
+    resp = await kis_rest.get("/test")
+
+    assert resp == {"rt_cd": "0"}
+    assert _TransientErrorClient.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_get_exhausted_retries_returns_error_dict_without_output(monkeypatch):
+    monkeypatch.setattr(kis_rest, "_MAX_TRANSIENT_RETRIES", 2)
+    _patch_transient(monkeypatch, 99, lambda: httpx.ReadTimeout("timed out"))
+
+    resp = await kis_rest.get("/test")
+
+    assert resp["rt_cd"] == "1"
+    assert resp["msg_cd"] == "ReadTimeout"
+    assert "output" not in resp
+    assert _TransientErrorClient.calls == 3  # 최초 1회 + 재시도 2회
+
+
+@pytest.mark.asyncio
+async def test_post_read_timeout_does_not_retry(monkeypatch):
+    """주문 POST가 서버 도달 후 응답만 유실된 경우 재전송하면 중복 주문 위험."""
+    _patch_transient(monkeypatch, 99, lambda: httpx.ReadTimeout("timed out"))
+
+    resp = await kis_rest.post("/order", body={"qty": 1})
+
+    assert resp["rt_cd"] == "1"
+    assert resp["msg_cd"] == "ReadTimeout"
+    assert _TransientErrorClient.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_post_connect_error_retries(monkeypatch):
+    """ConnectError는 요청이 서버에 도달하지 않았음이 보장되므로 POST도 재시도."""
+    _patch_transient(monkeypatch, 1, lambda: httpx.ConnectError("connection refused"))
+
+    resp = await kis_rest.post("/order", body={"qty": 1})
+
+    assert resp == {"rt_cd": "0"}
+    assert _TransientErrorClient.calls == 2

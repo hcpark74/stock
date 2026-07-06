@@ -14,8 +14,8 @@ KST = ZoneInfo("Asia/Seoul")
 
 GAP_MIN_RECHECK = 0.020   # 재검증 하한 (F1 3%보다 낮음 — 완충)
 GAP_MAX_RECHECK = 0.070
-ALLOC_RATIO = 0.10         # 자본 대비 10% 투입
-FIRST_RATIO = 0.70         # 1차 70%
+ALLOC_RATIO = 1.00         # 주문가능 현금 100% 기준
+FIRST_RATIO = 1.00         # 1차 100%
 SLIPPAGE_LIMIT = 0.005     # 슬리피지 허용 +0.5%
 PYRAMID_MIN_UP = 0.005     # 피라미딩 조건 +0.5% 이상 유지
 F3_ENTRY_MAX_ATTEMPTS = max(1, int(os.getenv("F3_ENTRY_MAX_ATTEMPTS", "2")))
@@ -25,7 +25,7 @@ F3_ENTRY_FIRST_FILL_SEC = float(os.getenv("F3_ENTRY_FIRST_FILL_SEC", "12.0"))
 F3_ENTRY_RETRY_FILL_SEC = float(os.getenv("F3_ENTRY_RETRY_FILL_SEC", "8.0"))
 F3_ENTRY_RETRY_DEADLINE = os.getenv("F3_ENTRY_RETRY_DEADLINE", "09:11:00")
 F3_PRE_ORDER_QUIET_SEC = float(os.getenv("F3_PRE_ORDER_QUIET_SEC", "1.5"))
-F3_FIRST_ORDER_AT = os.getenv("F3_FIRST_ORDER_AT", "09:10:20")
+F3_FIRST_ORDER_AT = "IMMEDIATE"
 F3_PYRAMID_AT = os.getenv("F3_PYRAMID_AT", "09:10:40")
 F3_PYRAMID_FILL_SEC = float(os.getenv("F3_PYRAMID_FILL_SEC", "10.0"))
 
@@ -59,7 +59,7 @@ async def run(force: bool = False) -> None:
 
 async def _run_single(force: bool = False, picked: dict | None = None) -> None:
     """
-    갭 재검증 후 설정된 시각에 1차 70% 시장가 매수,
+    갭 재검증 후 설정된 시각에 1차 100% 시장가 매수,
     체결 확인 / 슬리피지 가드, 2차 30% 피라미딩을 수행한다.
     force=True: FORCE_CATCHUP 모드. 시각 제약 없이 실행, fill 마감을 실행 시점 +30초로 설정.
     """
@@ -179,9 +179,7 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
     first_qty = max(1, int(total_qty * FIRST_RATIO))
     second_qty = total_qty - first_qty
 
-    # ── 1차 70% 시장가 매수 ────────────────────────────────────────
-    if not force:
-        await _sleep_until(*_first_order_at())
+    # ── 1차 100% 시장가 매수 ────────────────────────────────────────
     if not await state.set_entering():
         _log_entry_blocked(
             ticker,
@@ -335,6 +333,17 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
         fill_price=fill_price, fill_qty=fill_qty, fill_latency_ms=0)
     await notifier.send("ENTRY_EXECUTED", level="INFO",
                         message=f"진입: {ticker} {fill_qty}주 @ {fill_price:,}원")
+
+    # 2nd buy is inactive while FIRST_RATIO is 1.00.
+    if second_qty <= 0:
+        log(
+            "PYRAMID_SKIPPED",
+            level="INFO",
+            ticker=ticker,
+            reason="NO_SECOND_QTY",
+            first_ratio=FIRST_RATIO,
+        )
+        return
 
     # ── 2차 30% 피라미딩 ────────────────────────────────────────────
     if not force:
@@ -601,9 +610,6 @@ def _deadline_datetime(deadline: tuple[int, int, int]) -> datetime:
 def _entry_retry_deadline() -> tuple[int, int, int]:
     return _parse_deadline(F3_ENTRY_RETRY_DEADLINE, (9, 11, 0))
 
-
-def _first_order_at() -> tuple[int, int, int]:
-    return _parse_deadline(F3_FIRST_ORDER_AT, (9, 10, 20))
 
 
 def _pyramid_at() -> tuple[int, int, int]:

@@ -308,7 +308,7 @@ async def test_state_collision_blocks_entry_with_reason(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_single_share_quantity_still_places_buy(monkeypatch):
+async def test_full_cash_quantity_places_first_buy(monkeypatch):
     _reset_state()
     send_buy = AsyncMock(return_value={
         "rt_cd": "0",
@@ -322,7 +322,7 @@ async def test_single_share_quantity_still_places_buy(monkeypatch):
     monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(1000.0, 970.0)))
     monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=10_000.0))
     monkeypatch.setattr(f3, "_send_buy", send_buy)
-    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1000, "fill_qty": 1}))
+    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1000, "fill_qty": 10}))
     monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=1000))
     monkeypatch.setattr(f3.notifier, "send", AsyncMock())
     monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
@@ -332,10 +332,49 @@ async def test_single_share_quantity_still_places_buy(monkeypatch):
 
     await f3.run(force=True)
 
-    assert send_buy.await_args.args == ("006340", 1, "PAPER")
+    assert send_buy.await_args.args == ("006340", 10, "PAPER")
     assert state.get().position_status == "HOLDING"
 
 
+
+@pytest.mark.asyncio
+async def test_full_first_entry_skips_pyramid_wait_when_no_second_qty(monkeypatch):
+    events = []
+    _reset_state()
+    sleep_until = AsyncMock()
+    fetch_current_price = AsyncMock(return_value=1000)
+
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(f3, "_sleep_until", sleep_until)
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(1000.0, 970.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=10_000.0))
+    monkeypatch.setattr(
+        f3,
+        "_send_buy",
+        AsyncMock(return_value={
+            "rt_cd": "0",
+            "msg_cd": "MCA00000",
+            "msg1": "OK",
+            "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
+        }),
+    )
+    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1000, "fill_qty": 10}))
+    monkeypatch.setattr(f3, "_fetch_current_price", fetch_current_price)
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "record_order", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "update_order_fill", AsyncMock())
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+
+    await f3.run(force=False)
+
+    sleep_until.assert_not_awaited()
+    fetch_current_price.assert_not_awaited()
+    assert any(
+        event == "PYRAMID_SKIPPED" and kwargs.get("reason") == "NO_SECOND_QTY"
+        for event, kwargs in events
+    )
 @pytest.mark.asyncio
 async def test_entry_rechecks_all_candidates_and_picks_one_before_order(monkeypatch):
     events = []
@@ -364,7 +403,7 @@ async def test_entry_rechecks_all_candidates_and_picks_one_before_order(monkeypa
     )
     monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
     monkeypatch.setattr(f3, "_send_buy", send_buy)
-    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 10310, "fill_qty": 6}))
+    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 10310, "fill_qty": 96}))
     monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=10300))
     monkeypatch.setattr(f3.notifier, "send", AsyncMock())
     monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
@@ -375,7 +414,7 @@ async def test_entry_rechecks_all_candidates_and_picks_one_before_order(monkeypa
 
     await f3.run(force=True)
 
-    assert send_buy.await_args.args == ("GOOD02", 6, "PAPER")
+    assert send_buy.await_args.args == ("GOOD02", 96, "PAPER")
     assert state.get().target_ticker == "GOOD02"
     assert state.get().position_status == "HOLDING"
     assert "F3_CANDIDATE_SNAPSHOT_MISSING" in [event for event, _ in events]
@@ -415,6 +454,32 @@ async def test_entry_all_candidates_fail_recheck_skips_without_order(monkeypatch
     send_buy.assert_not_awaited()
     f3.db.record_skip.assert_awaited_once()
     assert f3.db.record_skip.await_args.args[1] == "GAP_CHANGED"
+
+
+@pytest.mark.asyncio
+async def test_entry_does_not_wait_for_first_order_time(monkeypatch):
+    _reset_state()
+    sleep_until = AsyncMock()
+    send_buy = AsyncMock(return_value={
+        "rt_cd": "0",
+        "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
+    })
+
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(f3, "_sleep_until", sleep_until)
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10310.0, 10000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value=None))
+    monkeypatch.setattr(f3, "_cancel_order", AsyncMock(return_value={"rt_cd": "0"}))
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3.run(force=False)
+
+    send_buy.assert_awaited_once()
+    sleep_until.assert_not_awaited()
 
 
 @pytest.mark.asyncio

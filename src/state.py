@@ -1,9 +1,13 @@
 import asyncio
 import json
 from dataclasses import dataclass
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from src import live
+
+KST = ZoneInfo("Asia/Seoul")
 
 
 @dataclass
@@ -12,6 +16,7 @@ class State:
     target_ticker: str | None = None
     target_candidates: list[dict] | None = None
     entry_price: float | None = None
+    entry_at: str | None = None
     entry_qty: int | None = None
     remaining_qty: int | None = None
     high_price: float | None = None
@@ -40,6 +45,7 @@ def _clear_for_trading_day(date_str: str) -> None:
     _state.target_ticker = None
     _state.target_candidates = None
     _state.entry_price = None
+    _state.entry_at = None
     _state.entry_qty = None
     _state.remaining_qty = None
     _state.high_price = None
@@ -79,6 +85,7 @@ async def set_holding(entry_price: float, entry_qty: int, order_id: str) -> None
     """ENTERING → HOLDING. F3 1차 체결 확인 후 호출."""
     async with _lock:
         _state.entry_price = entry_price
+        _state.entry_at = datetime.now(KST).isoformat()
         _state.entry_qty = entry_qty
         _state.remaining_qty = entry_qty
         _state.high_price = entry_price
@@ -107,6 +114,7 @@ async def reset_to_idle(reason: str) -> None:
         _state.close_reason = reason
         _state.target_ticker = None
         _state.target_candidates = None
+        _state.entry_at = None
         _state.order_id = None
         live.clear_tick_history()
 
@@ -128,6 +136,7 @@ async def persist(state_dir: str, date_str: str) -> None:
         "ticker": _state.target_ticker,
         "target_candidates": _state.target_candidates or [],
         "entry_price": _state.entry_price,
+        "entry_at": _state.entry_at,
         "entry_qty": _state.entry_qty,
         "remaining_qty": _state.remaining_qty,
         "high_price": _state.high_price,
@@ -158,6 +167,7 @@ def restore_from(data: dict) -> None:
     _state.target_ticker = data.get("ticker")
     _state.target_candidates = data.get("target_candidates") or None
     _state.entry_price = data.get("entry_price")
+    _state.entry_at = data.get("entry_at")
     _state.entry_qty = data.get("entry_qty")
     _state.remaining_qty = data.get("remaining_qty")
     _state.high_price = data.get("high_price")

@@ -9,23 +9,24 @@ from zoneinfo import ZoneInfo
 
 from src import db, notifier, state
 from src.api import kis_rest
+from src.modules import f1_selector
 from src.utils.logger import log
 from src.utils.number import to_float as _to_float, to_int as _to_int
 
 KST = ZoneInfo("Asia/Seoul")
 
-GAP_MIN = 0.030
-GAP_MAX = 0.070
-HIGH_GAP_MAX = 0.100
+GAP_MIN = f1_selector.GAP_MIN
+GAP_MAX = f1_selector.GAP_CORE_MAX
+HIGH_GAP_MAX = f1_selector.GAP_HARD_MAX
 EXTREME_GAP_MAX = 0.150
-HIGH_GAP_MIN_EXPECTED_AMOUNT = 2_000_000_000
-HIGH_GAP_MIN_VI_GAP = 0.010
-LIQUIDITY_TOP_PCT = 0.10
-F1_MIN_CANDIDATES = max(1, int(os.getenv("F1_MIN_CANDIDATES", "10")))
+HIGH_GAP_MIN_EXPECTED_AMOUNT = f1_selector.HIGH_GAP_MIN_EXPECTED_AMOUNT
+HIGH_GAP_MIN_VI_GAP = f1_selector.MIN_VI_GAP
+LIQUIDITY_TOP_PCT = f1_selector.LIQUIDITY_TOP_PCT
+F1_MIN_CANDIDATES = f1_selector.MIN_CANDIDATES
 
 F1_DEADLINE_H = 9
 F1_DEADLINE_M = 10
-F1_RETRY_INTERVAL_SEC = int(os.getenv("F1_RETRY_INTERVAL_SEC", "30"))
+F1_RETRY_INTERVAL_SEC = int(os.getenv("F1_RETRY_INTERVAL_SEC", "5"))
 F1_SNAPSHOT_DIR = os.getenv("F1_SNAPSHOT_DIR", "data/f1_snapshots")
 F1_SNAPSHOT_KEEP = int(os.getenv("F1_SNAPSHOT_KEEP", "20"))
 F1_EXPECTED_QUOTE_CONCURRENCY = int(os.getenv("F1_EXPECTED_QUOTE_CONCURRENCY", "1"))
@@ -75,8 +76,10 @@ async def run() -> list[dict]:
         attempt += 1
         raw_candidates = await _fetch_all_premarket()
         gap_filtered = _filter_by_gap(raw_candidates)
+        result = select_liquidity_candidates(gap_filtered)
+        empty_reason = "SELECTION_FILTER_EMPTY" if gap_filtered else "GAP_FILTER_EMPTY"
 
-        if gap_filtered:
+        if result:
             break
 
         log(
@@ -84,8 +87,8 @@ async def run() -> list[dict]:
             level="INFO",
             attempt=attempt,
             raw_count=len(raw_candidates),
-            filter_count=0,
-            reason="GAP_FILTER_EMPTY",
+            filter_count=len(gap_filtered),
+            reason=empty_reason,
             **_gap_stats(raw_candidates),
         )
 
@@ -95,8 +98,8 @@ async def run() -> list[dict]:
                 level="INFO",
                 attempt=attempt,
                 raw_count=len(raw_candidates),
-                filter_count=0,
-                reason="GAP_FILTER_EMPTY",
+                filter_count=len(gap_filtered),
+                reason=empty_reason,
                 **_gap_stats(raw_candidates),
             )
             await notifier.send(
@@ -106,7 +109,11 @@ async def run() -> list[dict]:
             )
             s.day_skip = True
             today = datetime.now(KST).strftime("%Y%m%d")
-            await db.record_skip(today, "NO_TARGET", f"raw={len(raw_candidates)},gap_filtered=0")
+            await db.record_skip(
+                today,
+                "NO_TARGET",
+                f"raw={len(raw_candidates)},gap_filtered={len(gap_filtered)},reason={empty_reason}",
+            )
             return []
 
         sleep_sec = _retry_sleep_seconds()
@@ -117,12 +124,11 @@ async def run() -> list[dict]:
             retry_after_sec=sleep_sec,
             raw_count=len(raw_candidates),
             deadline=f"{F1_DEADLINE_H:02d}:{F1_DEADLINE_M:02d}:00",
-            reason="GAP_FILTER_EMPTY",
+            reason=empty_reason,
         )
         await asyncio.sleep(sleep_sec)
 
     total = len(gap_filtered)
-    result = select_liquidity_candidates(gap_filtered)
 
     log("F1_DONE", level="INFO", total_candidates=total, passed=len(result))
     return result
@@ -137,15 +143,7 @@ def _is_gap_candidate(candidate: dict) -> bool:
 
 
 def select_liquidity_candidates(candidates: list[dict]) -> list[dict]:
-    if not candidates:
-        return []
-    sorted_candidates = sorted(
-        candidates,
-        key=lambda c: c.get("avg_amount_5d", 0.0),
-        reverse=True,
-    )
-    threshold = max(F1_MIN_CANDIDATES, int(len(sorted_candidates) * LIQUIDITY_TOP_PCT))
-    return sorted_candidates[:threshold]
+    return f1_selector.select_candidates(candidates)
 
 
 def _classify_gap_candidate(candidate: dict) -> dict:
@@ -162,7 +160,7 @@ def _classify_gap_candidate(candidate: dict) -> dict:
     if gap < GAP_MAX:
         return {"gap_band": "CORE_GAP", "gap_allowed": True, "gap_reason": "CORE_GAP"}
     if gap < HIGH_GAP_MAX:
-        if amount >= HIGH_GAP_MIN_EXPECTED_AMOUNT and vi_gap is not None and vi_gap >= HIGH_GAP_MIN_VI_GAP:
+        if f1_selector.high_gap_allowed(candidate):
             return {
                 "gap_band": "HIGH_GAP",
                 "gap_allowed": True,

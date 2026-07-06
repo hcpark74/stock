@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 
 // ── 상수 ────────────────────────────────────────────────────────────────
 const TICKER_NAMES = {
@@ -124,7 +124,9 @@ function drawArc(prog) {
 let _lastStatus = null;
 let _lastAssets = null;
 let _priceFlow = [];
+let _priceFlowTicks = [];
 let _priceFlowTicker = null;
+const PRICE_FLOW_TICK_WINDOW = 240;
 
 function applyStatus(d) {
   if(d.assets) _lastAssets = d.assets;
@@ -297,29 +299,56 @@ function renderF1(d) {
   renderSelection(d);
 }
 
+function appendPriceFlowTick(ts, price, ticker) {
+  const parsedTs = Date.parse(ts) || Date.now();
+  const numericPrice = Number(price || 0);
+  if(!numericPrice) return;
+  if(ticker && ticker !== _priceFlowTicker) {
+    _priceFlowTicker = ticker;
+    _priceFlow = [];
+    _priceFlowTicks = [];
+  }
+  _priceFlowTicks.push({ts: parsedTs, price: numericPrice});
+  if(_priceFlowTicks.length > PRICE_FLOW_TICK_WINDOW) _priceFlowTicks.shift();
+
+  const minuteTs = Math.floor(parsedTs / 60000) * 60000;
+  const last = _priceFlow[_priceFlow.length - 1];
+  if(last && last.ts === minuteTs) {
+    last.price = numericPrice;
+    last.tick_count = Number(last.tick_count || 0) + 1;
+  } else {
+    _priceFlow.push({ts: minuteTs, price: numericPrice, tick_count: 1});
+  }
+}
+
 function updatePriceFlow(d) {
   const ticker = d?.ticker || null;
   if(ticker !== _priceFlowTicker) {
     _priceFlowTicker = ticker;
     _priceFlow = [];
+    _priceFlowTicks = [];
   }
   if(Array.isArray(d?.tick_history) && d.tick_history.length) {
-    _priceFlow = d.tick_history
+    _priceFlowTicks = d.tick_history
       .map(row => ({ts: Date.parse(row.ts) || Date.now(), price: Number(row.price || 0)}))
       .filter(row => row.price > 0)
-      .slice(-120);
+      .slice(-PRICE_FLOW_TICK_WINDOW);
+  }
+  if(Array.isArray(d?.minute_price_history) && d.minute_price_history.length) {
+    _priceFlow = d.minute_price_history
+      .map(row => ({
+        ts: Date.parse(row.ts) || Date.now(),
+        price: Number(row.price || 0),
+        tick_count: Number(row.tick_count || 0),
+      }))
+      .filter(row => row.price > 0);
   }
   const price = Number(d?.current_price || 0);
-  if(price > 0 && d?.position_status === 'HOLDING') {
-    const last = _priceFlow[_priceFlow.length - 1];
-    if(!last || last.price !== price) {
-      _priceFlow.push({ts: Date.now(), price});
-      if(_priceFlow.length > 120) _priceFlow.shift();
-    }
+  if(price > 0 && d?.position_status === 'HOLDING' && !_priceFlow.length) {
+    appendPriceFlowTick(Date.now(), price, ticker);
   }
   drawPriceFlow(d);
 }
-
 function fmtFlowTime(ts) {
   const dt = new Date(ts);
   if(Number.isNaN(dt.getTime())) return '--:--';
@@ -353,7 +382,7 @@ function drawPriceFlow(d) {
   const firstTs = points[0]?.ts;
   const lastTs = points[points.length - 1]?.ts;
   const timeLabel = firstTs && lastTs ? `${fmtFlowTime(firstTs)}–${fmtFlowTime(lastTs)}` : '시간 대기';
-  if(sub) sub.textContent = `${points.length} ticks · ${timeLabel} · 현재 ${fmt(d.current_price)}원`;
+  if(sub) sub.textContent = `${points.length}분 포인트 · 최근 ${_priceFlowTicks.length} ticks · ${timeLabel} · 현재 ${fmt(d.current_price)}원`;
   let min = Math.min(...values), max = Math.max(...values);
   if(min === max) { min *= .998; max *= 1.002; }
   const span = max - min;
@@ -1154,9 +1183,30 @@ function connectSSE() {
       const d = JSON.parse(e.data);
       if(d.type==='tick') {
         if(_lastStatus) {
-          _lastStatus.current_price = d.price;
+          const tickTs = d.ts || new Date().toISOString();
+          const tickTicker = d.ticker || _lastStatus.ticker;
+          const tickPrice = Number(d.price || 0);
+          _lastStatus.current_price = tickPrice;
           if(_lastStatus.entry_price)
-            _lastStatus.pnl_pct = +((d.price/_lastStatus.entry_price-1)*100).toFixed(2);
+            _lastStatus.pnl_pct = +((tickPrice/_lastStatus.entry_price-1)*100).toFixed(2);
+          if(_lastStatus.position_status === 'HOLDING' && tickPrice > 0) {
+            const tickRow = {ts: tickTs, ticker: tickTicker, price: tickPrice};
+            const ticks = Array.isArray(_lastStatus.tick_history) ? _lastStatus.tick_history.slice() : [];
+            ticks.push(tickRow);
+            _lastStatus.tick_history = ticks.slice(-PRICE_FLOW_TICK_WINDOW);
+
+            const tickMs = Date.parse(tickTs) || Date.now();
+            const minuteMs = Math.floor(tickMs / 60000) * 60000;
+            const minuteRows = Array.isArray(_lastStatus.minute_price_history) ? _lastStatus.minute_price_history.slice() : [];
+            const lastMinute = minuteRows[minuteRows.length - 1];
+            if(lastMinute && Math.floor((Date.parse(lastMinute.ts) || 0) / 60000) * 60000 === minuteMs) {
+              lastMinute.price = tickPrice;
+              lastMinute.tick_count = Number(lastMinute.tick_count || 0) + 1;
+            } else {
+              minuteRows.push({ts: new Date(minuteMs).toISOString(), ticker: tickTicker, price: tickPrice, tick_count: 1});
+            }
+            _lastStatus.minute_price_history = minuteRows;
+          }
           applyStatus(_lastStatus);
         }
       } else if(d.type==='status') {

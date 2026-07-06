@@ -8,7 +8,10 @@ from src.api import auth
 from src.utils.logger import log
 
 _last_call_at: float = 0.0
-_RATE_INTERVAL = float(os.getenv("KIS_RATE_INTERVAL_SEC", "0.10"))
+_RATE_INTERVAL = float(os.getenv("KIS_RATE_INTERVAL_SEC", "0.20"))
+_MAX_TRANSIENT_RETRIES = int(os.getenv("KIS_MAX_TRANSIENT_RETRIES", "2"))
+_TRANSIENT_RETRY_BASE_SEC = float(os.getenv("KIS_TRANSIENT_RETRY_BASE_SEC", "1.0"))
+_TRANSIENT_RETRY_MAX_SEC = float(os.getenv("KIS_TRANSIENT_RETRY_MAX_SEC", "8.0"))
 _TIMEOUT = 15.0        # 잔고조회 등 느린 API 대응 (문서: "조회속도가 느린 API")
 _rate_lock = asyncio.Lock()
 
@@ -41,6 +44,10 @@ def balance_inquiry_params() -> dict:
     }
 
 
+def _transient_sleep_seconds(retry: int) -> float:
+    return min(_TRANSIENT_RETRY_BASE_SEC * (2 ** retry), _TRANSIENT_RETRY_MAX_SEC)
+
+
 def _headers(tr_id: str = "") -> dict:
     return {
         "authorization": f"Bearer {auth.get()}",
@@ -59,6 +66,7 @@ async def _request(
     tr_id: str = "",
     timeout: float = _TIMEOUT,
     _app_retry: int = 0,
+    _transient_retry: int = 0,
     _token_retry: int = 0,
     **kwargs,
 ) -> dict:
@@ -78,8 +86,49 @@ async def _request(
     finally:
         _rate_lock.release()
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.request(method, url, headers=_headers(tr_id), **kwargs)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.request(method, url, headers=_headers(tr_id), **kwargs)
+    except httpx.HTTPError as exc:
+        # 주문 등 POST는 서버 도달 후 응답만 유실됐을 수 있어(예: ReadTimeout)
+        # 재전송 시 중복 주문 위험 — 요청 미전송이 보장되는 ConnectError만 재시도.
+        retry_safe = method == "GET" or isinstance(exc, httpx.ConnectError)
+        if retry_safe and _transient_retry < _MAX_TRANSIENT_RETRIES:
+            sleep_sec = _transient_sleep_seconds(_transient_retry)
+            log(
+                "TRANSIENT_ERROR_RETRY",
+                level="WARN",
+                path=path,
+                reason=exc.__class__.__name__,
+                retry_after_sec=sleep_sec,
+                retry_count=_transient_retry + 1,
+                max_retries=_MAX_TRANSIENT_RETRIES,
+            )
+            await asyncio.sleep(sleep_sec)
+            return await _request(
+                method,
+                path,
+                tr_id,
+                timeout=timeout,
+                _app_retry=_app_retry,
+                _transient_retry=_transient_retry + 1,
+                _token_retry=_token_retry,
+                **kwargs,
+            )
+        log(
+            "KIS_REQUEST_FAILED",
+            level="WARN",
+            path=path,
+            reason=exc.__class__.__name__,
+            error=str(exc)[:200],
+        )
+        # output 키는 넣지 않는다 — 호출부가 resp.get("output", 기본값)으로
+        # 각자 올바른 기본형(dict/list)을 쓰도록 위임.
+        return {
+            "rt_cd": "1",
+            "msg_cd": exc.__class__.__name__,
+            "msg1": str(exc),
+        }
     latency_ms = int((time.monotonic() - start) * 1000)
 
     if latency_ms > 500:

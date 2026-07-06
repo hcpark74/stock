@@ -42,13 +42,12 @@ def test_selection_process_summarizes_f1_f2_f3():
 
     result = server._selection_process_from_logs(summary, logs)
 
-    assert [row["phase"] for row in result] == ["F1 선정", "F2 선정", "F3 최종"]
+    assert [row["phase"] for row in result] == ["F1 선정", "F2 잠금", "F3 최종"]
     assert result[0]["status"] == "완료"
     assert result[1]["status"] == "잠금"
     assert result[1]["detail"] == "006340, 036930"
     assert result[2]["status"] == "최종"
     assert result[2]["detail"] == "1 / 2 재검증"
-
 
 def test_selection_process_ignores_f2_from_different_f1_snapshot():
     summary = {
@@ -120,8 +119,7 @@ async def test_status_does_not_fetch_asset_snapshot(monkeypatch):
 async def test_status_includes_tick_history_only_while_holding(monkeypatch):
     s = server.state.get()
     server.live.clear_tick_history()
-    server.live.push_tick(75_000.0, ticker="005930")
-    server.live.push_tick(75_500.0, ticker="005930")
+    server.live._tick_history.append({"ts": "2026-07-06T09:10:00+09:00", "ticker": "005930", "price": 75_000.0})
     monkeypatch.setattr(server, "_read_today_logs", lambda limit=None: [])
     monkeypatch.setattr(s, "position_status", "HOLDING")
     monkeypatch.setattr(s, "target_ticker", "005930")
@@ -129,12 +127,15 @@ async def test_status_includes_tick_history_only_while_holding(monkeypatch):
     monkeypatch.setattr(s, "entry_qty", 1)
     monkeypatch.setattr(s, "remaining_qty", 1)
     monkeypatch.setattr(s, "high_price", 75_500.0)
+    monkeypatch.setattr(s, "entry_at", "2026-07-06T09:10:01+09:00")
+    server.live._tick_history.append({"ts": "2026-07-06T09:10:01+09:00", "ticker": "005930", "price": 75_500.0})
 
     resp = await server.api_status()
     body = resp.body.decode("utf-8")
 
     assert '"tick_history"' in body
     assert '"price":75500.0' in body
+    assert '"price":75000.0' not in body
 
     monkeypatch.setattr(s, "position_status", "IDLE")
     resp = await server.api_status()
@@ -156,11 +157,14 @@ async def test_api_settings_survives_invalid_numeric_env(monkeypatch):
 
     assert payload["valid"] is False
     assert any("KIS_RATE_INTERVAL_SEC" in err for err in payload["errors"])
-    assert payload["safety"]["kis_rate_interval_sec"] == 0.10
+    assert payload["safety"]["kis_rate_interval_sec"] == 0.20
 
 
 @pytest.mark.asyncio
 async def test_api_settings_returns_contract(monkeypatch):
+    # main.py??load_dotenv()媛 ?섏쭛 ???ㅼ젣 .env瑜?濡쒕뱶?????덉뼱 ?곗꽑?쒖쐞 env ?쒓굅
+    monkeypatch.delenv("KIS_ACCT_NO", raising=False)
+    monkeypatch.delenv("KIS_ACCT_CD", raising=False)
     monkeypatch.setenv("KIS_ACCOUNT_NO", "12345678")
     monkeypatch.setenv("KIS_APP_KEY", "key")
     monkeypatch.setenv("KIS_APP_SECRET", "secret")

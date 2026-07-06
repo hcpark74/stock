@@ -84,36 +84,39 @@ async def test_negative_gap_is_classified_explicitly():
     assert candidate["gap_allowed"] is False
 
 
-async def test_gap_7_0_pct_allowed_when_high_gap_conditions_pass():
-    """정확히 7.0%(GAP_MAX) → HIGH_GAP 조건 충족 시 통과."""
-    result = await _run([_classified_candidate(GAP_MAX, amount=3e9, vi_gap=0.02)])
+async def test_gap_core_max_allowed_when_high_gap_conditions_pass():
+    """GAP_MAX 이상은 HIGH_GAP 조건 충족 시 통과."""
+    result = await _run([_classified_candidate(GAP_MAX, amount=6e9, vi_gap=0.02)])
     assert len(result) == 1
     assert result[0]["gap_reason"] == "HIGH_GAP_ALLOWED"
 
 
-async def test_gap_6_99_pct_passes():
-    """6.99%(GAP_MAX 직전) → 필터 통과."""
-    result = await _run([_classified_candidate(0.0699)])
+async def test_gap_7_99_pct_passes():
+    """GAP_MAX 직전 → CORE_GAP으로 통과."""
+    result = await _run([_classified_candidate(GAP_MAX - 0.0001)])
     assert len(result) == 1
 
 
 async def test_high_gap_excluded_when_amount_low():
-    """7.1%(GAP_MAX 초과) → 필터 제외."""
-    result = await _run([_classified_candidate(0.071, amount=1e9, vi_gap=0.02)])
+    """GAP_MAX 이상 high gap은 금액 기준 미달 시 제외."""
+    result = await _run([_classified_candidate(GAP_MAX + 0.001, amount=1e9, vi_gap=0.03)])
     assert result == []
 
 
 async def test_high_gap_excluded_when_vi_near():
     """7~10% high gap is excluded when it is too close to static VI."""
-    result = await _run([_classified_candidate(0.08, amount=3e9, vi_gap=0.005)])
+    result = await _run([_classified_candidate(GAP_MAX + 0.001, amount=6e9, vi_gap=0.005)])
     assert result == []
 
 
 async def test_high_gap_excluded_when_vi_unknown():
     """7~10% high gap is excluded when VI proximity cannot be calculated."""
-    result = await _run([_classified_candidate(0.08, amount=3e9, vi_gap=None)])
+    result = await _run([_classified_candidate(GAP_MAX + 0.001, amount=6e9, vi_gap=None)])
     assert result == []
-    assert _classified_candidate(0.08, amount=3e9, vi_gap=None)["gap_reason"] == "HIGH_GAP_VI_UNKNOWN"
+    assert (
+        _classified_candidate(GAP_MAX + 0.001, amount=6e9, vi_gap=None)["gap_reason"]
+        == "HIGH_GAP_VI_UNKNOWN"
+    )
 
 
 async def test_extreme_gap_excluded():
@@ -162,7 +165,7 @@ async def test_ranking_candidate_uses_expected_quote_when_valid():
 
 
 async def test_expected_quote_drift_can_promote_candidate_to_high_gap():
-    """Ranking CORE_GAP can become HIGH_GAP when expected quote drifts above 7%."""
+    """Ranking CORE_GAP can become HIGH_GAP when expected quote drifts above core max."""
     item = {
         "mksc_shrn_iscd": "005930",
         "hts_kor_isnm": "삼성전자",
@@ -174,9 +177,9 @@ async def test_expected_quote_drift_can_promote_candidate_to_high_gap():
     }
     quote = {
         "expected_price": 10800.0,
-        "expected_qty": 200000,
-        "expected_amount": 2_160_000_000.0,
-        "expected_gap_pct": 8.0,
+        "expected_qty": 600000,
+        "expected_amount": 6_486_000_000.0,
+        "expected_gap_pct": 8.1,
         "prev_close": 10000.0,
     }
 
@@ -184,8 +187,8 @@ async def test_expected_quote_drift_can_promote_candidate_to_high_gap():
         result = await f1_mod._parse_candidate(item)
 
     assert result["ranking_gap_pct"] == pytest.approx(0.06)
-    assert result["expected_api_gap_pct"] == pytest.approx(0.08)
-    assert result["gap_pct"] == pytest.approx(0.08)
+    assert result["expected_api_gap_pct"] == pytest.approx(0.081)
+    assert result["gap_pct"] == pytest.approx(0.081)
     assert result["gap_band"] == "HIGH_GAP"
     assert result["gap_reason"] == "HIGH_GAP_ALLOWED"
     assert result["gap_allowed"] is True
@@ -373,6 +376,26 @@ async def test_no_target_retries_before_day_skip():
     assert fetch.await_count == 2
     sleep.assert_awaited_once()
     assert _state_mod.get().day_skip is True
+
+
+async def test_selector_empty_result_records_no_target(monkeypatch):
+    """Selector-floor exclusions should follow the same NO_TARGET path as gap empty."""
+    monkeypatch.setattr(f1_mod.f1_selector, "MIN_EXPECTED_AMOUNT", 2e9)
+    candidate = _classified_candidate(0.05, amount=1e9)
+    fetch = AsyncMock(return_value=[candidate])
+    record_skip = AsyncMock()
+
+    with (
+        patch("src.modules.f1_filter._fetch_all_premarket", fetch),
+        patch("src.notifier.send", new_callable=AsyncMock),
+        patch("src.db.record_skip", record_skip),
+    ):
+        result = await run()
+
+    assert result == []
+    assert _state_mod.get().day_skip is True
+    record_skip.assert_awaited_once()
+    assert "SELECTION_FILTER_EMPTY" in record_skip.await_args.args[2]
 
 
 # ── 유동성 필터 ───────────────────────────────────────────────────────

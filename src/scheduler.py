@@ -10,6 +10,7 @@ from apscheduler.triggers.cron import CronTrigger
 KST = pytz.timezone("Asia/Seoul")
 
 Job = Callable[[], Coroutine[Any, Any, None]]
+MISFIRE_GRACE_TIME_SEC = 60
 
 # 스케줄 시각 — catchup 로직과 단일 출처 공유
 F1_H, F1_M = 9, 0
@@ -34,7 +35,13 @@ def build(
     F4는 WebSocket 기반 장기 실행 태스크이므로 스케줄러가 아닌
     asyncio.create_task()로 별도 구동 (main.py 참조).
     """
-    scheduler = AsyncIOScheduler(timezone=KST)
+    scheduler = AsyncIOScheduler(
+        timezone=KST,
+        job_defaults={
+            "misfire_grace_time": MISFIRE_GRACE_TIME_SEC,
+            "coalesce": True,
+        },
+    )
 
     def cron(**kwargs: Any) -> CronTrigger:
         return CronTrigger(timezone=KST, **kwargs)

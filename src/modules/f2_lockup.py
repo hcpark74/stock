@@ -18,10 +18,15 @@ async def run(candidates: list[dict]) -> None:
             reason="DAY_SKIP" if s.day_skip else "NO_CANDIDATES")
         return
 
-    # ── 복합 정렬 (내림차순): 1순위 예상 체결대금, 2순위 매수잔량/매도잔량 ──
+    # ── 복합 정렬 (내림차순): 1순위 f1_score(없는 레거시 후보는 예상 체결대금 폴백) ──
     sorted_list = sorted(
         candidates,
-        key=lambda c: (c.get("expected_amount", 0.0), c.get("buy_sell_ratio", 0.0)),
+        key=lambda c: (
+            "f1_score" in c,
+            c.get("f1_score", 0.0),
+            c.get("expected_amount", 0.0),
+            c.get("buy_sell_ratio", 0.0),
+        ),
         reverse=True,
     )
 

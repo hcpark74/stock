@@ -10,6 +10,7 @@ def _clear_state() -> None:
     s.target_ticker = None
     s.target_candidates = None
     s.entry_price = None
+    s.entry_at = None
     s.entry_qty = None
     s.remaining_qty = None
     s.high_price = None
@@ -83,6 +84,15 @@ async def test_new_trading_day_does_not_clear_active_position():
     assert s.target_ticker == "005930"
     assert s.remaining_qty == 10
 
+async def test_set_holding_records_entry_at():
+    s = state.get()
+    s.position_status = "ENTERING"
+
+    await state.set_holding(75_000.0, 10, "ORD001")
+
+    assert s.position_status == "HOLDING"
+    assert s.entry_at is not None
+    assert state.datetime.fromisoformat(s.entry_at)
 
 async def test_set_closed_clears_tick_history():
     s = state.get()
@@ -99,6 +109,7 @@ async def test_target_candidates_persist_restore_round_trip(tmp_path):
     s = state.get()
     s.trading_date = "20260701"
     s.target_ticker = "005930"
+    s.entry_at = "2026-07-01T09:10:30+09:00"
     s.target_candidates = [
         {"ticker": "005930", "expected_amount": 10_000.0},
         {"ticker": "000660", "expected_amount": 9_000.0},
@@ -111,6 +122,7 @@ async def test_target_candidates_persist_restore_round_trip(tmp_path):
 
     restored = state.get()
     assert restored.target_ticker == "005930"
+    assert restored.entry_at == "2026-07-01T09:10:30+09:00"
     assert restored.target_candidates == [
         {"ticker": "005930", "expected_amount": 10_000.0},
         {"ticker": "000660", "expected_amount": 9_000.0},

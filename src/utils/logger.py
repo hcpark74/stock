@@ -31,6 +31,8 @@ EVENT_LABELS = {
     "WS_KEY_REFRESH_FAIL": "웹소켓 키 갱신 실패(WebSocket Key Refresh Failed)",
     "LATENCY_HIGH": "API 지연 감지(High Latency)",
     "RATE_LIMIT_HIT": "API 호출 제한 감지(Rate Limit Hit)",
+    "TRANSIENT_ERROR_RETRY": "API 일시 오류 재시도(Transient Error Retry)",
+    "KIS_REQUEST_FAILED": "KIS 요청 실패(KIS Request Failed)",
     "ASSET_SNAPSHOT_FAILED": "자산 조회 실패(Asset Snapshot Failed)",
     "ASSET_SNAPSHOT_SAVE_FAILED": "자산 스냅샷 저장 실패(Asset Snapshot Save Failed)",
     "ASSET_SNAPSHOT_LOAD_FAILED": "자산 스냅샷 로드 실패(Asset Snapshot Load Failed)",

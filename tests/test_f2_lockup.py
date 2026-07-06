@@ -140,6 +140,17 @@ async def test_sort_tiebreak_by_buy_sell_ratio():
     assert _state_mod.get().target_ticker == "HIGH_RATIO"
 
 
+async def test_f1_score_takes_priority_when_present():
+    candidates = [
+        {**_candidate("HIGH_AMOUNT", gap_pct=0.05, expected_amount=1e12), "f1_score": 40},
+        {**_candidate("HIGH_SCORE", gap_pct=0.05, expected_amount=1e11), "f1_score": 80},
+    ]
+
+    await _run(candidates)
+
+    assert _state_mod.get().target_ticker == "HIGH_SCORE"
+
+
 async def test_vi_filter_then_sort():
     """VI 필터 후 남은 종목 중 가장 높은 거래대금 선정."""
     candidates = [
