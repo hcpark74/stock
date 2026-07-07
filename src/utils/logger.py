@@ -168,11 +168,26 @@ def event_label(event: str) -> str:
     return EVENT_LABELS.get(event, f"{event}({event})")
 
 
+def _target_name_for(ticker: str | None) -> str | None:
+    if not ticker:
+        return None
+    try:
+        from src import state
+
+        s = state.get()
+        if ticker == s.target_ticker:
+            return s.target_name
+    except Exception:
+        return None
+    return None
+
+
 def log(event: str, level: str = "info", ticker: str | None = None, **kwargs) -> None:
     logger = logging.getLogger("stock")
     normalized_level = normalize_level(level)
     py_level = _LEVEL_TO_PYTHON.get(normalized_level, "INFO")
     lvl = getattr(logging, py_level, logging.INFO)
     label = event_label(event)
-    extra = {"event": event, "event_label": label, "ticker": ticker, "level": normalized_level, **kwargs}
+    name = kwargs.pop("name", None) or _target_name_for(ticker)
+    extra = {"event": event, "event_label": label, "ticker": ticker, "name": name, "level": normalized_level, **kwargs}
     logger.log(lvl, label, extra={"_extra": extra})

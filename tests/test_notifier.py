@@ -99,3 +99,16 @@ def test_notifier_accepts_legacy_and_standard_error_levels():
     assert notifier._should_send_alert("SOME_ERROR", level="CRIT") is True
     assert notifier._should_send_alert("SOME_ERROR", level="error") is True
     assert notifier._should_send_alert("SOME_WARNING", level="WARN") is False
+
+
+def test_format_stock_infers_current_target_name():
+    from src import state
+
+    state.get().target_ticker = "005930"
+    state.get().target_name = "삼성전자"
+    try:
+        assert notifier._format_stock("005930") == "005930 삼성전자"
+        assert notifier._format_stock("000660") == "000660"
+    finally:
+        state.get().target_ticker = None
+        state.get().target_name = None

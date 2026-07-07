@@ -35,3 +35,32 @@ def test_log_records_normalized_level_and_python_severity():
     record = records[-1]
     assert record.levelno == logging.ERROR
     assert record._extra["level"] == "error"
+
+
+def test_log_infers_current_target_name():
+    from src import state
+
+    state.get().target_ticker = "005930"
+    state.get().target_name = "삼성전자"
+    records = []
+
+    class _CaptureHandler(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    logger = logging.getLogger("stock")
+    handler = _CaptureHandler()
+    old_level = logger.level
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+    try:
+        log("ENTRY_EXECUTED", ticker="005930")
+        log("VI_DETECTED", ticker="000660")
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
+        state.get().target_ticker = None
+        state.get().target_name = None
+
+    assert records[-2]._extra["name"] == "삼성전자"
+    assert records[-1]._extra["name"] is None

@@ -324,6 +324,7 @@ async def api_status() -> JSONResponse:
         "mode": _MODE,
         "position_status": s.position_status,
         "ticker": s.target_ticker,
+        "name": s.target_name,
         "entry_price": s.entry_price,
         "entry_at": s.entry_at,
         "entry_qty": s.entry_qty,

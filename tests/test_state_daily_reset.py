@@ -8,6 +8,7 @@ def _clear_state() -> None:
     s = state.get()
     s.trading_date = None
     s.target_ticker = None
+    s.target_name = None
     s.target_candidates = None
     s.entry_price = None
     s.entry_at = None
@@ -109,6 +110,7 @@ async def test_target_candidates_persist_restore_round_trip(tmp_path):
     s = state.get()
     s.trading_date = "20260701"
     s.target_ticker = "005930"
+    s.target_name = "삼성전자"
     s.entry_at = "2026-07-01T09:10:30+09:00"
     s.target_candidates = [
         {"ticker": "005930", "expected_amount": 10_000.0},
@@ -122,6 +124,7 @@ async def test_target_candidates_persist_restore_round_trip(tmp_path):
 
     restored = state.get()
     assert restored.target_ticker == "005930"
+    assert restored.target_name == "삼성전자"
     assert restored.entry_at == "2026-07-01T09:10:30+09:00"
     assert restored.target_candidates == [
         {"ticker": "005930", "expected_amount": 10_000.0},
@@ -138,4 +141,17 @@ def test_restore_from_legacy_state_without_target_candidates():
 
     s = state.get()
     assert s.target_ticker == "005930"
+    assert s.target_name is None
     assert s.target_candidates is None
+
+
+async def test_reset_to_idle_clears_target_name():
+    s = state.get()
+    s.target_ticker = "005930"
+    s.target_name = "삼성전자"
+    s.position_status = "HOLDING"
+
+    await state.reset_to_idle("TEST")
+
+    assert s.target_ticker is None
+    assert s.target_name is None

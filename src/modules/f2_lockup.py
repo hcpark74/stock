@@ -55,12 +55,14 @@ async def run(candidates: list[dict]) -> None:
     locked_candidates = vi_filtered[:F2_MAX_TARGET_CANDIDATES]
     target = locked_candidates[0]
     s.target_ticker = target["ticker"]
+    s.target_name = target.get("name")
     s.target_candidates = locked_candidates
 
     log(
-        "TARGET_LOCKED", level="INFO", ticker=s.target_ticker,
+        "TARGET_LOCKED", level="INFO", ticker=s.target_ticker, name=s.target_name,
         target_count=len(locked_candidates),
         target_tickers=[c.get("ticker") for c in locked_candidates],
+        target_names=[c.get("name") for c in locked_candidates],
         gap_pct=round(target.get("gap_pct", 0.0) * 100, 2),
         expected_price=target.get("expected_price"),
         expected_amount=target.get("expected_amount"),

@@ -89,7 +89,22 @@ def _format_alert_text(
     ])
 
 
+def _target_name_for(ticker: str | None) -> str | None:
+    if not ticker:
+        return None
+    try:
+        from src import state
+
+        s = state.get()
+        if ticker == s.target_ticker:
+            return s.target_name
+    except Exception:
+        return None
+    return None
+
+
 def _format_stock(ticker: str | None = None, name: str | None = None) -> str:
+    name = name or _target_name_for(ticker)
     if ticker and name:
         return f"{ticker} {name}"
     if ticker:

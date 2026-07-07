@@ -191,6 +191,7 @@ async def _run_f2_f3_after_f1(*, immediate: bool = False) -> None:
         f2_retry_started = True
         s.day_skip = False
         s.target_ticker = None
+        s.target_name = None
         s.target_candidates = None
         await asyncio.sleep(sleep_sec)
         _f1_result = await f1_filter.run()

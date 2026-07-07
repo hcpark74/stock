@@ -14,6 +14,7 @@ KST = ZoneInfo("Asia/Seoul")
 class State:
     trading_date: str | None = None
     target_ticker: str | None = None
+    target_name: str | None = None
     target_candidates: list[dict] | None = None
     entry_price: float | None = None
     entry_at: str | None = None
@@ -43,6 +44,7 @@ def _clear_for_trading_day(date_str: str) -> None:
     live.clear_tick_history()
     _state.trading_date = date_str
     _state.target_ticker = None
+    _state.target_name = None
     _state.target_candidates = None
     _state.entry_price = None
     _state.entry_at = None
@@ -113,6 +115,7 @@ async def reset_to_idle(reason: str) -> None:
         _state.position_status = "IDLE"
         _state.close_reason = reason
         _state.target_ticker = None
+        _state.target_name = None
         _state.target_candidates = None
         _state.entry_at = None
         _state.order_id = None
@@ -134,6 +137,7 @@ async def persist(state_dir: str, date_str: str) -> None:
     data = {
         "date": date_str,
         "ticker": _state.target_ticker,
+        "name": _state.target_name,
         "target_candidates": _state.target_candidates or [],
         "entry_price": _state.entry_price,
         "entry_at": _state.entry_at,
@@ -165,6 +169,7 @@ def restore_from(data: dict) -> None:
     """재시작 복구: today_state.json → 인메모리 State 복원. PRD §6-7."""
     _state.trading_date = data.get("date")
     _state.target_ticker = data.get("ticker")
+    _state.target_name = data.get("name")
     _state.target_candidates = data.get("target_candidates") or None
     _state.entry_price = data.get("entry_price")
     _state.entry_at = data.get("entry_at")

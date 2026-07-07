@@ -55,6 +55,7 @@ async def run(force: bool = False) -> None:
 
     s = state.get()
     s.target_ticker = picked["ticker"]
+    s.target_name = picked["candidate"].get("name")
     s.target_candidates = [picked["candidate"]]
     await _run_single(force=force, picked=picked)
 
@@ -639,6 +640,7 @@ async def _pick_final_entry_candidate(s: state.State) -> dict | None:
         s.day_skip = True
         s.close_reason = reason
         s.target_ticker = None
+        s.target_name = None
         alert_event = "GAP_CHANGED" if reason == "GAP_CHANGED" else "ENTRY_FAIL"
         alert_ticker = tickers[0] if tickers else None
         await notifier.send(
