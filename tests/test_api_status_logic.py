@@ -1,4 +1,4 @@
-import os
+﻿import os
 
 import src.api.status_logic as status_logic
 
@@ -95,6 +95,15 @@ def test_pipeline_uses_today_logs_after_entry_fail_returns_to_idle():
     assert pipeline == {"pipeline_stage": 2, "pipeline_failed": True}
 
 
+
+def test_pipeline_marks_direct_f3_failure_events_failed():
+    pipeline = status_logic.pipeline_from_logs([
+        {"event": "F1_DONE"},
+        {"event": "TARGET_LOCKED"},
+        {"event": "BUYABLE_QTY_QUERY_FAILED"},
+    ], "IDLE")
+
+    assert pipeline == {"pipeline_stage": 2, "pipeline_failed": True}
 def test_pipeline_live_position_status_takes_precedence():
     logs = [
         {"event": "F1_DONE"},
@@ -110,7 +119,9 @@ def test_pipeline_live_position_status_takes_precedence():
 def test_f3_detail_from_event_labels_internal_reasons():
     assert status_logic.f3_detail_from_event({"event": "GAP_CHANGED", "reason": "BELOW_MIN"}) == "갭 하한 미달"
     assert status_logic.f3_detail_from_event({"event": "GAP_CHANGED", "reason": "ABOVE_MAX"}) == "갭 상한 초과"
-    assert status_logic.f3_detail_from_event({"event": "F3_ENTRY_BLOCKED", "reason": "PRICE_UNAVAILABLE"}) == "예상가 조회 실패"
+    assert status_logic.f3_detail_from_event({"event": "F3_ENTRY_BLOCKED", "reason": "GAP_RECHECK_UNAVAILABLE"}) == "진입 전 갭 재검증 불가"
+    assert status_logic.f3_detail_from_event({"event": "F3_ENTRY_BLOCKED", "reason": "BUYABLE_QTY_ZERO"}) == "매수가능수량 0"
+    assert status_logic.f3_detail_from_event({"event": "F3_ENTRY_BLOCKED", "reason": "BUYABLE_QTY_QUERY_FAILED"}) == "매수가능수량 조회 실패"
 
 
 def test_f3_detail_from_event_summarizes_final_pick():

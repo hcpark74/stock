@@ -127,6 +127,9 @@ let _priceFlow = [];
 let _priceFlowTicks = [];
 let _priceFlowTicker = null;
 const PRICE_FLOW_TICK_WINDOW = 240;
+const PRICE_FLOW_SESSION_START_HOUR = 9;
+const PRICE_FLOW_SESSION_END_HOUR = 11;
+const PRICE_FLOW_GRID_INTERVAL_MIN = 10;
 
 function applyStatus(d) {
   if(d.assets) _lastAssets = d.assets;
@@ -257,6 +260,33 @@ function f1StepClass(status, idx) {
   return idx===0 ? 'active' : '';
 }
 
+function candidateSizeValue(c) {
+  return Number(c?.expected_amount || c?.avg_amount_5d || 0);
+}
+
+function renderF1SizeChart(candidates, selectedTicker) {
+  const chart = $('f1-size-chart');
+  if(!chart) return;
+  const rows = (Array.isArray(candidates) ? candidates : [])
+    .filter(c => c && c.ticker)
+    .slice(0, 50);
+  if(!rows.length) {
+    chart.innerHTML = '<div class="f1-size-empty">후보 전체 목록은 선정 메뉴에서 확인</div>';
+    return;
+  }
+  const maxSize = Math.max(...rows.map(candidateSizeValue), 1);
+  chart.innerHTML = rows.map((c, idx) => {
+    const size = candidateSizeValue(c);
+    const h = Math.max(8, Math.round((size / maxSize) * 100));
+    const isSelected = selectedTicker && String(c.ticker) === String(selectedTicker);
+    const amount = size ? `${(size / 1e8).toFixed(1)}억` : '대금 없음';
+    const label = `${idx + 1}. ${c.ticker} ${c.name || ''} · ${amount}`;
+    return `<button class="f1-size-bar ${isSelected ? 'sel' : ''}" title="${esc(label)}" onclick="go('selection')" aria-label="${esc(label)}">
+      <span class="f1-size-fill" style="height:${h}%"></span>
+    </button>`;
+  }).join('');
+}
+
 function renderF1(d) {
   _lastF1 = d;
   const status = d.status || 'IDLE';
@@ -291,11 +321,7 @@ function renderF1(d) {
     <div><div class="f1-k">구간 보정</div><div class="f1-v br">${esc(`CORE ${d.core_gap||0} · HIGH ${d.high_gap_allowed||0}`)}</div></div>
   `;
 
-  const note = $('f1-today-note');
-  if(note) {
-    const count = d.candidates?.length || 0;
-    note.textContent = count ? `후보 ${count}개 전체 목록은 선정 메뉴에서 확인` : '후보 전체 목록은 선정 메뉴에서 확인';
-  }
+  renderF1SizeChart(d.candidates, selected?.ticker);
   renderSelection(d);
 }
 
@@ -356,66 +382,118 @@ function fmtFlowTime(ts) {
   return `${p(dt.getHours())}:${p(dt.getMinutes())}:${p(dt.getSeconds())}`;
 }
 
+function fmtFlowMinute(ts) {
+  const dt = new Date(ts);
+  if(Number.isNaN(dt.getTime())) return '--:--';
+  const p = n => String(n).padStart(2, '0');
+  return `${p(dt.getHours())}:${p(dt.getMinutes())}`;
+}
+
+function priceFlowSessionWindow(d) {
+  const anchorTs = Date.parse(d?.entry_at) || _priceFlow[0]?.ts || Date.now();
+  const day = new Date(anchorTs);
+  const start = new Date(day);
+  start.setHours(PRICE_FLOW_SESSION_START_HOUR, 0, 0, 0);
+  const end = new Date(day);
+  end.setHours(PRICE_FLOW_SESSION_END_HOUR, 0, 0, 0);
+  return {startTs: start.getTime(), endTs: end.getTime()};
+}
+
+function resizePriceFlowCanvas(c) {
+  const ratio = window.devicePixelRatio || 1;
+  const displayW = Math.max(320, Math.round(c.clientWidth || c.parentElement?.clientWidth || c.width));
+  const displayH = Math.max(140, Math.round(c.clientHeight || c.height || 180));
+  const pixelW = Math.round(displayW * ratio);
+  const pixelH = Math.round(displayH * ratio);
+  if(c.width !== pixelW || c.height !== pixelH) {
+    c.width = pixelW;
+    c.height = pixelH;
+  }
+  const ctx = c.getContext('2d');
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  return {ctx, W: displayW, H: displayH};
+}
+
 function drawPriceFlow(d) {
   const c = $('price-flow');
   if(!c) return;
-  const ctx = c.getContext('2d');
-  const W = c.width, H = c.height;
+  const {ctx, W, H} = resizePriceFlowCanvas(c);
   ctx.clearRect(0, 0, W, H);
   const pad = {l:46,r:14,t:14,b:36};
   const chartW = W - pad.l - pad.r;
   const chartH = H - pad.t - pad.b;
-  const points = _priceFlow;
+  const {startTs, endTs} = priceFlowSessionWindow(d || {});
+  const xAtTs = ts => pad.l + Math.max(0, Math.min(1, (Number(ts) - startTs) / (endTs - startTs || 1))) * chartW;
+  const sub = $('flow-sub');
+
+  const drawGrid = () => {
+    ctx.strokeStyle = themeVal('rgba(120,123,134,.18)', 'rgba(79,82,96,.18)');
+    ctx.lineWidth = 1;
+    ctx.setLineDash([]);
+    for(let i=0;i<4;i++){
+      const y = pad.t + chartH * i / 3;
+      ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+    }
+    ctx.fillStyle = themeVal('#787b86', '#4f5260');
+    ctx.font = '10px Noto Sans KR,sans-serif';
+    ctx.textBaseline = 'top';
+    const gridStepMs = PRICE_FLOW_GRID_INTERVAL_MIN * 60 * 1000;
+    const labelEvery = chartW >= 620 ? 1 : (chartW >= 420 ? 2 : 3);
+    let gridIdx = 0;
+    for(let ts = startTs; ts <= endTs + 1; ts += gridStepMs, gridIdx++) {
+      const x = xAtTs(ts);
+      const isHour = gridIdx % 6 === 0;
+      ctx.strokeStyle = isHour
+        ? themeVal('rgba(120,123,134,.28)', 'rgba(79,82,96,.28)')
+        : themeVal('rgba(120,123,134,.12)', 'rgba(79,82,96,.14)');
+      ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, pad.t + chartH); ctx.stroke();
+      if(gridIdx % labelEvery === 0 || ts >= endTs) {
+        ctx.textAlign = ts === startTs ? 'left' : (ts >= endTs ? 'right' : 'center');
+        ctx.fillText(fmtFlowMinute(ts), x, pad.t + chartH + 8);
+      }
+    }
+    const nowTs = Date.now();
+    if(nowTs >= startTs && nowTs <= endTs) {
+      const x = xAtTs(nowTs);
+      ctx.strokeStyle = themeVal('rgba(247,166,0,.45)', 'rgba(247,166,0,.5)');
+      ctx.setLineDash([3,4]);
+      ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, pad.t + chartH); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = '#f7a600';
+      ctx.textAlign = 'center';
+      ctx.fillText('현재', x, pad.t + 2);
+    }
+    ctx.textBaseline = 'alphabetic';
+  };
+
+  drawGrid();
+
+  const points = _priceFlow.filter(p => p.ts >= startTs && p.ts <= endTs);
   const refs = [d?.entry_price, d?.high_price, d?.trail_stop, d?.hard_stop, d?.current_price]
     .map(Number).filter(v => v > 0);
   const values = points.map(p => p.price).concat(refs);
-  const sub = $('flow-sub');
+
   if(!values.length || d?.position_status !== 'HOLDING') {
     const emptyText = d?.position_status === 'CLOSED' ? '포지션 청산됨' : '보유 포지션 없음';
-    if(sub) sub.textContent = emptyText;
+    if(sub) sub.textContent = `09:00-11:00 · ${emptyText}`;
     ctx.fillStyle = themeVal('#787b86', '#4f5260');
     ctx.font = '12px Noto Sans KR,sans-serif';
     ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
     ctx.fillText(emptyText, W / 2, H / 2);
     return;
   }
+
   const firstTs = points[0]?.ts;
   const lastTs = points[points.length - 1]?.ts;
-  const timeLabel = firstTs && lastTs ? `${fmtFlowTime(firstTs)}–${fmtFlowTime(lastTs)}` : '시간 대기';
-  if(sub) sub.textContent = `${points.length}분 포인트 · 최근 ${_priceFlowTicks.length} ticks · ${timeLabel} · 현재 ${fmt(d.current_price)}원`;
+  const timeLabel = firstTs && lastTs ? `${fmtFlowTime(firstTs)}-${fmtFlowTime(lastTs)}` : '시간 대기';
+  if(sub) sub.textContent = `09:00-11:00 · ${points.length}분 포인트 · 최근 ${_priceFlowTicks.length} ticks · ${timeLabel} · 현재 ${fmt(d.current_price)}원`;
+
   let min = Math.min(...values), max = Math.max(...values);
   if(min === max) { min *= .998; max *= 1.002; }
   const span = max - min;
   min -= span * .12; max += span * .12;
-  const nowTs = Date.now();
-  const latestTs = Number(lastTs || nowTs);
-  const earliestTs = Number(firstTs || latestTs);
-  const minWindowMs = 60 * 1000;
-  const actualWindowMs = Math.max(latestTs - earliestTs, minWindowMs);
-  const endTs = latestTs;
-  const startTs = endTs - actualWindowMs;
-  const xAtTs = ts => pad.l + Math.max(0, Math.min(1, (Number(ts) - startTs) / (endTs - startTs || 1))) * chartW;
   const yAt = v => pad.t + (max - v) / (max - min) * chartH;
-
-  ctx.strokeStyle = themeVal('rgba(120,123,134,.18)', 'rgba(79,82,96,.18)');
-  ctx.lineWidth = 1;
-  for(let i=0;i<4;i++){
-    const y = pad.t + chartH * i / 3;
-    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
-  }
-  ctx.fillStyle = themeVal('#787b86', '#4f5260');
-  ctx.font = '10px Noto Sans KR,sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
-  for(let i=0;i<4;i++){
-    const ratio = i / 3;
-    const x = pad.l + chartW * ratio;
-    const ts = startTs + (endTs - startTs) * ratio;
-    ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, pad.t + chartH); ctx.stroke();
-    ctx.textAlign = i === 0 ? 'left' : (i === 3 ? 'right' : 'center');
-    ctx.fillText(fmtFlowTime(ts), x, pad.t + chartH + 8);
-  }
-  ctx.textBaseline = 'alphabetic';
 
   const drawRef = (value, color, label) => {
     if(!value) return;
@@ -451,6 +529,7 @@ function drawPriceFlow(d) {
   ctx.fillText(fmt(max), pad.l - 6, pad.t + 4);
   ctx.fillText(fmt(min), pad.l - 6, pad.t + chartH);
 }
+window.addEventListener('resize', () => drawPriceFlow(_lastStatus));
 
 function renderSelection(d) {
   if(!$('sel-tbody')) return;
@@ -676,46 +755,49 @@ const LOG_EVENT_MAP = {
   TICK:{n:'틱 수신',cls:''},
   DAILY_STATE_RESET:{n:'새 거래일 상태 초기화(Daily State Reset)',cls:''},
   WS_CONNECTED:{n:'웹소켓 연결(WebSocket Connected)',cls:''},
-  WS_DISCONNECTED:{n:'웹소켓 연결 끊김(WebSocket Disconnected)',cls:'lv-WARN'},
+  WS_DISCONNECTED:{n:'웹소켓 연결 끊김(WebSocket Disconnected)',cls:'lv-warn'},
   TOKEN_REFRESHED:{n:'KIS 토큰 갱신(Token Refreshed)',cls:''},
   TOKEN_LOADED_FROM_CACHE:{n:'KIS 토큰 캐시 로드(Token Loaded From Cache)',cls:''},
-  TIME_SYNC_WARN:{n:'시각 오차 경고(Time Sync Warning)',cls:'lv-WARN'},
+  TIME_SYNC_WARN:{n:'시각 오차 경고(Time Sync Warning)',cls:'lv-warn'},
   TIME_SYNC_OK:{n:'시각 동기화 정상(Time Sync OK)',cls:''},
-  TIME_SYNC_ERROR:{n:'시각 동기화 실패(Time Sync Error)',cls:'lv-CRIT'},
-  TIME_SYNC_FALLBACK:{n:'시각 동기화 서버 재시도(Time Sync Fallback)',cls:'lv-WARN'},
+  TIME_SYNC_ERROR:{n:'시각 동기화 실패(Time Sync Error)',cls:'lv-error'},
+  TIME_SYNC_FALLBACK:{n:'시각 동기화 서버 재시도(Time Sync Fallback)',cls:'lv-warn'},
   F1_DONE:{n:'F1 필터 완료(F1 Done)',cls:''},
-  F1_API_ERROR:{n:'F1 API 오류(F1 API Error)',cls:'lv-WARN'},
+  F1_API_ERROR:{n:'F1 API 오류(F1 API Error)',cls:'lv-warn'},
   F1_FETCH_DONE:{n:'F1 API 조회 완료(F1 Fetch Done)',cls:''},
   F1_FILTER_EMPTY:{n:'F1 필터 결과 없음(F1 Filter Empty)',cls:''},
-  F1_RETRY_WAIT:{n:'F1 재시도 대기(F1 Retry Wait)',cls:'lv-WARN'},
+  F1_RETRY_WAIT:{n:'F1 재시도 대기(F1 Retry Wait)',cls:'lv-warn'},
   F1_EXPECTED_COMPARE:{n:'F1 예상체결 비교(F1 Expected Compare)',cls:''},
   F1_SNAPSHOT_SAVED:{n:'F1 후보 스냅샷 저장(F1 Snapshot Saved)',cls:''},
-  F1_EXPECTED_QUOTE_ERROR:{n:'F1 예상가 조회 오류(F1 Expected Quote Error)',cls:'lv-WARN'},
+  F1_EXPECTED_QUOTE_ERROR:{n:'F1 예상가 조회 오류(F1 Expected Quote Error)',cls:'lv-warn'},
   NO_TARGET:{n:'대상 종목 없음(No Target)',cls:''},
-  F2_SKIPPED:{n:'F2 종목 잠금 생략(F2 Skipped)',cls:'lv-WARN'},
+  F2_SKIPPED:{n:'F2 종목 잠금 생략(F2 Skipped)',cls:'lv-warn'},
   TARGET_LOCKED:{n:'대상 종목 잠금(Target Locked)',cls:''},
-  F3_SKIPPED:{n:'F3 진입 생략(F3 Skipped)',cls:'lv-WARN'},
+  F3_SKIPPED:{n:'F3 진입 생략(F3 Skipped)',cls:'lv-warn'},
   F3_RECHECK:{n:'F3 진입 전 재검증(F3 Recheck)',cls:''},
-  F3_ENTRY_BLOCKED:{n:'F3 진입 차단(F3 Entry Blocked)',cls:'lv-WARN'},
+  F3_ENTRY_BLOCKED:{n:'F3 진입 차단(F3 Entry Blocked)',cls:'lv-warn'},
+  GAP_RECHECK_UNAVAILABLE:{n:'진입 전 갭 재검증 불가(Gap Recheck Unavailable)',cls:'lv-warn'},
+  BUYABLE_QTY_QUERY_FAILED:{n:'매수가능수량 조회 실패(Buyable Quantity Query Failed)',cls:'lv-warn'},
+  ENTRY_CANCEL_RELEASE_WAIT:{n:'취소 후 증거금 해제 대기(Entry Cancel Release Wait)',cls:''},
   ENTRY_PRE_ORDER_WAIT:{n:'진입 주문 전 대기(Entry Pre-order Wait)',cls:''},
   ENTRY_ORDER_SENT:{n:'진입 주문 전송(Entry Order Sent)',cls:''},
-  ENTRY_RETRY_START:{n:'진입 재시도 시작(Entry Retry Start)',cls:'lv-WARN'},
-  ENTRY_RETRY_SKIPPED:{n:'진입 재시도 생략(Entry Retry Skipped)',cls:'lv-WARN'},
-  ENTRY_FILL_POLL_TIMEOUT:{n:'진입 체결조회 시간초과(Entry Fill Poll Timeout)',cls:'lv-WARN'},
-  ENTRY_CANCEL_SENT:{n:'진입 주문 취소 전송(Entry Cancel Sent)',cls:'lv-WARN'},
+  ENTRY_RETRY_START:{n:'진입 재시도 시작(Entry Retry Start)',cls:'lv-warn'},
+  ENTRY_RETRY_SKIPPED:{n:'진입 재시도 생략(Entry Retry Skipped)',cls:'lv-warn'},
+  ENTRY_FILL_POLL_TIMEOUT:{n:'진입 체결조회 시간초과(Entry Fill Poll Timeout)',cls:'lv-warn'},
+  ENTRY_CANCEL_SENT:{n:'진입 주문 취소 전송(Entry Cancel Sent)',cls:'lv-warn'},
   ENTRY_EXECUTED:{n:'진입 체결(Entry Executed)',cls:''},
-  ENTRY_FAIL:{n:'진입 실패(Entry Failed)',cls:'lv-WARN'},
-  GAP_CHANGED:{n:'진입 전 갭 변동(Gap Changed)',cls:'lv-WARN'},
-  SLIPPAGE_GUARD:{n:'슬리피지 가드 발동(Slippage Guard)',cls:'lv-WARN'},
+  ENTRY_FAIL:{n:'진입 실패(Entry Failed)',cls:'lv-warn'},
+  GAP_CHANGED:{n:'진입 전 갭 변동(Gap Changed)',cls:'lv-warn'},
+  SLIPPAGE_GUARD:{n:'슬리피지 가드 발동(Slippage Guard)',cls:'lv-warn'},
   PYRAMID_EXECUTED:{n:'피라미딩 체결(Pyramid Executed)',cls:''},
   PYRAMID_SKIPPED:{n:'피라미딩 생략(Pyramid Skipped)',cls:''},
-  PYRAMID_TIMEOUT:{n:'피라미딩 체결 시간 초과(Pyramid Timeout)',cls:'lv-WARN'},
+  PYRAMID_TIMEOUT:{n:'피라미딩 체결 시간 초과(Pyramid Timeout)',cls:'lv-warn'},
   TRAILING_STOP:{n:'트레일링 스탑 청산(Trailing Stop)',cls:''},
-  HARD_STOP:{n:'하드 스탑 청산(Hard Stop)',cls:'lv-CRIT'},
+  HARD_STOP:{n:'하드 스탑 청산(Hard Stop)',cls:'lv-error'},
   TIMEOUT_CLOSE:{n:'타임아웃 청산(Timeout Close)',cls:''},
-  TIMEOUT_RETRY:{n:'타임아웃 청산 재시도(Timeout Retry)',cls:'lv-WARN'},
-  TIMEOUT_ORDER_FAILED:{n:'타임아웃 청산 주문 실패(Timeout Order Failed)',cls:'lv-CRIT'},
-  PROCESS_RESTART_DETECTED:{n:'프로세스 재시작 감지(Process Restart Detected)',cls:'lv-WARN'},
+  TIMEOUT_RETRY:{n:'타임아웃 청산 재시도(Timeout Retry)',cls:'lv-warn'},
+  TIMEOUT_ORDER_FAILED:{n:'타임아웃 청산 주문 실패(Timeout Order Failed)',cls:'lv-error'},
+  PROCESS_RESTART_DETECTED:{n:'프로세스 재시작 감지(Process Restart Detected)',cls:'lv-warn'},
   ORDER_SMOKE_BUY_FILLED:{n:'주문 테스트 매수 체결(Order Smoke Buy Filled)',cls:''},
   ORDER_SMOKE_SELL_FILLED:{n:'주문 테스트 매도 체결(Order Smoke Sell Filled)',cls:''},
 };
@@ -728,7 +810,8 @@ function renderLogs(logs) {
     const eventName = l.event_label || info.n;
     const t = l.ts ? l.ts.substring(11,19) : '';
     const detail = buildLogDetail(l);
-    const lvCls = l.level==='CRIT'?'lv-CRIT':l.level==='WARN'?'lv-WARN':'lv-INFO';
+    const level = String(l.level||'info').toLowerCase();
+    const lvCls = (level==='crit'||level==='critical'||level==='error')?'lv-error':(level==='warn'||level==='warning')?'lv-warn':'lv-info';
     const cur = i===0 ? '<span class="ev-cur">▌</span>' : '';
     return `<div class="ev ${info.cls||lvCls}">
       <div class="ev-t">${t}</div>

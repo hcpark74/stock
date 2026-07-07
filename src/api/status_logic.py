@@ -1,4 +1,4 @@
-"""Pure status/F1 display helpers for the API and tests."""
+﻿"""Pure status/F1 display helpers for the API and tests."""
 
 from pathlib import Path
 
@@ -83,7 +83,9 @@ def f3_detail_from_event(event: dict | None) -> str:
         "BELOW_MIN": "갭 하한 미달",
         "ABOVE_MAX": "갭 상한 초과",
         "GAP_CHANGED": "진입 전 갭 변동",
-        "PRICE_UNAVAILABLE": "예상가 조회 실패",
+        "GAP_RECHECK_UNAVAILABLE": "진입 전 갭 재검증 불가",
+        "BUYABLE_QTY_ZERO": "매수가능수량 0",
+        "BUYABLE_QTY_QUERY_FAILED": "매수가능수량 조회 실패",
         "INSUFFICIENT_BALANCE": "주문가능금액 부족",
         "QTY_ZERO": "주문 수량 0",
         "NO_ENTRY_CANDIDATE": "진입 가능 후보 없음",
@@ -117,6 +119,9 @@ def pipeline_from_logs(logs: list[dict], position_status: str) -> dict:
             "ENTRY_RETRY_START",
             "ENTRY_RETRY_SKIPPED",
             "ENTRY_FAIL",
+            "GAP_RECHECK_UNAVAILABLE",
+            "BUYABLE_QTY_QUERY_FAILED",
+            "BUYABLE_QTY_ZERO",
             "F3_SKIPPED",
             "F3_ENTRY_BLOCKED",
             "GAP_CHANGED",
@@ -126,7 +131,15 @@ def pipeline_from_logs(logs: list[dict], position_status: str) -> dict:
             stage = max(stage, 3)
             failed = False
 
-        if event in {"ENTRY_FAIL", "F3_SKIPPED", "F3_ENTRY_BLOCKED", "GAP_CHANGED"}:
+        if event in {
+            "ENTRY_FAIL",
+            "F3_SKIPPED",
+            "F3_ENTRY_BLOCKED",
+            "GAP_CHANGED",
+            "GAP_RECHECK_UNAVAILABLE",
+            "BUYABLE_QTY_QUERY_FAILED",
+            "BUYABLE_QTY_ZERO",
+        }:
             failed = True
 
     return {"pipeline_stage": stage, "pipeline_failed": failed}

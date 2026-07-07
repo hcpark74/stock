@@ -46,8 +46,8 @@ def build(
     def cron(**kwargs: Any) -> CronTrigger:
         return CronTrigger(timezone=KST, **kwargs)
 
-    # 08:30 — KIS 토큰 갱신 / NTP 검증
-    scheduler.add_job(token_refresh, cron(hour=8, minute=30, second=0),  id="token_refresh")
+    # 08:29:30 — KIS 토큰 선제 갱신, 08:30:10 — NTP 검증
+    scheduler.add_job(token_refresh, cron(hour=8, minute=29, second=30), id="token_refresh")
     scheduler.add_job(ntp_check,     cron(hour=8, minute=30, second=10), id="ntp_check")
 
     # F1 — 갭/유동성 필터링

@@ -1,11 +1,11 @@
-﻿<!doctype html>
+<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>DAILY 1 — 갭업 모니터링</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="assets/app.css?v=20260703-time-axis">
+<link rel="stylesheet" href="assets/app.css?v=20260707-grid10">
 
 <!-- TOP BAR -->
 <div class="tb">
@@ -89,7 +89,7 @@
           <div class="f1-steps" id="f1-steps"></div>
           <div class="f1-grid" id="f1-summary"></div>
           <div class="today-note">
-            <span id="f1-today-note">후보 전체 목록은 선정 메뉴에서 확인</span>
+            <div class="f1-size-chart" id="f1-size-chart" aria-label="F1 후보 사이즈 그래프"><div class="f1-size-empty">후보 전체 목록은 선정 메뉴에서 확인</div></div>
             <button class="text-btn" onclick="go('selection')">선정 보기</button>
           </div>
         </div>
@@ -115,8 +115,8 @@
         <div class="price-flow">
           <div class="flow-head">
             <div>
-              <div class="flow-title">보유 후 가격흐름</div>
-              <div class="flow-sub" id="flow-sub">진입 후 틱 수신 대기</div>
+              <div class="flow-title">오늘 가격흐름</div>
+              <div class="flow-sub" id="flow-sub">09:00-11:00 · 틱 수신 대기</div>
             </div>
             <div class="flow-legend">
               <span><i class="lg-cur"></i>현재</span>
@@ -338,5 +338,4 @@
   </div>
 </div>
 
-<script src="assets/app.js?v=20260703-time-axis"></script>
-
+<script src="assets/app.js?v=20260707-grid10"></script>

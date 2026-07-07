@@ -41,6 +41,12 @@ EVENT_LABELS = {
     "API_STATS_FAILED": "통계 조회 실패(API Stats Failed)",
     "BALANCE_QUERY_ERROR": "잔고 조회 오류(Balance Query Error)",
     "BALANCE_CASH_CHECK": "매수 가능 금액 확인(Balance Cash Check)",
+    "BUYABLE_QTY_CHECK": "종목별 매수가능수량 확인(Buyable Quantity Check)",
+    "BUYABLE_QTY_ERROR": "종목별 매수가능수량 조회 오류(Buyable Quantity Error)",
+    "BUYABLE_QTY_QUERY_FAILED": "종목별 매수가능수량 조회 실패(Buyable Quantity Query Failed)",
+    "GAP_RECHECK_UNAVAILABLE": "진입 전 갭 재검증 불가(Gap Recheck Unavailable)",
+    "ENTRY_CANCEL_RELEASE_WAIT": "취소 후 증거금 해제 대기(Entry Cancel Release Wait)",
+    "ENTRY_QTY_CLAMPED": "진입 주문 수량 조정(Entry Quantity Clamped)",
     "F1_DONE": "F1 필터 완료(F1 Done)",
     "F1_API_ERROR": "F1 API 오류(F1 API Error)",
     "F1_FETCH_DONE": "F1 API 조회 완료(F1 Fetch Done)",
@@ -134,17 +140,39 @@ def setup(log_dir: str) -> logging.Logger:
     return _logger
 
 
-_LEVEL_ALIAS = {"CRIT": "CRITICAL", "WARN": "WARNING"}
+_LEVEL_TO_PYTHON = {
+    "info": "INFO",
+    "warn": "WARNING",
+    "warning": "WARNING",
+    "error": "ERROR",
+    "critical": "ERROR",
+    "crit": "ERROR",
+}
+_LEVEL_NORMALIZED = {
+    "debug": "info",
+    "info": "info",
+    "warn": "warn",
+    "warning": "warn",
+    "error": "error",
+    "critical": "error",
+    "crit": "error",
+}
+
+
+def normalize_level(level: str | None) -> str:
+    key = str(level or "info").strip().lower()
+    return _LEVEL_NORMALIZED.get(key, "info")
 
 
 def event_label(event: str) -> str:
     return EVENT_LABELS.get(event, f"{event}({event})")
 
 
-def log(event: str, level: str = "INFO", ticker: str | None = None, **kwargs) -> None:
+def log(event: str, level: str = "info", ticker: str | None = None, **kwargs) -> None:
     logger = logging.getLogger("stock")
-    py_level = _LEVEL_ALIAS.get(level, level)
+    normalized_level = normalize_level(level)
+    py_level = _LEVEL_TO_PYTHON.get(normalized_level, "INFO")
     lvl = getattr(logging, py_level, logging.INFO)
     label = event_label(event)
-    extra = {"event": event, "event_label": label, "ticker": ticker, "level": level, **kwargs}
+    extra = {"event": event, "event_label": label, "ticker": ticker, "level": normalized_level, **kwargs}
     logger.log(lvl, label, extra={"_extra": extra})

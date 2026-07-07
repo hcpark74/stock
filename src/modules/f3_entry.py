@@ -1,4 +1,4 @@
-"""F3. 진입 주문 모듈 (09:10 이후) — PRD §F3"""
+﻿"""F3. 진입 주문 모듈 (09:10 이후) — PRD §F3"""
 
 import asyncio
 import os
@@ -14,12 +14,13 @@ KST = ZoneInfo("Asia/Seoul")
 
 GAP_MIN_RECHECK = 0.020   # 재검증 하한 (F1 3%보다 낮음 — 완충)
 GAP_MAX_RECHECK = 0.070
-ALLOC_RATIO = 1.00         # 주문가능 현금 100% 기준
+ALLOC_RATIO = float(os.getenv("F3_ALLOC_RATIO", "0.95"))  # 주문가능 현금 기본 95% 기준
 FIRST_RATIO = 1.00         # 1차 100%
 SLIPPAGE_LIMIT = 0.005     # 슬리피지 허용 +0.5%
 PYRAMID_MIN_UP = 0.005     # 피라미딩 조건 +0.5% 이상 유지
 F3_ENTRY_MAX_ATTEMPTS = max(1, int(os.getenv("F3_ENTRY_MAX_ATTEMPTS", "2")))
 F3_ENTRY_RETRY_DELAY_SEC = float(os.getenv("F3_ENTRY_RETRY_DELAY_SEC", "0.5"))
+F3_ENTRY_CANCEL_RELEASE_WAIT_SEC = float(os.getenv("F3_ENTRY_CANCEL_RELEASE_WAIT_SEC", "1.5"))
 # First order gets a wider polling window to absorb KIS/order fill latency after the open.
 F3_ENTRY_FIRST_FILL_SEC = float(os.getenv("F3_ENTRY_FIRST_FILL_SEC", "12.0"))
 F3_ENTRY_RETRY_FILL_SEC = float(os.getenv("F3_ENTRY_RETRY_FILL_SEC", "8.0"))
@@ -35,6 +36,7 @@ _SELL_TR   = {"REAL": "TTTC0011U", "PAPER": "VTTC0011U"}
 _CANCEL_TR = {"REAL": "TTTC0013U", "PAPER": "VTTC0013U"}
 _CCLD_TR   = {"REAL": "TTTC0081R", "PAPER": "VTTC0081R"}
 _BAL_TR    = {"REAL": "TTTC8434R", "PAPER": "VTTC8434R"}
+_BUY_PSBL_TR = {"REAL": "TTTC8908R", "PAPER": "VTTC8908R"}
 
 _last_fill_poll_summary: dict = {}
 _pending_buy_org_no: str = ""  # 매수 주문 후 저장, 취소 시 사용
@@ -59,7 +61,7 @@ async def run(force: bool = False) -> None:
 
 async def _run_single(force: bool = False, picked: dict | None = None) -> None:
     """
-    갭 재검증 후 설정된 시각에 1차 100% 시장가 매수,
+    갭 재검증 후 설정된 시각에 배정 수량 100% 시장가 매수,
     체결 확인 / 슬리피지 가드, 2차 30% 피라미딩을 수행한다.
     force=True: FORCE_CATCHUP 모드. 시각 제약 없이 실행, fill 마감을 실행 시점 +30초로 설정.
     """
@@ -84,41 +86,69 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
         prev_close = float(picked.get("prev_close") or 0)
     else:
         expected_price, prev_close = await _fetch_expected_price(ticker)
-    if prev_close and expected_price:
-        gap = (expected_price / prev_close) - 1
+    if not expected_price or prev_close <= 0:
+        s.day_skip = True
+        s.close_reason = "GAP_RECHECK_UNAVAILABLE"
+        _log_entry_blocked(
+            ticker,
+            "GAP_RECHECK_UNAVAILABLE",
+            expected_price=expected_price,
+            prev_close=prev_close,
+        )
         log(
-            "F3_RECHECK",
-            level="INFO",
+            "GAP_RECHECK_UNAVAILABLE",
+            level="WARN",
             ticker=ticker,
             expected_price=expected_price,
             prev_close=prev_close,
-            gap_pct=round(gap * 100, 2),
+            reason="MISSING_PREV_CLOSE" if prev_close <= 0 else "MISSING_EXPECTED_PRICE",
+        )
+        await notifier.send(
+            "ENTRY_FAIL",
+            level="WARN",
+            message="진입 직전 갭 재검증 데이터가 없어 거래를 스킵합니다.",
+            ticker=ticker,
+        )
+        await db.record_skip(
+            _today(),
+            "ENTRY_FAIL",
+            f"reason=GAP_RECHECK_UNAVAILABLE,expected_price={expected_price},prev_close={prev_close}",
+        )
+        return
+
+    gap = (expected_price / prev_close) - 1
+    log(
+        "F3_RECHECK",
+        level="INFO",
+        ticker=ticker,
+        expected_price=expected_price,
+        prev_close=prev_close,
+        gap_pct=round(gap * 100, 2),
+        gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
+        gap_max_pct=round(GAP_MAX_RECHECK * 100, 2),
+    )
+    if not (GAP_MIN_RECHECK <= gap < GAP_MAX_RECHECK):
+        s.day_skip = True
+        s.close_reason = "GAP_CHANGED"
+        gap_reason = "BELOW_MIN" if gap < GAP_MIN_RECHECK else "ABOVE_MAX"
+        log(
+            "GAP_CHANGED", level="WARN", ticker=ticker,
+            gap_at_lockup=None, gap_at_entry=round(gap * 100, 2),
+            reason=gap_reason,
+        )
+        _log_entry_blocked(
+            ticker,
+            "GAP_CHANGED",
+            gap_at_entry=round(gap * 100, 2),
             gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
             gap_max_pct=round(GAP_MAX_RECHECK * 100, 2),
+            gap_reason=gap_reason,
         )
-        if not (GAP_MIN_RECHECK <= gap < GAP_MAX_RECHECK):
-            s.day_skip = True
-            s.close_reason = "GAP_CHANGED"
-            gap_reason = "BELOW_MIN" if gap < GAP_MIN_RECHECK else "ABOVE_MAX"
-            log(
-                "GAP_CHANGED", level="WARN", ticker=ticker,
-                gap_at_lockup=None, gap_at_entry=round(gap * 100, 2),
-                reason=gap_reason,
-            )
-            _log_entry_blocked(
-                ticker,
-                "GAP_CHANGED",
-                gap_at_entry=round(gap * 100, 2),
-                gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
-                gap_max_pct=round(GAP_MAX_RECHECK * 100, 2),
-                gap_reason=gap_reason,
-            )
-            await notifier.send("GAP_CHANGED", level="WARN",
-                                message=f"진입 직전 갭 변동({gap*100:.1f}%). 거래 스킵.",
-                                ticker=ticker)
-            await db.record_skip(_today(), "GAP_CHANGED", f"gap={gap*100:.2f}%")
-            return
-
+        await notifier.send("GAP_CHANGED", level="WARN",
+                            message=f"진입 직전 갭 변동({gap*100:.1f}%). 거래 스킵.",
+                            ticker=ticker)
+        await db.record_skip(_today(), "GAP_CHANGED", f"gap={gap*100:.2f}%")
+        return
     # ── 잔고 조회 및 수량 산정 ────────────────────────────────────────
     if picked and picked.get("ticker") == ticker:
         cash = float(picked["cash"])
@@ -128,31 +158,6 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
         cash = await _fetch_available_cash()
         total_amount = int(cash * ALLOC_RATIO)
         total_qty = int(total_amount / expected_price) if expected_price else 0
-    if not expected_price or expected_price == 0:
-        s.day_skip = True
-        s.close_reason = "PRICE_UNAVAILABLE"
-        _log_entry_blocked(
-            ticker,
-            "PRICE_UNAVAILABLE",
-            order_price=expected_price,
-            cash=cash,
-        )
-        log(
-            "ENTRY_FAIL",
-            level="WARN",
-            ticker=ticker,
-            order_id=None,
-            order_price=expected_price,
-            order_qty=0,
-            cash=cash,
-            reason="PRICE_UNAVAILABLE",
-        )
-        await db.record_skip(
-            _today(),
-            "ENTRY_FAIL",
-            f"reason=PRICE_UNAVAILABLE,cash={cash}",
-        )
-        return
     if total_qty == 0:
         s.day_skip = True
         s.close_reason = "INSUFFICIENT_BALANCE"
@@ -180,7 +185,7 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
     first_qty = max(1, int(total_qty * FIRST_RATIO))
     second_qty = total_qty - first_qty
 
-    # ── 1차 100% 시장가 매수 ────────────────────────────────────────
+    # ── 1차 배정 수량 100% 시장가 매수 ───────────────────────────────
     if not await state.set_entering():
         _log_entry_blocked(
             ticker,
@@ -194,6 +199,7 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
     order_id = "UNKNOWN"
     max_attempts = F3_ENTRY_MAX_ATTEMPTS if not force else 1
     last_run_attempt = 0
+    last_entry_fail_reason = "UNFILLED"
     for attempt in range(1, max_attempts + 1):
         if attempt > 1:
             if not _before_deadline(_entry_retry_deadline()):
@@ -221,6 +227,98 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
 
         await _pre_order_quiet_wait(ticker, attempt, max_attempts, expected_price, first_qty)
         last_run_attempt = attempt
+        buyable = await _fetch_buyable_qty(ticker, mode)
+        if buyable.get("query_failed"):
+            _log_entry_blocked(
+                ticker,
+                "BUYABLE_QTY_QUERY_FAILED",
+                order_price=expected_price,
+                planned_qty=first_qty,
+                entry_attempt=attempt,
+                max_attempts=max_attempts,
+                rt_cd=buyable.get("rt_cd"),
+                msg_cd=buyable.get("msg_cd"),
+                msg1=buyable.get("msg1"),
+            )
+            log(
+                "BUYABLE_QTY_QUERY_FAILED",
+                level="WARN",
+                ticker=ticker,
+                order_price=expected_price,
+                planned_qty=first_qty,
+                entry_attempt=attempt,
+                max_attempts=max_attempts,
+                rt_cd=buyable.get("rt_cd"),
+                msg_cd=buyable.get("msg_cd"),
+                msg1=buyable.get("msg1"),
+            )
+            last_entry_fail_reason = "BUYABLE_QTY_QUERY_FAILED"
+            if attempt < max_attempts:
+                continue
+            break
+        last_entry_fail_reason = "UNFILLED"
+
+        buyable_qty = int(buyable.get("nrcvb_buy_qty", 0))
+        order_qty = min(first_qty, buyable_qty)
+        if 0 < order_qty < first_qty:
+            log(
+                "ENTRY_QTY_CLAMPED",
+                level="WARN",
+                ticker=ticker,
+                planned_qty=first_qty,
+                buyable_qty=buyable_qty,
+                order_qty=order_qty,
+                order_price=expected_price,
+                entry_attempt=attempt,
+                max_attempts=max_attempts,
+                nrcvb_buy_amt=buyable.get("nrcvb_buy_amt"),
+                max_buy_qty=buyable.get("max_buy_qty"),
+                ord_psbl_cash=buyable.get("ord_psbl_cash"),
+            )
+        if order_qty <= 0:
+            await state.reset_to_idle("ENTRY_FAIL")
+            state.get().day_skip = True
+            state.get().close_reason = "INSUFFICIENT_BALANCE"
+            _log_entry_blocked(
+                ticker,
+                "BUYABLE_QTY_ZERO",
+                order_price=expected_price,
+                planned_qty=first_qty,
+                buyable_qty=buyable_qty,
+                entry_attempt=attempt,
+                max_attempts=max_attempts,
+                nrcvb_buy_amt=buyable.get("nrcvb_buy_amt"),
+                ord_psbl_cash=buyable.get("ord_psbl_cash"),
+            )
+            log(
+                "INSUFFICIENT_BALANCE",
+                level="WARN",
+                ticker=ticker,
+                cash=cash,
+                alloc_ratio=ALLOC_RATIO,
+                order_price=expected_price,
+                planned_qty=first_qty,
+                buyable_qty=buyable_qty,
+                nrcvb_buy_amt=buyable.get("nrcvb_buy_amt"),
+                ord_psbl_cash=buyable.get("ord_psbl_cash"),
+                reason="BUYABLE_QTY_ZERO",
+            )
+            await notifier.send(
+                "ENTRY_FAIL",
+                level="WARN",
+                message=f"종목별 매수가능수량이 0입니다. {ticker}",
+                ticker=ticker,
+            )
+            await db.record_skip(
+                _today(),
+                "ENTRY_FAIL",
+                f"reason=BUYABLE_QTY_ZERO,planned_qty={first_qty},buyable_qty={buyable_qty}",
+            )
+            return
+        if order_qty < first_qty:
+            first_qty = order_qty
+            second_qty = 0
+
         order_resp = await _send_buy(ticker, first_qty, mode)
         order_id = order_resp.get("output", {}).get("ODNO", "UNKNOWN")
         _pending_buy_org_no = order_resp.get("output", {}).get("KRX_FWDG_ORD_ORGNO", "")
@@ -257,6 +355,15 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
                 msg_cd=order_resp.get("msg_cd"),
                 msg1=order_resp.get("msg1"),
             )
+            await notifier.send(
+                "ENTRY_FAIL",
+                level="WARN",
+                message=(
+                    f"진입 주문 거절. {ticker} "
+                    f"{order_resp.get('msg_cd') or ''} {order_resp.get('msg1') or ''}"
+                ),
+                ticker=ticker,
+            )
             await db.record_skip(
                 _today(),
                 "ENTRY_FAIL",
@@ -282,22 +389,32 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
             msg_cd=cancel_resp.get("msg_cd"),
             msg1=cancel_resp.get("msg1"),
         )
-
+        if attempt < max_attempts and F3_ENTRY_CANCEL_RELEASE_WAIT_SEC > 0:
+            log(
+                "ENTRY_CANCEL_RELEASE_WAIT",
+                level="INFO",
+                ticker=ticker,
+                order_id=order_id,
+                sleep_sec=F3_ENTRY_CANCEL_RELEASE_WAIT_SEC,
+                entry_attempt=attempt,
+                max_attempts=max_attempts,
+            )
+            await asyncio.sleep(F3_ENTRY_CANCEL_RELEASE_WAIT_SEC)
     if not fill:
         await state.reset_to_idle("ENTRY_FAIL")
         log("ENTRY_FAIL", level="WARN", ticker=ticker,
             order_id=order_id, order_price=expected_price,
             order_qty=first_qty, entry_attempt=last_run_attempt,
-            max_attempts=max_attempts, reason="UNFILLED",
+            max_attempts=max_attempts, reason=last_entry_fail_reason,
             **_last_fill_poll_summary)
         await notifier.send("ENTRY_FAIL", level="WARN",
-                            message=f"진입 미체결. {ticker}",
+                            message=f"진입 실패({last_entry_fail_reason}). {ticker}",
                             ticker=ticker)
         await db.record_skip(
             _today(),
             "ENTRY_FAIL",
             (
-                f"order_id={order_id},reason=UNFILLED,attempts={last_run_attempt},"
+                f"order_id={order_id},reason={last_entry_fail_reason},attempts={last_run_attempt},"
                 f"poll_attempts={_last_fill_poll_summary.get('poll_attempts', 0)}"
             ),
         )
@@ -435,53 +552,61 @@ async def _pick_final_entry_candidate(s: state.State) -> dict | None:
                 candidates=tickers,
             )
             candidate = {"ticker": ticker}
-        if prev_close and expected_price:
-            gap = (expected_price / prev_close) - 1
+        if not expected_price or prev_close <= 0:
+            blocked_reasons.append("GAP_RECHECK_UNAVAILABLE")
+            _log_entry_blocked(
+                ticker,
+                "GAP_RECHECK_UNAVAILABLE",
+                candidate_rank=rank,
+                expected_price=expected_price,
+                prev_close=prev_close,
+                cash=cash,
+            )
             log(
-                "F3_RECHECK",
-                level="INFO",
+                "GAP_RECHECK_UNAVAILABLE",
+                level="WARN",
                 ticker=ticker,
                 candidate_rank=rank,
                 expected_price=expected_price,
                 prev_close=prev_close,
-                gap_pct=round(gap * 100, 2),
-                gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
-                gap_max_pct=round(GAP_MAX_RECHECK * 100, 2),
-            )
-            if not (GAP_MIN_RECHECK <= gap < GAP_MAX_RECHECK):
-                reason = "BELOW_MIN" if gap < GAP_MIN_RECHECK else "ABOVE_MAX"
-                blocked_reasons.append("GAP_CHANGED")
-                log(
-                    "GAP_CHANGED",
-                    level="WARN",
-                    ticker=ticker,
-                    candidate_rank=rank,
-                    gap_at_lockup=None,
-                    gap_at_entry=round(gap * 100, 2),
-                    reason=reason,
-                )
-                _log_entry_blocked(
-                    ticker,
-                    "GAP_CHANGED",
-                    candidate_rank=rank,
-                    gap_at_entry=round(gap * 100, 2),
-                    gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
-                    gap_max_pct=round(GAP_MAX_RECHECK * 100, 2),
-                    gap_reason=reason,
-                )
-                continue
-
-        if not expected_price:
-            blocked_reasons.append("PRICE_UNAVAILABLE")
-            _log_entry_blocked(
-                ticker,
-                "PRICE_UNAVAILABLE",
-                candidate_rank=rank,
-                order_price=expected_price,
-                cash=cash,
+                reason="MISSING_PREV_CLOSE" if prev_close <= 0 else "MISSING_EXPECTED_PRICE",
             )
             continue
 
+        gap = (expected_price / prev_close) - 1
+        log(
+            "F3_RECHECK",
+            level="INFO",
+            ticker=ticker,
+            candidate_rank=rank,
+            expected_price=expected_price,
+            prev_close=prev_close,
+            gap_pct=round(gap * 100, 2),
+            gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
+            gap_max_pct=round(GAP_MAX_RECHECK * 100, 2),
+        )
+        if not (GAP_MIN_RECHECK <= gap < GAP_MAX_RECHECK):
+            reason = "BELOW_MIN" if gap < GAP_MIN_RECHECK else "ABOVE_MAX"
+            blocked_reasons.append("GAP_CHANGED")
+            log(
+                "GAP_CHANGED",
+                level="WARN",
+                ticker=ticker,
+                candidate_rank=rank,
+                gap_at_lockup=None,
+                gap_at_entry=round(gap * 100, 2),
+                reason=reason,
+            )
+            _log_entry_blocked(
+                ticker,
+                "GAP_CHANGED",
+                candidate_rank=rank,
+                gap_at_entry=round(gap * 100, 2),
+                gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
+                gap_max_pct=round(GAP_MAX_RECHECK * 100, 2),
+                gap_reason=reason,
+            )
+            continue
         total_qty = int(total_amount / expected_price)
         if total_qty == 0:
             blocked_reasons.append("INSUFFICIENT_BALANCE")
@@ -735,21 +860,79 @@ async def _fetch_available_cash() -> float:
         return 0.0
 
     summary = output2[0]
-    cash = to_float(summary.get("ord_psbl_cash"))
-    if cash <= 0:
-        cash = to_float(summary.get("dnca_tot_amt"))
-    if cash <= 0:
-        cash = to_float(summary.get("prvs_rcdl_excc_amt"))
+    ord_psbl_present = "ord_psbl_cash" in summary and str(summary.get("ord_psbl_cash", "")).strip() != ""
+    ord_psbl_cash = to_float(summary.get("ord_psbl_cash"))
+    dnca_tot_amt = to_float(summary.get("dnca_tot_amt"))
+    prvs_rcdl_excc_amt = to_float(summary.get("prvs_rcdl_excc_amt"))
+    cash_source = "ord_psbl_cash"
+    cash = ord_psbl_cash
+    if not ord_psbl_present:
+        cash = dnca_tot_amt
+        cash_source = "dnca_tot_amt"
+        if cash <= 0:
+            cash = prvs_rcdl_excc_amt
+            cash_source = "prvs_rcdl_excc_amt"
 
     log(
         "BALANCE_CASH_CHECK",
         level="DEBUG",
         cash=cash,
-        ord_psbl_cash=to_float(summary.get("ord_psbl_cash")),
-        dnca_tot_amt=to_float(summary.get("dnca_tot_amt")),
-        prvs_rcdl_excc_amt=to_float(summary.get("prvs_rcdl_excc_amt")),
+        cash_source=cash_source,
+        ord_psbl_cash=ord_psbl_cash,
+        ord_psbl_present=ord_psbl_present,
+        dnca_tot_amt=dnca_tot_amt,
+        prvs_rcdl_excc_amt=prvs_rcdl_excc_amt,
     )
     return cash
+
+
+async def _fetch_buyable_qty(ticker: str, mode: str) -> dict:
+    """종목별 시장가 매수가능수량 조회 [v1_국내주식-007]."""
+    resp = await kis_rest.get(
+        "/uapi/domestic-stock/v1/trading/inquire-psbl-order",
+        tr_id=_BUY_PSBL_TR[mode],
+        params={
+            "CANO": kis_rest.account_no(),
+            "ACNT_PRDT_CD": kis_rest.account_cd(),
+            "PDNO": ticker,
+            "ORD_UNPR": "",
+            "ORD_DVSN": "01",
+            "CMA_EVLU_AMT_ICLD_YN": "N",
+            "OVRS_ICLD_YN": "N",
+        },
+    )
+    if str(resp.get("rt_cd", "0")) != "0":
+        log(
+            "BUYABLE_QTY_ERROR",
+            level="WARN",
+            ticker=ticker,
+            rt_cd=resp.get("rt_cd"),
+            msg_cd=resp.get("msg_cd"),
+            msg1=resp.get("msg1"),
+        )
+        return {
+            "query_failed": True,
+            "nrcvb_buy_qty": 0,
+            "nrcvb_buy_amt": 0.0,
+            "max_buy_qty": 0,
+            "max_buy_amt": 0.0,
+            "ord_psbl_cash": 0.0,
+            "rt_cd": resp.get("rt_cd"),
+            "msg_cd": resp.get("msg_cd"),
+            "msg1": resp.get("msg1"),
+        }
+
+    out = resp.get("output", {}) if isinstance(resp.get("output"), dict) else {}
+    result = {
+        "query_failed": False,
+        "nrcvb_buy_qty": int(to_float(out.get("nrcvb_buy_qty"))),
+        "nrcvb_buy_amt": to_float(out.get("nrcvb_buy_amt")),
+        "max_buy_qty": int(to_float(out.get("max_buy_qty"))),
+        "max_buy_amt": to_float(out.get("max_buy_amt")),
+        "ord_psbl_cash": to_float(out.get("ord_psbl_cash")),
+    }
+    log("BUYABLE_QTY_CHECK", level="DEBUG", ticker=ticker, **result)
+    return result
 
 
 async def _send_buy(ticker: str, qty: int, mode: str) -> dict:

@@ -5,7 +5,7 @@ from collections import deque
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from src.utils.logger import event_label
+from src.utils.logger import event_label, normalize_level
 
 KST = ZoneInfo("Asia/Seoul")
 _TICK_HISTORY_MAX = 5000
@@ -100,7 +100,7 @@ def push_log(event: str, level: str, **kwargs) -> None:
         "type": "log",
         "event": event,
         "event_label": event_label(event),
-        "level": level,
+        "level": normalize_level(level),
         **kwargs,
     })
 

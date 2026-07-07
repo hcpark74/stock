@@ -93,3 +93,9 @@ async def test_process_restart_alert_requires_critical_level():
 
     await notifier.send("PROCESS_RESTART_DETECTED", level="CRIT", message="restart")
     assert notifier._queue.qsize() == 1
+
+
+def test_notifier_accepts_legacy_and_standard_error_levels():
+    assert notifier._should_send_alert("SOME_ERROR", level="CRIT") is True
+    assert notifier._should_send_alert("SOME_ERROR", level="error") is True
+    assert notifier._should_send_alert("SOME_WARNING", level="WARN") is False

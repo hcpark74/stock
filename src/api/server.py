@@ -1,4 +1,4 @@
-"""FastAPI 웹 서버. UI에 실시간 데이터를 제공한다."""
+﻿"""FastAPI 웹 서버. UI에 실시간 데이터를 제공한다."""
 
 import asyncio
 import json
@@ -212,7 +212,7 @@ def _selection_process_from_logs(summary: dict, logs: list[dict]) -> list[dict]:
         "detail": ", ".join(str(t) for t in f2_tickers) if f2_tickers else "최대 3개 lock",
     })
 
-    f3_events = {"F3_FINAL_PICK", "ENTRY_ORDER_SENT", "ENTRY_EXECUTED", "F3_ENTRY_BLOCKED", "F3_SKIPPED", "GAP_CHANGED"}
+    f3_events = {"F3_FINAL_PICK", "ENTRY_ORDER_SENT", "ENTRY_EXECUTED", "F3_ENTRY_BLOCKED", "F3_SKIPPED", "GAP_CHANGED", "GAP_RECHECK_UNAVAILABLE", "BUYABLE_QTY_QUERY_FAILED", "BUYABLE_QTY_ZERO"}
     f3_event = next((e for e in reversed(logs) if e.get("event") in f3_events), None) if f2_event else None
     f3_status = {
         "F3_FINAL_PICK": "최종",
@@ -221,6 +221,9 @@ def _selection_process_from_logs(summary: dict, logs: list[dict]) -> list[dict]:
         "F3_ENTRY_BLOCKED": "차단",
         "F3_SKIPPED": "생략",
         "GAP_CHANGED": "제외",
+        "GAP_RECHECK_UNAVAILABLE": "차단",
+        "BUYABLE_QTY_QUERY_FAILED": "차단",
+        "BUYABLE_QTY_ZERO": "차단",
     }.get(f3_event.get("event") if f3_event else None, "대기")
     steps.append({
         "key": "f3",

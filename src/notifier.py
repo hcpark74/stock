@@ -3,7 +3,7 @@ import os
 
 import httpx
 
-from src.utils.logger import log
+from src.utils.logger import log, normalize_level
 
 _queue: asyncio.Queue[str] = asyncio.Queue()
 _SEND_INTERVAL = 1.1
@@ -22,12 +22,11 @@ _ACTIONABLE_ALERT_EVENTS = {
     "GAP_CHANGED",
     "F2_RETRY_EXHAUSTED",
 }
-_CRITICAL_ALERT_LEVELS = {"CRIT", "ERROR"}
+_CRITICAL_ALERT_LEVELS = {"error"}
 _LEVEL_LABELS = {
-    "CRIT": "긴급",
-    "ERROR": "오류",
-    "WARN": "확인",
-    "INFO": "알림",
+    "error": "긴급",
+    "warn": "확인",
+    "info": "알림",
 }
 
 _ALERT_TITLES = {
@@ -53,30 +52,33 @@ _ALERT_TITLES = {
 
 async def send(
     event: str,
-    level: str = "INFO",
+    level: str = "info",
     message: str = "",
     ticker: str | None = None,
     name: str | None = None,
 ) -> None:
     """Queue a non-blocking Telegram alert when it is actionable."""
-    if not _should_send_alert(event, level):
+    normalized_level = normalize_level(level)
+    if not _should_send_alert(event, normalized_level):
         return
-    text = _format_alert_text(event, level, message, ticker=ticker, name=name)
+    text = _format_alert_text(event, normalized_level, message, ticker=ticker, name=name)
     await _queue.put(text)
 
 
-def _should_send_alert(event: str, level: str = "INFO") -> bool:
-    return event in _ACTIONABLE_ALERT_EVENTS or level in _CRITICAL_ALERT_LEVELS
+def _should_send_alert(event: str, level: str = "info") -> bool:
+    normalized_level = normalize_level(level)
+    return event in _ACTIONABLE_ALERT_EVENTS or normalized_level in _CRITICAL_ALERT_LEVELS
 
 
 def _format_alert_text(
     event: str,
-    level: str = "INFO",
+    level: str = "info",
     message: str = "",
     ticker: str | None = None,
     name: str | None = None,
 ) -> str:
-    severity = _LEVEL_LABELS.get(level, level)
+    normalized_level = normalize_level(level)
+    severity = _LEVEL_LABELS.get(normalized_level, normalized_level)
     title = _ALERT_TITLES.get(event) or event.replace("_", " ").title()
     stock = _format_stock(ticker, name)
     content = _clean_message(message) if message else title

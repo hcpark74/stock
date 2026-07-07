@@ -1,8 +1,10 @@
 import asyncio
 import json
 import os
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -15,6 +17,33 @@ _EXPIRY_BUFFER_MIN = 10  # 만료 N분 전 선제 갱신
 
 _token: str = ""
 _ws_key: str = ""
+_MAX_REFRESH_ATTEMPTS = 3
+_REFRESH_BACKOFF_SEC = (2.0, 5.0)
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _auth_timeout() -> httpx.Timeout:
+    return httpx.Timeout(
+        connect=_env_float("KIS_AUTH_CONNECT_TIMEOUT_SEC", 15.0),
+        read=_env_float("KIS_AUTH_READ_TIMEOUT_SEC", 10.0),
+        write=_env_float("KIS_AUTH_WRITE_TIMEOUT_SEC", 10.0),
+        pool=_env_float("KIS_AUTH_POOL_TIMEOUT_SEC", 5.0),
+    )
+
+
+def _retry_delay(attempt: int) -> float:
+    index = max(0, min(attempt - 1, len(_REFRESH_BACKOFF_SEC) - 1))
+    return _REFRESH_BACKOFF_SEC[index]
+
+
+def _host(url: str) -> str:
+    return urlparse(url).hostname or ""
 
 
 def _mask(value: str) -> str:
@@ -72,24 +101,45 @@ async def refresh() -> str:
         "appkey": os.getenv("KIS_APP_KEY", ""),
         "appsecret": os.getenv("KIS_APP_SECRET", ""),
     }
-    for attempt in range(1, 4):
+    timeout = _auth_timeout()
+    mode = os.getenv("KIS_MODE", "PAPER")
+    host = _host(url)
+    for attempt in range(1, _MAX_REFRESH_ATTEMPTS + 1):
+        started = time.monotonic()
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(url, json=payload)
+            elapsed_ms = round((time.monotonic() - started) * 1000, 1)
             if resp.status_code == 200:
                 data = resp.json()
                 _token = data["access_token"]
                 expires_at = data.get("access_token_token_expired", "")
                 _save_cache(_token, expires_at)
                 log("TOKEN_REFRESHED", level="INFO",
-                    token_prefix=_mask(_token), expires_at=expires_at)
+                    token_prefix=_mask(_token), expires_at=expires_at,
+                    attempt=attempt, elapsed_ms=elapsed_ms, host=host, mode=mode)
                 return _token
             log("TOKEN_REFRESH_HTTP_ERR", level="WARN",
-                attempt=attempt, status=resp.status_code)
+                attempt=attempt, max_attempts=_MAX_REFRESH_ATTEMPTS,
+                status=resp.status_code, elapsed_ms=elapsed_ms,
+                host=host, mode=mode)
         except Exception as e:
-            log("TOKEN_REFRESH_ATTEMPT_FAIL", level="WARN", attempt=attempt, error=repr(e))
-        if attempt < 3:
-            await asyncio.sleep(2)
+            elapsed_ms = round((time.monotonic() - started) * 1000, 1)
+            next_delay_sec = _retry_delay(attempt) if attempt < _MAX_REFRESH_ATTEMPTS else 0
+            log(
+                "TOKEN_REFRESH_ATTEMPT_FAIL",
+                level="WARN",
+                attempt=attempt,
+                max_attempts=_MAX_REFRESH_ATTEMPTS,
+                error=repr(e),
+                exception_type=type(e).__name__,
+                elapsed_ms=elapsed_ms,
+                next_delay_sec=next_delay_sec,
+                host=host,
+                mode=mode,
+            )
+        if attempt < _MAX_REFRESH_ATTEMPTS:
+            await asyncio.sleep(_retry_delay(attempt))
 
     log("TOKEN_REFRESH_FAIL", level="CRIT")
     await notifier.send("TOKEN_REFRESH_FAIL", level="CRIT", message="KIS 토큰 갱신 실패")
@@ -121,19 +171,41 @@ async def refresh_ws_key() -> str:
         "appkey": os.getenv("KIS_APP_KEY", ""),
         "secretkey": os.getenv("KIS_APP_SECRET", ""),
     }
-    for attempt in range(1, 4):
+    timeout = _auth_timeout()
+    mode = os.getenv("KIS_MODE", "PAPER")
+    host = _host(url)
+    for attempt in range(1, _MAX_REFRESH_ATTEMPTS + 1):
+        started = time.monotonic()
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(url, json=payload)
+            elapsed_ms = round((time.monotonic() - started) * 1000, 1)
             if resp.status_code == 200:
                 _ws_key = resp.json().get("approval_key", "")
-                log("WS_KEY_REFRESHED", level="INFO", key_prefix=_mask(_ws_key))
+                log("WS_KEY_REFRESHED", level="INFO", key_prefix=_mask(_ws_key),
+                    attempt=attempt, elapsed_ms=elapsed_ms, host=host, mode=mode)
                 return _ws_key
-            log("WS_KEY_HTTP_ERR", level="WARN", attempt=attempt, status=resp.status_code)
+            log("WS_KEY_HTTP_ERR", level="WARN",
+                attempt=attempt, max_attempts=_MAX_REFRESH_ATTEMPTS,
+                status=resp.status_code, elapsed_ms=elapsed_ms,
+                host=host, mode=mode)
         except Exception as e:
-            log("WS_KEY_ATTEMPT_FAIL", level="WARN", attempt=attempt, error=repr(e))
-        if attempt < 3:
-            await asyncio.sleep(2)
+            elapsed_ms = round((time.monotonic() - started) * 1000, 1)
+            next_delay_sec = _retry_delay(attempt) if attempt < _MAX_REFRESH_ATTEMPTS else 0
+            log(
+                "WS_KEY_ATTEMPT_FAIL",
+                level="WARN",
+                attempt=attempt,
+                max_attempts=_MAX_REFRESH_ATTEMPTS,
+                error=repr(e),
+                exception_type=type(e).__name__,
+                elapsed_ms=elapsed_ms,
+                next_delay_sec=next_delay_sec,
+                host=host,
+                mode=mode,
+            )
+        if attempt < _MAX_REFRESH_ATTEMPTS:
+            await asyncio.sleep(_retry_delay(attempt))
 
     log("WS_KEY_REFRESH_FAIL", level="CRIT")
     await notifier.send("WS_KEY_REFRESH_FAIL", level="CRIT", message="실시간 접속키 갱신 실패")
