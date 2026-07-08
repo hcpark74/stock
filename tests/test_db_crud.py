@@ -44,6 +44,18 @@ async def test_open_trade_stores_fields(mem):
 
 # ── record_order ──────────────────────────────────────────────────────
 
+
+async def test_open_trade_reuses_existing_same_day_trade(mem):
+    first_id = await db.open_trade("20260623", "005930", 75_000.0, 10)
+    second_id = await db.open_trade("20260623", "000660", 120_000.0, 1)
+
+    conn = db.get()
+    async with conn.execute("SELECT COUNT(*) AS cnt FROM trades WHERE date=?", ("20260623",)) as cur:
+        row = await cur.fetchone()
+
+    assert second_id == first_id
+    assert row["cnt"] == 1
+
 async def test_record_order_returns_positive_id(mem):
     trade_id = await db.open_trade("20260623", "005930", 75_000.0, 10)
     order_id = await db.record_order(trade_id, "ORD001", "BUY", 10, 75_000.0, "FIRST_BUY", "005930")

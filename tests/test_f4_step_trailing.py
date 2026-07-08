@@ -14,6 +14,7 @@ from src.modules.f4_tracking import (
     _execute_close,
     _process_tick,
     _run_dry_ticks,
+    _run_rest_price_backup,
 )
 
 KST = ZoneInfo("Asia/Seoul")
@@ -244,6 +245,123 @@ async def test_dry_run_ticks_finish_below_trailing_stop(monkeypatch):
     start_event = [kwargs for event, kwargs in events if event == "DRY_RUN_F4_START"][0]
     prices = start_event["prices"]
     assert prices[-1] < ENTRY * (1 + STEP_SIZE - STEP_TRAIL)
+
+
+@pytest.mark.asyncio
+async def test_rest_backup_skips_poll_when_websocket_is_fresh(monkeypatch):
+    fetch = AsyncMock(return_value=ENTRY)
+
+    async def stop_after_sleep(_seconds):
+        _state_mod.get().position_status = "CLOSED"
+
+    monkeypatch.setattr("src.modules.f4_tracking._fetch_current_price", fetch)
+    monkeypatch.setattr("src.modules.f4_tracking.asyncio.sleep", AsyncMock(side_effect=stop_after_sleep))
+    monkeypatch.setattr("src.modules.f4_tracking.log", lambda *args, **kwargs: None)
+
+    await _run_rest_price_backup("005930", _spike_always_pass(), lambda: False)
+
+    fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rest_backup_polls_when_websocket_is_stale(monkeypatch):
+    fetch = AsyncMock(return_value=ENTRY)
+    process_tick = AsyncMock()
+
+    async def stop_after_sleep(_seconds):
+        _state_mod.get().position_status = "CLOSED"
+
+    monkeypatch.setattr("src.modules.f4_tracking._fetch_current_price", fetch)
+    monkeypatch.setattr("src.modules.f4_tracking._process_tick", process_tick)
+    monkeypatch.setattr("src.modules.f4_tracking.asyncio.sleep", AsyncMock(side_effect=stop_after_sleep))
+    monkeypatch.setattr("src.modules.f4_tracking.log", lambda *args, **kwargs: None)
+
+    await _run_rest_price_backup("005930", _spike_always_pass(), lambda: True)
+
+    fetch.assert_awaited_once_with("005930")
+    process_tick.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_rest_backup_survives_fetch_error(monkeypatch):
+    events = []
+    fetch = AsyncMock(side_effect=[RuntimeError("boom"), ENTRY])
+    process_tick = AsyncMock()
+    sleep_count = {"n": 0}
+
+    async def stop_after_two_sleeps(_seconds):
+        sleep_count["n"] += 1
+        if sleep_count["n"] >= 2:
+            _state_mod.get().position_status = "CLOSED"
+
+    monkeypatch.setattr("src.modules.f4_tracking._fetch_current_price", fetch)
+    monkeypatch.setattr("src.modules.f4_tracking._process_tick", process_tick)
+    monkeypatch.setattr("src.modules.f4_tracking.asyncio.sleep", AsyncMock(side_effect=stop_after_two_sleeps))
+    monkeypatch.setattr("src.modules.f4_tracking.log", lambda event, **kwargs: events.append((event, kwargs)))
+
+    await _run_rest_price_backup("005930", _spike_always_pass(), lambda: True)
+
+    assert fetch.await_count == 2
+    process_tick.assert_awaited_once()
+    assert "F4_REST_BACKUP_ERROR" in [event for event, _ in events]
+
+
+@pytest.mark.asyncio
+async def test_run_keeps_monitoring_and_alerts_when_backup_crashes(monkeypatch):
+    import asyncio as real_asyncio
+
+    import src.modules.f4_tracking as f4
+
+    events = []
+    notify = AsyncMock()
+    ws_started = real_asyncio.Event()
+
+    async def fake_subscribe(ticker, on_tick, *, stop_if=None):
+        ws_started.set()
+        while not (stop_if and stop_if()):
+            await real_asyncio.sleep(0.01)
+
+    async def crash_backup(*args, **kwargs):
+        raise RuntimeError("backup boom")
+
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setattr(f4, "F4_REST_BACKUP_ENABLED", True)
+    monkeypatch.setattr(f4.kis_ws, "subscribe", fake_subscribe)
+    monkeypatch.setattr(f4, "_run_rest_price_backup", crash_backup)
+    monkeypatch.setattr(f4.notifier, "send", notify)
+    monkeypatch.setattr(f4, "log", lambda event, **kwargs: events.append((event, kwargs)))
+
+    task = real_asyncio.create_task(f4.run())
+    await real_asyncio.wait_for(ws_started.wait(), 1)
+    await real_asyncio.sleep(0.05)
+
+    # 백업 태스크가 죽어도 WS 모니터링은 계속되어야 한다
+    assert not task.done()
+    assert "F4_MONITOR_TASK_ERROR" in [event for event, _ in events]
+    notify.assert_awaited()
+    assert notify.await_args.args[0] == "F4_MONITOR_TASK_ERROR"
+
+    _state_mod.get().position_status = "CLOSED"
+    await real_asyncio.wait_for(task, 1)
+
+
+@pytest.mark.asyncio
+async def test_poll_fill_attempts_cover_timeout_window(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    get = AsyncMock(return_value={"output1": []})
+    monkeypatch.setattr(f4.kis_rest, "get", get)
+    monkeypatch.setattr(f4.kis_rest, "account_no", lambda: "12345678")
+    monkeypatch.setattr(f4.kis_rest, "account_cd", lambda: "01")
+    monkeypatch.setattr(f4, "F4_FILL_POLL_INTERVAL_SEC", 0.5)
+    monkeypatch.setattr("src.modules.f4_tracking.asyncio.sleep", AsyncMock())
+
+    result = await f4._poll_fill("ORD1", timeout_sec=3)
+
+    assert result is None
+    # 3초 창을 0.5초 간격으로 커버 → 6회 조회 (기존 버그: timeout_sec회 = 창 절반)
+    assert get.await_count == 6
+
 
 @pytest.mark.asyncio
 async def test_execute_close_sends_critical_alert_on_sell_error(monkeypatch):

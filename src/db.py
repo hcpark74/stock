@@ -1,9 +1,12 @@
 """SQLite 연결 관리 — DB_DESIGN.md §4 PRAGMA 설정"""
 
 import aiosqlite
+import sqlite3
 import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+from src.utils.logger import log
 
 KST = ZoneInfo("Asia/Seoul")
 _conn: aiosqlite.Connection | None = None
@@ -148,19 +151,40 @@ def _now() -> str:
 
 
 async def open_trade(date: str, ticker: str, entry_price: float, entry_qty: int) -> int:
-    """trades 테이블에 신규 거래 INSERT. trade_id 반환."""
+    """Insert a trade and return its id. Existing same-day trades are reused."""
     now = _now()
     conn = get()
-    async with conn.execute(
-        """INSERT INTO trades
-               (date, ticker, entry_price, entry_qty, entry_at,
-                status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 'OPEN', ?, ?)""",
-        (date, ticker, entry_price, entry_qty, now, now, now),
-    ) as cur:
-        trade_id = cur.lastrowid
-    await conn.commit()
-    return trade_id
+    try:
+        async with conn.execute(
+            """INSERT INTO trades
+                   (date, ticker, entry_price, entry_qty, entry_at,
+                    status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, 'OPEN', ?, ?)""",
+            (date, ticker, entry_price, entry_qty, now, now, now),
+        ) as cur:
+            trade_id = cur.lastrowid
+        await conn.commit()
+        return trade_id
+    except sqlite3.IntegrityError:
+        existing = await get_trade_by_date(date)
+        if existing is None:
+            raise
+        if existing.get("ticker") != ticker:
+            log(
+                "TRADE_ALREADY_EXISTS",
+                level="WARN",
+                ticker=ticker,
+                existing_ticker=existing.get("ticker"),
+                trade_id=int(existing["id"]),
+            )
+        return int(existing["id"])
+
+
+async def get_trade_by_date(date: str) -> dict | None:
+    conn = get()
+    async with conn.execute("SELECT * FROM trades WHERE date=?", (date,)) as cur:
+        row = await cur.fetchone()
+    return dict(row) if row else None
 
 
 async def record_order(

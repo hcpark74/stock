@@ -336,6 +336,48 @@ async def test_fetch_all_premarket_enriches_expected_quotes_with_limited_concurr
     assert 1 < max_active <= 3
 
 
+async def test_fetch_all_premarket_logs_progress_while_fetching(monkeypatch):
+    events = []
+    monkeypatch.setattr(f1_mod, "F1_PROGRESS_LOG_EVERY", 2)
+
+    async def fake_get(*args, **kwargs):
+        input_iscd = kwargs["params"]["fid_input_iscd"]
+        if input_iscd == "1001":
+            return {"rt_cd": "0", "output": []}
+        return {
+            "rt_cd": "0",
+            "output": [
+                {
+                    "mksc_shrn_iscd": f"{i:06d}",
+                    "hts_kor_isnm": f"TEST{i}",
+                    "prdy_ctrt": "4.00",
+                    "stck_prpr": "10000",
+                    "avrg_vol": "1000",
+                    "acml_tr_pbmn": "10000000",
+                    "acml_vol": "1000",
+                }
+                for i in range(1, 4)
+            ],
+        }
+
+    with (
+        patch("src.api.kis_rest.get", new=fake_get),
+        patch("src.modules.f1_filter._fetch_expected_quote", new_callable=AsyncMock, return_value=None),
+        patch("src.modules.f1_filter.F1_MARKET_INTERVAL_SEC", 0),
+        patch("src.modules.f1_filter.log", lambda event, **kwargs: events.append((event, kwargs))),
+    ):
+        await _fetch_all_premarket()
+
+    event_names = [event for event, _ in events]
+    assert "F1_FETCH_START" in event_names
+    assert "F1_EXPECTED_QUOTE_START" in event_names
+    assert "F1_EXPECTED_QUOTE_PROGRESS" in event_names
+    assert "F1_EXPECTED_QUOTE_DONE" in event_names
+    progress = [kwargs for event, kwargs in events if event == "F1_EXPECTED_QUOTE_PROGRESS"]
+    assert progress[-1]["completed"] == 3
+    assert progress[-1]["total"] == 3
+
+
 def test_save_candidate_snapshot_rotates_old_files(tmp_path, monkeypatch):
     """F1 snapshots keep only the newest configured files."""
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)

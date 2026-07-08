@@ -1,4 +1,4 @@
-﻿"""F3. 진입 주문 모듈 (09:10 이후) — PRD §F3"""
+"""F3. 진입 주문 모듈 (09:10 이후) — PRD §F3"""
 
 import asyncio
 import os
@@ -26,6 +26,8 @@ F3_ENTRY_FIRST_FILL_SEC = float(os.getenv("F3_ENTRY_FIRST_FILL_SEC", "12.0"))
 F3_ENTRY_RETRY_FILL_SEC = float(os.getenv("F3_ENTRY_RETRY_FILL_SEC", "8.0"))
 F3_ENTRY_RETRY_DEADLINE = os.getenv("F3_ENTRY_RETRY_DEADLINE", "09:11:00")
 F3_PRE_ORDER_QUIET_SEC = float(os.getenv("F3_PRE_ORDER_QUIET_SEC", "1.5"))
+F3_RECHECK_MAX_ATTEMPTS = max(1, int(os.getenv("F3_RECHECK_MAX_ATTEMPTS", "3")))
+F3_RECHECK_RETRY_DELAY_SEC = float(os.getenv("F3_RECHECK_RETRY_DELAY_SEC", "1.0"))
 F3_FIRST_ORDER_AT = "IMMEDIATE"
 F3_PYRAMID_AT = os.getenv("F3_PYRAMID_AT", "09:10:40")
 F3_PYRAMID_FILL_SEC = float(os.getenv("F3_PYRAMID_FILL_SEC", "10.0"))
@@ -40,6 +42,7 @@ _BUY_PSBL_TR = {"REAL": "TTTC8908R", "PAPER": "VTTC8908R"}
 
 _last_fill_poll_summary: dict = {}
 _pending_buy_org_no: str = ""  # 매수 주문 후 저장, 취소 시 사용
+_CANDIDATE_RETRY_REASONS = {"ORDER_REJECTED", "BUYABLE_QTY_ZERO", "QTY_ZERO"}
 
 
 async def run(force: bool = False) -> None:
@@ -49,18 +52,63 @@ async def run(force: bool = False) -> None:
         await _run_single(force=force)
         return
 
-    picked = await _pick_final_entry_candidate(state.get())
-    if picked is None:
-        return
+    original_ticker = s.target_ticker
+    original_name = s.target_name
+    original_candidates = list(s.target_candidates or [])
+    rejected_tickers: set[str] = set()
 
-    s = state.get()
-    s.target_ticker = picked["ticker"]
-    s.target_name = picked["candidate"].get("name")
-    s.target_candidates = [picked["candidate"]]
-    await _run_single(force=force, picked=picked)
+    while True:
+        s = state.get()
+        s.target_ticker = original_ticker
+        s.target_name = original_name
+        s.target_candidates = original_candidates
+        picked = await _pick_final_entry_candidate(s, exclude_tickers=rejected_tickers)
+        if picked is None:
+            return
+
+        s = state.get()
+        s.target_ticker = picked["ticker"]
+        s.target_name = picked["candidate"].get("name")
+        s.target_candidates = [picked["candidate"]]
+        result = await _run_single(force=force, picked=picked, allow_candidate_retry=True)
+        if result not in _CANDIDATE_RETRY_REASONS:
+            return
+        rejected_tickers.add(picked["ticker"])
+        log(
+            "ENTRY_CANDIDATE_RETRY",
+            level="WARN",
+            ticker=picked["ticker"],
+            rejected_count=len(rejected_tickers),
+            remaining_candidates=[t for t in candidates if t not in rejected_tickers],
+            reason=result,
+        )
+        # force(재시작 캐치업)는 시각 제약 없이 후보를 소진할 때까지 재시도한다
+        if not force and not _before_deadline(_entry_retry_deadline()):
+            s = state.get()
+            s.day_skip = True
+            s.close_reason = "ENTRY_FAIL"
+            log(
+                "ENTRY_CANDIDATE_RETRY_SKIPPED",
+                level="WARN",
+                ticker=picked["ticker"],
+                rejected_count=len(rejected_tickers),
+                reason="DEADLINE_REACHED",
+            )
+            await notifier.send(
+                "ENTRY_FAIL",
+                level="WARN",
+                message=f"진입 재시도 마감시각 초과로 거래를 중단합니다. 마지막 거절={picked['ticker']}",
+                ticker=picked["ticker"],
+            )
+            await db.record_skip(
+                _today(),
+                "ENTRY_FAIL",
+                f"reason=CANDIDATE_RETRY_DEADLINE,rejected={','.join(sorted(rejected_tickers))}",
+            )
+            return
 
 
-async def _run_single(force: bool = False, picked: dict | None = None) -> None:
+async def _run_single(force: bool = False, picked: dict | None = None, allow_candidate_retry: bool = False) -> str | None:
     """
     갭 재검증 후 설정된 시각에 배정 수량 100% 시장가 매수,
     체결 확인 / 슬리피지 가드, 2차 30% 피라미딩을 수행한다.
@@ -81,12 +129,19 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
         await _run_dry_entry(ticker)
         return
 
+    existing_trade = await _existing_trade_for_today()
+    if existing_trade:
+        await _block_existing_trade(ticker, existing_trade)
+        return
+
     # ── 진입 직전 갭 재검증 ─────────────────────────────────────────
     if picked and picked.get("ticker") == ticker:
         expected_price = float(picked["expected_price"])
         prev_close = float(picked.get("prev_close") or 0)
     else:
         expected_price, prev_close = await _fetch_expected_price(ticker)
+        if prev_close <= 0:
+            prev_close = _candidate_prev_close(_candidate_for_ticker(s, ticker))
     if not expected_price or prev_close <= 0:
         s.day_skip = True
         s.close_reason = "GAP_RECHECK_UNAVAILABLE"
@@ -160,8 +215,6 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
         total_amount = int(cash * ALLOC_RATIO)
         total_qty = int(total_amount / expected_price) if expected_price else 0
     if total_qty == 0:
-        s.day_skip = True
-        s.close_reason = "INSUFFICIENT_BALANCE"
         _log_entry_blocked(
             ticker,
             "QTY_ZERO",
@@ -169,10 +222,16 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
             alloc_ratio=ALLOC_RATIO,
             order_price=expected_price,
             total_amount=total_amount,
+            candidate_retry=allow_candidate_retry,
         )
         log("INSUFFICIENT_BALANCE", level="WARN", ticker=ticker,
             cash=cash, alloc_ratio=ALLOC_RATIO, order_price=expected_price,
-            total_amount=total_amount, filter_count=0, reason="QTY_ZERO")
+            total_amount=total_amount, filter_count=0, reason="QTY_ZERO",
+            candidate_retry=allow_candidate_retry)
+        if allow_candidate_retry:
+            return "QTY_ZERO"
+        s.day_skip = True
+        s.close_reason = "INSUFFICIENT_BALANCE"
         await db.record_skip(
             _today(),
             "ENTRY_FAIL",
@@ -278,8 +337,6 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
             )
         if order_qty <= 0:
             await state.reset_to_idle("ENTRY_FAIL")
-            state.get().day_skip = True
-            state.get().close_reason = "INSUFFICIENT_BALANCE"
             _log_entry_blocked(
                 ticker,
                 "BUYABLE_QTY_ZERO",
@@ -290,6 +347,7 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
                 max_attempts=max_attempts,
                 nrcvb_buy_amt=buyable.get("nrcvb_buy_amt"),
                 ord_psbl_cash=buyable.get("ord_psbl_cash"),
+                candidate_retry=allow_candidate_retry,
             )
             log(
                 "INSUFFICIENT_BALANCE",
@@ -303,7 +361,12 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
                 nrcvb_buy_amt=buyable.get("nrcvb_buy_amt"),
                 ord_psbl_cash=buyable.get("ord_psbl_cash"),
                 reason="BUYABLE_QTY_ZERO",
+                candidate_retry=allow_candidate_retry,
             )
+            if allow_candidate_retry:
+                return "BUYABLE_QTY_ZERO"
+            state.get().day_skip = True
+            state.get().close_reason = "INSUFFICIENT_BALANCE"
             await notifier.send(
                 "ENTRY_FAIL",
                 level="WARN",
@@ -341,7 +404,8 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
         )
         if order_id == "UNKNOWN" or str(order_resp.get("rt_cd", "0")) != "0":
             await state.reset_to_idle("ENTRY_FAIL")
-            state.get().day_skip = True
+            if not allow_candidate_retry:
+                state.get().day_skip = True
             log(
                 "ENTRY_FAIL",
                 level="WARN",
@@ -355,7 +419,10 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
                 rt_cd=order_resp.get("rt_cd"),
                 msg_cd=order_resp.get("msg_cd"),
                 msg1=order_resp.get("msg1"),
+                candidate_retry=allow_candidate_retry,
             )
+            if allow_candidate_retry:
+                return "ORDER_REJECTED"
             await notifier.send(
                 "ENTRY_FAIL",
                 level="WARN",
@@ -370,7 +437,7 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
                 "ENTRY_FAIL",
                 f"order_id={order_id},reason=ORDER_REJECTED",
             )
-            return
+            return "ORDER_REJECTED"
 
         fill_deadline = _entry_fill_deadline(attempt, force)
         fill = await _poll_fill(order_id, deadline=fill_deadline, ticker=ticker)
@@ -516,6 +583,70 @@ async def _run_single(force: bool = False, picked: dict | None = None) -> None:
 
 # ── 헬퍼 ─────────────────────────────────────────────────────────────
 
+def _candidate_for_ticker(s: state.State, ticker: str) -> dict | None:
+    for candidate in s.target_candidates or []:
+        if isinstance(candidate, dict) and candidate.get("ticker") == ticker:
+            return candidate
+    return None
+
+
+def _candidate_prev_close(candidate: dict | None) -> float:
+    if not isinstance(candidate, dict):
+        return 0.0
+    prev_close = float(candidate.get("prev_close") or 0)
+    if prev_close > 0:
+        return prev_close
+    # 갭으로 유도할 때는 반드시 스냅샷 가격을 사용한다.
+    # 라이브 가격으로 유도하면 재계산 갭 ≡ 스냅샷 갭이 되어 GAP_CHANGED 가드가 무력화됨.
+    snapshot_price = float(candidate.get("expected_price") or 0)
+    gap_pct = candidate.get("gap_pct")
+    if snapshot_price > 0 and gap_pct is not None:
+        gap = float(gap_pct)
+        if gap > -0.99:
+            return snapshot_price / (1 + gap)
+    return 0.0
+
+
+async def _existing_trade_for_today() -> dict | None:
+    try:
+        return await db.get_trade_by_date(_today())
+    except RuntimeError:
+        return None
+
+
+async def _block_existing_trade(ticker: str, existing_trade: dict) -> None:
+    s = state.get()
+    status = existing_trade.get("status")
+    trade_id = int(existing_trade.get("id") or 0)
+    existing_ticker = existing_trade.get("ticker")
+    _log_entry_blocked(
+        ticker,
+        "TRADE_ALREADY_EXISTS",
+        trade_id=trade_id,
+        existing_ticker=existing_ticker,
+        existing_status=status,
+    )
+    log(
+        "TRADE_ALREADY_EXISTS",
+        level="WARN",
+        ticker=ticker,
+        trade_id=trade_id,
+        existing_ticker=existing_ticker,
+        existing_status=status,
+    )
+    if status == "OPEN":
+        entry_price = float(existing_trade.get("entry_price") or 0)
+        entry_qty = int(existing_trade.get("entry_qty") or 0)
+        s.target_ticker = existing_ticker or s.target_ticker
+        s.trade_id = trade_id
+        if entry_price > 0 and entry_qty > 0 and s.position_status != "HOLDING":
+            await state.set_holding(entry_price, entry_qty, s.order_id or "")
+            state.get().trade_id = trade_id
+        return
+    s.day_skip = True
+    s.close_reason = "TRADE_ALREADY_EXISTS"
+
+
 def _entry_candidate_tickers(s: state.State) -> list[str]:
     tickers: list[str] = []
     for candidate in s.target_candidates or []:
@@ -527,23 +658,25 @@ def _entry_candidate_tickers(s: state.State) -> list[str]:
     return tickers
 
 
-async def _pick_final_entry_candidate(s: state.State) -> dict | None:
+async def _pick_final_entry_candidate(s: state.State, exclude_tickers: set[str] | None = None) -> dict | None:
     candidates = s.target_candidates or []
     candidate_by_ticker = {
         c.get("ticker"): c
         for c in candidates
         if isinstance(c, dict) and c.get("ticker")
     }
-    tickers = _entry_candidate_tickers(s)
+    exclude_tickers = exclude_tickers or set()
+    tickers = [ticker for ticker in _entry_candidate_tickers(s) if ticker not in exclude_tickers]
     cash = await _fetch_available_cash()
     total_amount = int(cash * ALLOC_RATIO)
-    quote_results = await asyncio.gather(*(_fetch_expected_price(ticker) for ticker in tickers))
     valid: list[dict] = []
     blocked_reasons: list[str] = []
 
-    for rank, (ticker, quote) in enumerate(zip(tickers, quote_results), start=1):
-        expected_price, prev_close = quote
+    for rank, ticker in enumerate(tickers, start=1):
+        expected_price, prev_close = await _fetch_expected_price(ticker)
         candidate = candidate_by_ticker.get(ticker)
+        if prev_close <= 0:
+            prev_close = _candidate_prev_close(candidate)
         if candidate is None:
             log(
                 "F3_CANDIDATE_SNAPSHOT_MISSING",
@@ -809,16 +942,47 @@ async def _run_dry_entry(ticker: str) -> None:
 
 
 async def _fetch_expected_price(ticker: str) -> tuple[float, float]:
-    """예상 체결가 및 전일 종가 반환. 장전: antc_cnpr 우선."""
-    resp = await kis_rest.get(
-        "/uapi/domestic-stock/v1/quotations/inquire-price",
-        tr_id="FHKST01010100",
-        params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker},
-    )
-    out = resp.get("output", {})
-    expected = float(out.get("antc_cnpr") or out.get("stck_prpr") or 0)
-    prev_close = float(out.get("stck_prdy_clpr") or 0)
-    return expected, prev_close
+    """Return expected price and previous close. Before open, prefer antc_cnpr."""
+    last_expected = 0.0
+    last_prev_close = 0.0
+    for attempt in range(1, F3_RECHECK_MAX_ATTEMPTS + 1):
+        resp = await kis_rest.get(
+            "/uapi/domestic-stock/v1/quotations/inquire-price",
+            tr_id="FHKST01010100",
+            params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker},
+        )
+        out = resp.get("output", {}) if isinstance(resp.get("output"), dict) else {}
+        expected = float(out.get("antc_cnpr") or out.get("stck_prpr") or 0)
+        prev_close = float(out.get("stck_prdy_clpr") or 0)
+        last_expected, last_prev_close = expected, prev_close
+        if expected and prev_close > 0:
+            if attempt > 1:
+                log(
+                    "F3_RECHECK_QUOTE_RECOVERED",
+                    level="INFO",
+                    ticker=ticker,
+                    attempt=attempt,
+                    max_attempts=F3_RECHECK_MAX_ATTEMPTS,
+                    expected_price=expected,
+                    prev_close=prev_close,
+                )
+            return expected, prev_close
+        if attempt < F3_RECHECK_MAX_ATTEMPTS:
+            log(
+                "F3_RECHECK_QUOTE_RETRY",
+                level="WARN",
+                ticker=ticker,
+                attempt=attempt,
+                max_attempts=F3_RECHECK_MAX_ATTEMPTS,
+                retry_after_sec=F3_RECHECK_RETRY_DELAY_SEC,
+                expected_price=expected,
+                prev_close=prev_close,
+                rt_cd=resp.get("rt_cd"),
+                msg_cd=resp.get("msg_cd"),
+                msg1=resp.get("msg1"),
+            )
+            await asyncio.sleep(F3_RECHECK_RETRY_DELAY_SEC)
+    return last_expected, last_prev_close
 
 
 async def _fetch_current_price(ticker: str) -> float:

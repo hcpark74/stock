@@ -30,6 +30,7 @@ F1_RETRY_INTERVAL_SEC = int(os.getenv("F1_RETRY_INTERVAL_SEC", "5"))
 F1_SNAPSHOT_DIR = os.getenv("F1_SNAPSHOT_DIR", "data/f1_snapshots")
 F1_SNAPSHOT_KEEP = int(os.getenv("F1_SNAPSHOT_KEEP", "20"))
 F1_EXPECTED_QUOTE_CONCURRENCY = int(os.getenv("F1_EXPECTED_QUOTE_CONCURRENCY", "1"))
+F1_PROGRESS_LOG_EVERY = max(1, int(os.getenv("F1_PROGRESS_LOG_EVERY", "10")))
 F1_MARKET_INTERVAL_SEC = float(os.getenv("F1_MARKET_INTERVAL_SEC", "3.0"))
 
 # KIS ranking uses J+input market buckets, and expected-quote accepts J for both KOSPI/KOSDAQ.
@@ -218,6 +219,14 @@ async def _fetch_all_premarket() -> list[dict]:
             log("F1_MARKET_INTERVAL", level="INFO", market=market, sleep_sec=F1_MARKET_INTERVAL_SEC)
             await asyncio.sleep(F1_MARKET_INTERVAL_SEC)
 
+        log(
+            "F1_FETCH_START",
+            level="INFO",
+            market=market,
+            ranking_input=market_cfg["ranking_input"],
+            gap_min_pct=round(GAP_MIN * 100, 2),
+            gap_max_pct=round(HIGH_GAP_MAX * 100, 2),
+        )
         try:
             resp = await kis_rest.get(
                 "/uapi/domestic-stock/v1/ranking/fluctuation",
@@ -244,10 +253,24 @@ async def _fetch_all_premarket() -> list[dict]:
             continue
 
         output = resp.get("output", [])
+        log(
+            "F1_EXPECTED_QUOTE_START",
+            level="INFO",
+            market=market,
+            output_count=len(output),
+            concurrency=max(1, F1_EXPECTED_QUOTE_CONCURRENCY),
+        )
         candidates = await _parse_candidates_concurrently(
             output,
             market,
             market_cfg["quote_market"],
+        )
+        log(
+            "F1_EXPECTED_QUOTE_DONE",
+            level="INFO",
+            market=market,
+            output_count=len(output),
+            parsed_count=len(candidates),
         )
         parsed_count = len(candidates)
         zero_gap_count = sum(1 for c in candidates if abs(c.get("gap_pct", 0.0)) < 0.000001)
@@ -277,13 +300,32 @@ async def _parse_candidates_concurrently(
 ) -> list[dict]:
     concurrency = max(1, F1_EXPECTED_QUOTE_CONCURRENCY)
     semaphore = asyncio.Semaphore(concurrency)
+    total = len(items)
+    completed = 0
+    parsed_count = 0
+    progress_every = max(1, F1_PROGRESS_LOG_EVERY)
 
     async def parse_one(item: dict) -> dict | None:
+        nonlocal completed, parsed_count
         async with semaphore:
             try:
-                return await _parse_candidate(item, market, quote_market)
+                candidate = await _parse_candidate(item, market, quote_market)
             except (KeyError, ValueError, ZeroDivisionError):
-                return None
+                candidate = None
+        completed += 1
+        if candidate is not None:
+            parsed_count += 1
+        if total and (completed == total or completed % progress_every == 0):
+            log(
+                "F1_EXPECTED_QUOTE_PROGRESS",
+                level="INFO",
+                market=market,
+                completed=completed,
+                total=total,
+                parsed_count=parsed_count,
+                progress_pct=round((completed / total) * 100, 1),
+            )
+        return candidate
 
     parsed = await asyncio.gather(*(parse_one(item) for item in items))
     return [candidate for candidate in parsed if candidate is not None]

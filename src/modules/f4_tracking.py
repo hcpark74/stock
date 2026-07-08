@@ -3,6 +3,7 @@
 import asyncio
 import math
 import os
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -18,6 +19,11 @@ FORCE_TRAILING_MINUTE = 50
 STEP_SIZE      = 0.025   # 스텝 간격 +2.5% (params.json 로드 예정)
 STEP_TRAIL     = 0.015   # 스텝 기준 하락폭 -1.5%
 HARD_STOP_RATIO = 0.020  # Hard Stop -2.0% (trailing 미활성 구간 전용)
+F4_REST_BACKUP_ENABLED = os.getenv("F4_REST_BACKUP_ENABLED", "1") == "1"
+F4_REST_ONLY_WHEN_WS_STALE = os.getenv("F4_REST_ONLY_WHEN_WS_STALE", "1") == "1"
+F4_WS_STALE_SEC = float(os.getenv("F4_WS_STALE_SEC", "2.0"))
+F4_REST_POLL_INTERVAL_SEC = float(os.getenv("F4_REST_POLL_INTERVAL_SEC", "1.0"))
+F4_FILL_POLL_INTERVAL_SEC = float(os.getenv("F4_FILL_POLL_INTERVAL_SEC", "0.5"))
 
 _SELL_TR = {"REAL": "TTTC0011U", "PAPER": "VTTC0011U"}
 _CCLD_TR = {"REAL": "TTTC0081R", "PAPER": "VTTC0081R"}
@@ -45,17 +51,89 @@ async def run() -> None:
         return
 
     live.ws_connected = False
+    last_ws_tick_at = 0.0
+
+    def is_ws_stale() -> bool:
+        if not F4_REST_ONLY_WHEN_WS_STALE:
+            return True
+        if not live.ws_connected or last_ws_tick_at <= 0:
+            return True
+        return (time.monotonic() - last_ws_tick_at) >= F4_WS_STALE_SEC
 
     async def on_tick(tick: dict) -> None:
+        nonlocal last_ws_tick_at
         live.ws_connected = True
+        last_ws_tick_at = time.monotonic()
         live.push_tick(tick["price"], ticker=ticker)
         await _process_tick(tick["price"], spike_filter)
 
-    await kis_ws.subscribe(
+    ws_task = asyncio.create_task(kis_ws.subscribe(
         ticker, on_tick,
         stop_if=lambda: state.get().position_status != "HOLDING",
+    ))
+    tasks = [ws_task]
+    if F4_REST_BACKUP_ENABLED:
+        tasks.append(asyncio.create_task(_run_rest_price_backup(ticker, spike_filter, is_ws_stale)))
+    try:
+        # 모니터 태스크 하나가 예외로 죽어도 나머지 태스크는 유지한다.
+        # 정상 종료(HOLDING 해제)만 감시 종료로 취급.
+        pending = set(tasks)
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            crashed = [t for t in done if not t.cancelled() and t.exception() is not None]
+            for task in crashed:
+                log(
+                    "F4_MONITOR_TASK_ERROR",
+                    level="CRIT",
+                    ticker=ticker,
+                    error=repr(task.exception()),
+                    remaining_monitors=len(pending),
+                )
+            if len(crashed) < len(done):
+                break
+            if crashed and state.get().position_status == "HOLDING":
+                await notifier.send(
+                    "F4_MONITOR_TASK_ERROR",
+                    level="CRIT",
+                    message=(
+                        f"F4 모니터 태스크 비정상 종료. {ticker} "
+                        f"잔여 모니터={len(pending)}개"
+                    ),
+                    ticker=ticker,
+                )
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        live.ws_connected = False
+
+
+async def _run_rest_price_backup(ticker: str, spike_filter: SpikeFilter, is_ws_stale=None) -> None:
+    """REST backup price monitor while HOLDING. Poll only when WS is stale by default."""
+    log(
+        "F4_REST_BACKUP_START",
+        level="INFO",
+        ticker=ticker,
+        interval_sec=F4_REST_POLL_INTERVAL_SEC,
+        only_when_ws_stale=F4_REST_ONLY_WHEN_WS_STALE,
+        ws_stale_sec=F4_WS_STALE_SEC,
     )
-    live.ws_connected = False
+    while state.get().position_status == "HOLDING":
+        if is_ws_stale is not None and not is_ws_stale():
+            await asyncio.sleep(F4_REST_POLL_INTERVAL_SEC)
+            continue
+        try:
+            price = await _fetch_current_price(ticker)
+            if price > 0:
+                live.push_tick(price, ticker=ticker)
+                await _process_tick(price, spike_filter)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # 백업 폴러가 죽으면 WS까지 함께 취소되므로 절대 전파하지 않는다
+            log("F4_REST_BACKUP_ERROR", level="WARN", ticker=ticker, error=repr(e))
+        await asyncio.sleep(F4_REST_POLL_INTERVAL_SEC)
 
 
 async def _process_tick(price: float, spike_filter: SpikeFilter) -> None:
@@ -200,6 +278,16 @@ async def _run_dry_ticks(ticker: str, spike_filter: SpikeFilter) -> None:
     )
 
 
+async def _fetch_current_price(ticker: str) -> float:
+    resp = await kis_rest.get(
+        "/uapi/domestic-stock/v1/quotations/inquire-price",
+        tr_id="FHKST01010100",
+        params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker},
+    )
+    out = resp.get("output", {}) if isinstance(resp.get("output"), dict) else {}
+    return float(out.get("stck_prpr") or out.get("antc_cnpr") or 0)
+
+
 async def _send_sell(ticker: str, qty: int, mode: str) -> dict:
     return await kis_rest.post(
         "/uapi/domestic-stock/v1/trading/order-cash",
@@ -218,7 +306,8 @@ async def _send_sell(ticker: str, qty: int, mode: str) -> dict:
 async def _poll_fill(order_id: str, timeout_sec: int = 30) -> dict | None:
     mode = os.getenv("KIS_MODE", "PAPER")
     today = datetime.now(KST).strftime("%Y%m%d")
-    for _ in range(timeout_sec):
+    attempts = max(1, round(timeout_sec / F4_FILL_POLL_INTERVAL_SEC))
+    for _ in range(attempts):
         try:
             resp = await kis_rest.get(
                 "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
@@ -249,5 +338,5 @@ async def _poll_fill(order_id: str, timeout_sec: int = 30) -> dict | None:
                         return {"fill_price": round(tot_amt / tot_qty), "fill_qty": tot_qty}
         except Exception:
             pass
-        await asyncio.sleep(1)
+        await asyncio.sleep(F4_FILL_POLL_INTERVAL_SEC)
     return None

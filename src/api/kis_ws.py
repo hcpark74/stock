@@ -27,14 +27,19 @@ async def subscribe(
     ws_url = os.getenv("KIS_WS_URL", "ws://ops.koreainvestment.com:31000")
     consec = 0
     interval = _RETRY_INTERVAL_BASE
-
-    await auth.refresh_ws_key()  # OAuth token과 별개인 WS 전용 접속키 1회 발급
+    ws_key_ready = False
 
     while True:
         if stop_if and stop_if():
             return
 
         try:
+            if not ws_key_ready:
+                # OAuth token과 별개인 WS 전용 접속키 1회 발급.
+                # 발급 실패가 subscribe 밖으로 전파되면 F4 모니터링 전체가 죽으므로
+                # 재연결 루프 안에서 백오프와 함께 재시도한다.
+                await auth.refresh_ws_key()
+                ws_key_ready = True
             async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10) as ws:
                 log("WS_CONNECTED", level="INFO", ticker=ticker, consec_failures=consec)
                 consec = 0
