@@ -362,3 +362,364 @@ async def test_trading_day_rollover_resets_chain_flags(monkeypatch):
     assert main._f1_result == []
     assert main._f2_done is False
     assert main._f3_started is False
+
+async def test_recover_state_uses_db_open_trade_when_state_file_missing(monkeypatch):
+    events = []
+    send = AsyncMock()
+    persist = AsyncMock()
+    s = state_mod.get()
+    s.position_status = "IDLE"
+
+    today = main.datetime.now(main.KST).strftime("%Y%m%d")
+    monkeypatch.setattr(main.state, "load", lambda _state_dir: None)
+    monkeypatch.setattr(
+        main.db,
+        "get_trade_by_date",
+        AsyncMock(return_value={
+            "id": 77,
+            "date": today,
+            "ticker": "005930",
+            "entry_price": 75000.0,
+            "entry_qty": 10,
+            "entry_at": "2026-07-02T09:01:00+09:00",
+            "high_price": 78000.0,
+            "highest_step": 0.05,
+            "status": "OPEN",
+        }),
+    )
+    monkeypatch.setattr(main.state, "persist", persist)
+    monkeypatch.setattr(
+        main.kis_rest,
+        "get",
+        AsyncMock(return_value={"output1": [{"pdno": "005930", "hldg_qty": "10"}]}),
+    )
+    monkeypatch.setattr(main.notifier, "send", send)
+    monkeypatch.setattr(main.logger, "log", lambda event, **kwargs: events.append((event, kwargs)))
+
+    await main._recover_state()
+
+    assert s.position_status == "HOLDING"
+    assert s.target_ticker == "005930"
+    assert s.entry_price == 75000.0
+    assert s.remaining_qty == 10
+    assert s.high_price == 78000.0
+    assert s.highest_step == 0.05
+    assert s.trailing_active is True
+    assert s.trade_id == 77
+    persist.assert_awaited_once()
+    send.assert_awaited_once()
+    assert send.await_args.args[0] == "PROCESS_RESTART_DETECTED"
+    restart = [kwargs for event, kwargs in events if event == "PROCESS_RESTART_DETECTED"][-1]
+    assert restart["recovery_source"] == "DB_OPEN_TRADE"
+
+
+async def test_recover_state_prefers_holding_state_file_over_db(monkeypatch):
+    send = AsyncMock()
+    get_trade = AsyncMock()
+    s = state_mod.get()
+    today = main.datetime.now(main.KST).strftime("%Y%m%d")
+    data = {
+        "date": today,
+        "ticker": "000660",
+        "entry_price": 120000.0,
+        "entry_qty": 3,
+        "remaining_qty": 3,
+        "high_price": 121000.0,
+        "trailing_active": False,
+        "highest_step": 0.0,
+        "trade_id": 12,
+        "position_status": "HOLDING",
+    }
+
+    monkeypatch.setattr(main.state, "load", lambda _state_dir: data)
+    monkeypatch.setattr(main.db, "get_trade_by_date", get_trade)
+    monkeypatch.setattr(
+        main.kis_rest,
+        "get",
+        AsyncMock(return_value={"output1": [{"pdno": "000660", "hldg_qty": "3"}]}),
+    )
+    monkeypatch.setattr(main.notifier, "send", send)
+    monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
+
+    await main._recover_state()
+
+    assert s.position_status == "HOLDING"
+    assert s.target_ticker == "000660"
+    assert s.trade_id == 12
+    get_trade.assert_not_awaited()
+    send.assert_awaited_once()
+
+async def test_recover_state_terminal_state_file_skips_db_fallback(monkeypatch):
+    events = []
+    get_trade = AsyncMock(return_value={
+        "id": 88,
+        "ticker": "005930",
+        "entry_price": 75000.0,
+        "entry_qty": 10,
+        "status": "OPEN",
+    })
+    today = main.datetime.now(main.KST).strftime("%Y%m%d")
+    data = {
+        "date": today,
+        "ticker": "005930",
+        "entry_price": 75000.0,
+        "entry_qty": 10,
+        "remaining_qty": 0,
+        "position_status": "CLOSED",
+        "close_reason": "TRAILING",
+    }
+
+    monkeypatch.setattr(main.state, "load", lambda _state_dir: data)
+    monkeypatch.setattr(main.db, "get_trade_by_date", get_trade)
+    monkeypatch.setattr(main.logger, "log", lambda event, **kwargs: events.append((event, kwargs)))
+
+    await main._recover_state()
+
+    assert state_mod.get().position_status == "IDLE"
+    get_trade.assert_not_awaited()
+    skipped = [kwargs for event, kwargs in events if event == "PROCESS_RESTART_DETECTED"][-1]
+    assert skipped["recovered_status"] == "STATE_FILE_TERMINAL_SKIP_DB_FALLBACK"
+
+
+async def test_recover_state_db_open_trade_without_actual_holding_does_not_restore(monkeypatch):
+    events = []
+    send = AsyncMock()
+    persist = AsyncMock()
+    today = main.datetime.now(main.KST).strftime("%Y%m%d")
+
+    monkeypatch.setattr(main.state, "load", lambda _state_dir: None)
+    monkeypatch.setattr(
+        main.db,
+        "get_trade_by_date",
+        AsyncMock(return_value={
+            "id": 77,
+            "date": today,
+            "ticker": "005930",
+            "entry_price": 75000.0,
+            "entry_qty": 10,
+            "entry_at": "2026-07-02T09:01:00+09:00",
+            "high_price": 78000.0,
+            "highest_step": 0.05,
+            "pyramided": 0,
+            "status": "OPEN",
+        }),
+    )
+    monkeypatch.setattr(
+        main.kis_rest,
+        "get",
+        AsyncMock(return_value={"output1": [{"pdno": "005930", "hldg_qty": "0"}]}),
+    )
+    monkeypatch.setattr(main.state, "persist", persist)
+    monkeypatch.setattr(main.notifier, "send", send)
+    monkeypatch.setattr(main.logger, "log", lambda event, **kwargs: events.append((event, kwargs)))
+
+    await main._recover_state()
+
+    assert state_mod.get().position_status == "IDLE"
+    persist.assert_not_awaited()
+    send.assert_awaited_once()
+    blocked = [kwargs for event, kwargs in events if event == "PROCESS_RESTART_DETECTED"][-1]
+    assert blocked["recovered_status"] == "DB_OPEN_TRADE_NO_ACTUAL_HOLDING"
+
+
+async def test_recover_state_db_open_trade_uses_actual_holding_qty_for_pyramid(monkeypatch):
+    persist = AsyncMock()
+    today = main.datetime.now(main.KST).strftime("%Y%m%d")
+
+    monkeypatch.setattr(main.state, "load", lambda _state_dir: None)
+    monkeypatch.setattr(
+        main.db,
+        "get_trade_by_date",
+        AsyncMock(return_value={
+            "id": 77,
+            "date": today,
+            "ticker": "005930",
+            "entry_price": 75000.0,
+            "entry_qty": 70,
+            "entry_at": "2026-07-02T09:01:00+09:00",
+            "high_price": 78000.0,
+            "highest_step": 0.05,
+            "pyramided": 1,
+            "status": "OPEN",
+        }),
+    )
+    monkeypatch.setattr(
+        main.kis_rest,
+        "get",
+        AsyncMock(return_value={"output1": [{"pdno": "005930", "hldg_qty": "100"}]}),
+    )
+    monkeypatch.setattr(main.state, "persist", persist)
+    monkeypatch.setattr(main.notifier, "send", AsyncMock())
+    monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
+
+    await main._recover_state()
+
+    assert state_mod.get().position_status == "HOLDING"
+    assert state_mod.get().entry_qty == 100
+    assert state_mod.get().remaining_qty == 100
+    persist.assert_awaited_once()
+
+async def test_recover_state_idle_state_without_qty_allows_db_fallback(monkeypatch):
+    persist = AsyncMock()
+    today = main.datetime.now(main.KST).strftime("%Y%m%d")
+    data = {
+        "date": today,
+        "ticker": None,
+        "position_status": "IDLE",
+    }
+
+    monkeypatch.setattr(main.state, "load", lambda _state_dir: data)
+    monkeypatch.setattr(
+        main.db,
+        "get_trade_by_date",
+        AsyncMock(return_value={
+            "id": 77,
+            "date": today,
+            "ticker": "005930",
+            "entry_price": 75000.0,
+            "entry_qty": 10,
+            "entry_at": "2026-07-02T09:01:00+09:00",
+            "high_price": 78000.0,
+            "highest_step": 0.05,
+            "pyramided": 0,
+            "status": "OPEN",
+        }),
+    )
+    monkeypatch.setattr(
+        main.kis_rest,
+        "get",
+        AsyncMock(return_value={"output1": [{"pdno": "005930", "hldg_qty": "10"}]}),
+    )
+    monkeypatch.setattr(main.state, "persist", persist)
+    monkeypatch.setattr(main.notifier, "send", AsyncMock())
+    monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
+
+    await main._recover_state()
+
+    assert state_mod.get().position_status == "HOLDING"
+    assert state_mod.get().remaining_qty == 10
+    persist.assert_awaited_once()
+
+async def test_recover_state_stale_state_file_allows_today_db_fallback(monkeypatch):
+    send = AsyncMock()
+    persist = AsyncMock()
+    today = main.datetime.now(main.KST).strftime("%Y%m%d")
+    data = {
+        "date": "20260701",
+        "ticker": "000660",
+        "remaining_qty": 5,
+        "position_status": "HOLDING",
+    }
+
+    monkeypatch.setattr(main.state, "load", lambda _state_dir: data)
+    monkeypatch.setattr(
+        main.db,
+        "get_trade_by_date",
+        AsyncMock(return_value={
+            "id": 77,
+            "date": today,
+            "ticker": "005930",
+            "entry_price": 75000.0,
+            "entry_qty": 10,
+            "entry_at": "2026-07-02T09:01:00+09:00",
+            "high_price": 78000.0,
+            "highest_step": 0.05,
+            "pyramided": 0,
+            "status": "OPEN",
+        }),
+    )
+    monkeypatch.setattr(
+        main.kis_rest,
+        "get",
+        AsyncMock(return_value={"output1": [{"pdno": "005930", "hldg_qty": "10"}]}),
+    )
+    monkeypatch.setattr(main.state, "persist", persist)
+    monkeypatch.setattr(main.notifier, "send", send)
+    monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
+
+    await main._recover_state()
+
+    assert state_mod.get().position_status == "HOLDING"
+    assert state_mod.get().target_ticker == "005930"
+    assert send.await_count == 2
+    assert send.await_args_list[0].args[0] == "STALE_POSITION_DETECTED"
+    assert send.await_args_list[1].args[0] == "PROCESS_RESTART_DETECTED"
+    persist.assert_awaited_once()
+
+async def test_recover_state_holding_state_rt_cd_error_sends_alert_and_skips_restore(monkeypatch):
+    events = []
+    send = AsyncMock()
+    today = main.datetime.now(main.KST).strftime("%Y%m%d")
+    data = {
+        "date": today,
+        "ticker": "000660",
+        "entry_price": 120000.0,
+        "entry_qty": 3,
+        "remaining_qty": 3,
+        "high_price": 121000.0,
+        "trailing_active": False,
+        "highest_step": 0.0,
+        "trade_id": 12,
+        "position_status": "HOLDING",
+    }
+
+    monkeypatch.setattr(main.state, "load", lambda _state_dir: data)
+    monkeypatch.setattr(
+        main.kis_rest,
+        "get",
+        AsyncMock(return_value={"rt_cd": "1", "msg_cd": "EGW00123", "msg1": "token expired"}),
+    )
+    monkeypatch.setattr(main.notifier, "send", send)
+    monkeypatch.setattr(main.logger, "log", lambda event, **kwargs: events.append((event, kwargs)))
+
+    await main._recover_state()
+
+    assert state_mod.get().position_status == "IDLE"
+    send.assert_awaited_once()
+    assert send.await_args.args[0] == "PROCESS_RESTART_DETECTED"
+    statuses = [kwargs.get("recovered_status") for event, kwargs in events if event == "PROCESS_RESTART_DETECTED"]
+    assert "HOLDING_VERIFY_FAILED" in statuses
+    assert "HOLDING_VERIFY_FAILED_SKIP_RESTORE" in statuses
+
+
+async def test_recover_state_db_open_trade_rt_cd_error_sends_alert_and_skips_restore(monkeypatch):
+    events = []
+    send = AsyncMock()
+    persist = AsyncMock()
+    today = main.datetime.now(main.KST).strftime("%Y%m%d")
+
+    monkeypatch.setattr(main.state, "load", lambda _state_dir: None)
+    monkeypatch.setattr(
+        main.db,
+        "get_trade_by_date",
+        AsyncMock(return_value={
+            "id": 77,
+            "date": today,
+            "ticker": "005930",
+            "entry_price": 75000.0,
+            "entry_qty": 10,
+            "entry_at": "2026-07-02T09:01:00+09:00",
+            "high_price": 78000.0,
+            "highest_step": 0.05,
+            "pyramided": 0,
+            "status": "OPEN",
+        }),
+    )
+    monkeypatch.setattr(
+        main.kis_rest,
+        "get",
+        AsyncMock(return_value={"rt_cd": "1", "msg_cd": "EGW00123", "msg1": "token expired"}),
+    )
+    monkeypatch.setattr(main.state, "persist", persist)
+    monkeypatch.setattr(main.notifier, "send", send)
+    monkeypatch.setattr(main.logger, "log", lambda event, **kwargs: events.append((event, kwargs)))
+
+    await main._recover_state()
+
+    assert state_mod.get().position_status == "IDLE"
+    persist.assert_not_awaited()
+    send.assert_awaited()
+    assert send.await_args_list[0].args[0] == "PROCESS_RESTART_DETECTED"
+    statuses = [kwargs.get("recovered_status") for event, kwargs in events if event == "PROCESS_RESTART_DETECTED"]
+    assert "HOLDING_VERIFY_FAILED" in statuses
+    assert "DB_OPEN_TRADE_NO_ACTUAL_HOLDING" in statuses

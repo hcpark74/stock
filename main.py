@@ -18,7 +18,7 @@ if os.getenv("DRY_RUN", "0") == "1":
 import uvicorn  # noqa: E402
 
 from src import db, notifier, state  # noqa: E402
-from src.api import auth, server  # noqa: E402
+from src.api import auth, kis_rest, server  # noqa: E402
 from src.modules import f1_filter, f2_lockup, f3_entry, f4_tracking, f5_timeout  # noqa: E402
 from src.scheduler import (  # noqa: E402
     F1_H,
@@ -46,6 +46,7 @@ F2_RETRY_F1_INTERVAL_SEC = int(
     os.getenv("F2_RETRY_F1_INTERVAL_SEC", str(f1_filter.F1_RETRY_INTERVAL_SEC))
 )
 F2_RETRY_F1_MIN_REMAINING_SEC = int(os.getenv("F2_RETRY_F1_MIN_REMAINING_SEC", "2"))
+_BAL_TR = {"REAL": "TTTC8434R", "PAPER": "VTTC8434R"}
 
 # F1 결과를 F2에 전달하기 위한 세션 변수
 _f1_result: list[dict] = []
@@ -270,37 +271,223 @@ async def _run_catchup() -> None:
 
 async def _recover_state() -> None:
     """
-    프로세스 재시작 시 today_state.json으로 포지션 복구 (PRD §6-7).
+    프로세스 재시작 시 today_state.json을 우선 복구하고, 필요하면 DB OPEN trade를 보조로 복구한다.
     """
     data = state.load(STATE_DIR)
     today = datetime.now(KST).strftime("%Y%m%d")
 
-    if data is None:
-        # 상태 파일 없음 → KIS 잔고 직접 조회
-        # TODO: KIS 잔고 조회 후 보유 종목 있으면 즉시 청산
-        return
+    if data is not None and data.get("date") != today:
+        await notifier.send(
+            "STALE_POSITION_DETECTED",
+            level="CRIT",
+            message=f"전일 포지션 잔류 의심. date={data.get('date')}",
+        )
+        data = None
 
-    if data.get("date") != today:
-        await notifier.send("STALE_POSITION_DETECTED", level="CRIT",
-                            message=f"전일 포지션 잔류 의심. date={data.get('date')}")
-        return
-
-    if data.get("position_status") == "HOLDING":
-        # TODO: KIS 잔고 조회 → 실제 보유 수량 확인
-        actual_qty = data.get("remaining_qty", 0)
+    if data is not None and data.get("position_status") == "HOLDING":
+        actual_qty = await _verified_holding_qty(data.get("ticker"), "STATE_FILE")
         if actual_qty and actual_qty > 0:
+            data = dict(data)
+            data["entry_qty"] = actual_qty
+            data["remaining_qty"] = actual_qty
             state.restore_from(data)
-            logger.log("PROCESS_RESTART_DETECTED", level="CRIT",
-                       recovered_status="HOLDING_RESUMED", actual_qty=actual_qty)
+            logger.log(
+                "PROCESS_RESTART_DETECTED",
+                level="CRIT",
+                recovered_status="HOLDING_RESUMED",
+                recovery_source="STATE_FILE",
+                actual_qty=actual_qty,
+            )
             await notifier.send(
-                "PROCESS_RESTART_DETECTED", level="CRIT",
+                "PROCESS_RESTART_DETECTED",
+                level="CRIT",
                 message=f"재시작 감지. 포지션 복구: {data.get('ticker')} {actual_qty}주",
                 ticker=data.get("ticker"),
             )
+            return
+        if actual_qty is None:
+            logger.log(
+                "PROCESS_RESTART_DETECTED",
+                level="CRIT",
+                recovered_status="HOLDING_VERIFY_FAILED_SKIP_RESTORE",
+                recovery_source="STATE_FILE",
+                actual_qty=actual_qty,
+            )
         else:
-            logger.log("PROCESS_RESTART_DETECTED", level="WARN",
-                       recovered_status="ALREADY_CLOSED", actual_qty=0)
+            logger.log(
+                "PROCESS_RESTART_DETECTED",
+                level="WARN",
+                recovered_status="NO_ACTUAL_HOLDING",
+                recovery_source="STATE_FILE",
+                actual_qty=actual_qty,
+            )
+        return
 
+    if data is not None and _is_terminal_state(data):
+        logger.log(
+            "PROCESS_RESTART_DETECTED",
+            level="WARN",
+            recovered_status="STATE_FILE_TERMINAL_SKIP_DB_FALLBACK",
+            recovery_source="STATE_FILE",
+            position_status=data.get("position_status"),
+            remaining_qty=data.get("remaining_qty"),
+        )
+        return
+
+    await _recover_open_trade_from_db(today)
+
+
+def _is_terminal_state(data: dict) -> bool:
+    status = data.get("position_status")
+    remaining_qty = data.get("remaining_qty")
+    return status == "CLOSED" or (
+        remaining_qty is not None and int(float(remaining_qty)) <= 0
+    )
+
+
+async def _verified_holding_qty(ticker: str | None, recovery_source: str) -> int | None:
+    if not ticker:
+        logger.log(
+            "PROCESS_RESTART_DETECTED",
+            level="CRIT",
+            recovered_status="HOLDING_VERIFY_SKIPPED",
+            recovery_source=recovery_source,
+            reason="MISSING_TICKER",
+        )
+        return None
+
+    mode = os.getenv("KIS_MODE", "PAPER")
+    try:
+        resp = await kis_rest.get(
+            "/uapi/domestic-stock/v1/trading/inquire-balance",
+            tr_id=_BAL_TR[mode],
+            params=kis_rest.balance_inquiry_params(),
+        )
+    except Exception as exc:
+        logger.log(
+            "PROCESS_RESTART_DETECTED",
+            level="CRIT",
+            recovered_status="HOLDING_VERIFY_FAILED",
+            recovery_source=recovery_source,
+            ticker=ticker,
+            error=repr(exc),
+        )
+        await notifier.send(
+            "PROCESS_RESTART_DETECTED",
+            level="CRIT",
+            message=f"재시작 복구 전 잔고 확인 실패: {ticker}. 수동 확인 필요.",
+            ticker=ticker,
+        )
+        return None
+
+    if str(resp.get("rt_cd", "0")) != "0":
+        logger.log(
+            "PROCESS_RESTART_DETECTED",
+            level="CRIT",
+            recovered_status="HOLDING_VERIFY_FAILED",
+            recovery_source=recovery_source,
+            ticker=ticker,
+            rt_cd=resp.get("rt_cd"),
+            msg_cd=resp.get("msg_cd"),
+            msg1=resp.get("msg1"),
+        )
+        await notifier.send(
+            "PROCESS_RESTART_DETECTED",
+            level="CRIT",
+            message=(
+                f"재시작 복구 전 잔고 확인 실패: {ticker}. "
+                f"{resp.get('msg_cd') or ''} {resp.get('msg1') or ''}. 수동 확인 필요."
+            ),
+            ticker=ticker,
+        )
+        return None
+
+    for item in resp.get("output1", []):
+        if isinstance(item, dict) and item.get("pdno") == ticker:
+            return int(float(item.get("hldg_qty") or 0))
+    return 0
+
+
+async def _recover_open_trade_from_db(today: str) -> None:
+    """Recover HOLDING state from today's OPEN trade when KIS confirms the holding."""
+    try:
+        trade = await db.get_trade_by_date(today)
+    except RuntimeError:
+        return
+    if not trade or trade.get("status") != "OPEN":
+        return
+
+    entry_price = float(trade.get("entry_price") or 0)
+    entry_qty = int(trade.get("entry_qty") or 0)
+    if entry_price <= 0 or entry_qty <= 0:
+        logger.log(
+            "PROCESS_RESTART_DETECTED",
+            level="WARN",
+            recovered_status="DB_OPEN_TRADE_INCOMPLETE",
+            recovery_source="DB_OPEN_TRADE",
+            trade_id=trade.get("id"),
+            ticker=trade.get("ticker"),
+        )
+        return
+
+    actual_qty = await _verified_holding_qty(trade.get("ticker"), "DB_OPEN_TRADE")
+    if not actual_qty or actual_qty <= 0:
+        logger.log(
+            "PROCESS_RESTART_DETECTED",
+            level="CRIT",
+            recovered_status="DB_OPEN_TRADE_NO_ACTUAL_HOLDING",
+            recovery_source="DB_OPEN_TRADE",
+            trade_id=trade.get("id"),
+            ticker=trade.get("ticker"),
+            db_entry_qty=entry_qty,
+            actual_qty=actual_qty,
+            pyramided=trade.get("pyramided"),
+        )
+        await notifier.send(
+            "PROCESS_RESTART_DETECTED",
+            level="CRIT",
+            message=f"DB OPEN trade가 있지만 실제 보유 수량이 없습니다: {trade.get('ticker')}. 자동 복구 중단.",
+            ticker=trade.get("ticker"),
+        )
+        return
+
+    highest_step = float(trade.get("highest_step") or 0.0)
+    restore_data = {
+        "date": today,
+        "ticker": trade.get("ticker"),
+        "name": None,
+        "target_candidates": [],
+        "entry_price": entry_price,
+        "entry_at": trade.get("entry_at"),
+        "entry_qty": actual_qty,
+        "remaining_qty": actual_qty,
+        "high_price": trade.get("high_price") or entry_price,
+        "trailing_active": highest_step >= f4_tracking.STEP_SIZE,
+        "highest_step": highest_step,
+        "trade_id": int(trade.get("id") or 0),
+        "position_status": "HOLDING",
+        "close_reason": None,
+    }
+    state.restore_from(restore_data)
+    await state.persist(STATE_DIR, today)
+    logger.log(
+        "PROCESS_RESTART_DETECTED",
+        level="CRIT",
+        recovered_status="HOLDING_RESUMED",
+        recovery_source="DB_OPEN_TRADE",
+        trade_id=restore_data["trade_id"],
+        actual_qty=actual_qty,
+        db_entry_qty=entry_qty,
+        pyramided=trade.get("pyramided"),
+        high_price=restore_data["high_price"],
+        highest_step=highest_step,
+    )
+    await notifier.send(
+        "PROCESS_RESTART_DETECTED",
+        level="CRIT",
+        message=f"DB 기준 포지션 복구: {trade.get('ticker')} {actual_qty}주",
+        ticker=trade.get("ticker"),
+    )
 
 # ── PID 파일 관리 ────────────────────────────────────────────────────
 

@@ -24,9 +24,11 @@ F4_REST_ONLY_WHEN_WS_STALE = os.getenv("F4_REST_ONLY_WHEN_WS_STALE", "1") == "1"
 F4_WS_STALE_SEC = float(os.getenv("F4_WS_STALE_SEC", "2.0"))
 F4_REST_POLL_INTERVAL_SEC = float(os.getenv("F4_REST_POLL_INTERVAL_SEC", "1.0"))
 F4_FILL_POLL_INTERVAL_SEC = float(os.getenv("F4_FILL_POLL_INTERVAL_SEC", "0.5"))
+F4_STATE_PERSIST_INTERVAL_SEC = float(os.getenv("F4_STATE_PERSIST_INTERVAL_SEC", "1.0"))
 
 _SELL_TR = {"REAL": "TTTC0011U", "PAPER": "VTTC0011U"}
 _CCLD_TR = {"REAL": "TTTC0081R", "PAPER": "VTTC0081R"}
+_last_state_persist_at = 0.0
 
 
 async def run() -> None:
@@ -145,6 +147,9 @@ async def _process_tick(price: float, spike_filter: SpikeFilter) -> None:
         return
 
     entry = s.entry_price or 0.0
+    before_high_price = s.high_price
+    before_highest_step = s.highest_step
+    before_trailing_active = s.trailing_active
     state.update_high_price(price)
 
     now = datetime.now(KST)
@@ -162,6 +167,10 @@ async def _process_tick(price: float, spike_filter: SpikeFilter) -> None:
     if late and not s.trailing_active:
         s.trailing_active = True
 
+    high_changed = s.high_price != before_high_price
+    step_changed = s.highest_step != before_highest_step
+    trailing_activated = s.trailing_active and not before_trailing_active
+
     # [우선순위 1] Hard Stop (-2.0%): trailing 미활성 구간에서만 유효
     if not s.trailing_active and price <= entry * (1 - HARD_STOP_RATIO):
         if await state.set_closed("HARD_STOP"):
@@ -174,7 +183,70 @@ async def _process_tick(price: float, spike_filter: SpikeFilter) -> None:
         if price <= stop:
             if await state.set_closed("TRAILING"):
                 await _execute_close(price, "TRAILING")
+            return
 
+    if high_changed or step_changed or trailing_activated:
+        await _persist_tracking_state(force=step_changed or trailing_activated)
+
+async def _persist_tracking_state(force: bool = False) -> bool:
+    """Persist in-trade trailing progress with a small throttle."""
+    global _last_state_persist_at
+    s = state.get()
+    if s.position_status != "HOLDING" or not s.trade_id:
+        return False
+
+    now_mono = time.monotonic()
+    if (
+        not force
+        and F4_STATE_PERSIST_INTERVAL_SEC > 0
+        and now_mono - _last_state_persist_at < F4_STATE_PERSIST_INTERVAL_SEC
+    ):
+        return False
+
+    state_saved = False
+    db_saved = False
+    try:
+        await state.persist(
+            os.getenv("STATE_DIR", "data/state"),
+            datetime.now(KST).strftime("%Y%m%d"),
+        )
+        state_saved = True
+    except Exception as exc:
+        log(
+            "F4_STATE_PERSIST_ERROR",
+            level="WARN",
+            ticker=s.target_ticker,
+            error=repr(exc),
+        )
+
+    try:
+        await db.update_trade_progress(s.trade_id, s.high_price, s.highest_step)
+        db_saved = True
+    except Exception as exc:
+        log(
+            "F4_DB_PROGRESS_ERROR",
+            level="WARN",
+            ticker=s.target_ticker,
+            trade_id=s.trade_id,
+            error=repr(exc),
+        )
+
+    if not (state_saved or db_saved):
+        return False
+
+    _last_state_persist_at = now_mono
+    log(
+        "F4_STATE_PERSISTED",
+        level="DEBUG",
+        ticker=s.target_ticker,
+        high_price=s.high_price,
+        highest_step=s.highest_step,
+        trailing_active=s.trailing_active,
+        state_saved=state_saved,
+        db_saved=db_saved,
+        force=force,
+    )
+    return True
 
 async def _execute_close(price: float, reason: str) -> None:
     """잔여 전량 시장가 매도 후 로그/알림/DB 기록."""

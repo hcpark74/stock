@@ -247,6 +247,23 @@ async def mark_pyramided(trade_id: int) -> None:
     await conn.commit()
 
 
+
+async def update_trade_progress(
+    trade_id: int,
+    high_price: float | None,
+    highest_step: float,
+) -> None:
+    """Update in-trade high/trailing progress for restart recovery."""
+    now = _now()
+    conn = get()
+    await conn.execute(
+        """UPDATE trades
+           SET high_price=?, highest_step=?, updated_at=?
+           WHERE id=? AND status='OPEN'""",
+        (high_price, highest_step, now, trade_id),
+    )
+    await conn.commit()
+
 async def close_trade(
     trade_id: int,
     exit_price: float,

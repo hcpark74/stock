@@ -353,6 +353,7 @@ def _patch_transient(monkeypatch, fail_count, exc_factory):
 
 @pytest.mark.asyncio
 async def test_get_retries_transient_error_then_succeeds(monkeypatch):
+    monkeypatch.setattr(kis_rest, "_MAX_TRANSIENT_RETRIES", 2)
     _patch_transient(monkeypatch, 2, lambda: httpx.ReadTimeout("timed out"))
 
     resp = await kis_rest.get("/test")

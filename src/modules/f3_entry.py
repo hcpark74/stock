@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -28,6 +29,7 @@ F3_ENTRY_RETRY_DEADLINE = os.getenv("F3_ENTRY_RETRY_DEADLINE", "09:11:00")
 F3_PRE_ORDER_QUIET_SEC = float(os.getenv("F3_PRE_ORDER_QUIET_SEC", "1.5"))
 F3_RECHECK_MAX_ATTEMPTS = max(1, int(os.getenv("F3_RECHECK_MAX_ATTEMPTS", "3")))
 F3_RECHECK_RETRY_DELAY_SEC = float(os.getenv("F3_RECHECK_RETRY_DELAY_SEC", "1.0"))
+F3_RECHECK_BATCH_TIMEOUT_SEC = float(os.getenv("F3_RECHECK_BATCH_TIMEOUT_SEC", "0"))
 F3_FIRST_ORDER_AT = "IMMEDIATE"
 F3_PYRAMID_AT = os.getenv("F3_PYRAMID_AT", "09:10:40")
 F3_PYRAMID_FILL_SEC = float(os.getenv("F3_PYRAMID_FILL_SEC", "10.0"))
@@ -57,14 +59,23 @@ async def run(force: bool = False) -> None:
     original_candidates = list(s.target_candidates or [])
     rejected_tickers: set[str] = set()
 
-    while True:
-        s = state.get()
-        s.target_ticker = original_ticker
-        s.target_name = original_name
-        s.target_candidates = original_candidates
-        picked = await _pick_final_entry_candidate(s, exclude_tickers=rejected_tickers)
-        if picked is None:
-            return
+    s = state.get()
+    s.target_ticker = original_ticker
+    s.target_name = original_name
+    s.target_candidates = original_candidates
+    ranked_candidates = await _rank_final_entry_candidates(s)
+    if not ranked_candidates:
+        return
+
+    for candidate_index, picked in enumerate(ranked_candidates):
+        if picked["ticker"] in rejected_tickers:
+            continue
+        if candidate_index > 0:
+            refreshed = await _refresh_entry_candidate(picked)
+            if refreshed is None:
+                rejected_tickers.add(picked["ticker"])
+                continue
+            picked = refreshed
 
         s = state.get()
         s.target_ticker = picked["ticker"]
@@ -107,6 +118,29 @@ async def run(force: bool = False) -> None:
             )
             return
 
+    s = state.get()
+    s.day_skip = True
+    s.close_reason = "ENTRY_FAIL"
+    s.target_ticker = None
+    s.target_name = None
+    log(
+        "ENTRY_CANDIDATE_RETRY_SKIPPED",
+        level="WARN",
+        rejected_count=len(rejected_tickers),
+        reason="NO_REMAINING_CANDIDATE",
+    )
+    await notifier.send(
+        "ENTRY_FAIL",
+        level="WARN",
+        message="진입 가능한 후보를 모두 소진해 거래를 중단합니다.",
+        ticker=None,
+    )
+    await db.record_skip(
+        _today(),
+        "ENTRY_FAIL",
+        f"reason=NO_REMAINING_CANDIDATE,rejected={','.join(sorted(rejected_tickers))}",
+    )
+
 
 async def _run_single(force: bool = False, picked: dict | None = None, allow_candidate_retry: bool = False) -> str | None:
     """
@@ -139,9 +173,14 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
         expected_price = float(picked["expected_price"])
         prev_close = float(picked.get("prev_close") or 0)
     else:
-        expected_price, prev_close = await _fetch_expected_price(ticker)
+        candidate = _candidate_for_ticker(s, ticker)
+        fallback_prev_close = _candidate_prev_close(candidate)
+        expected_price, prev_close = await _fetch_expected_price(
+            ticker,
+            fallback_prev_close=fallback_prev_close,
+        )
         if prev_close <= 0:
-            prev_close = _candidate_prev_close(_candidate_for_ticker(s, ticker))
+            prev_close = fallback_prev_close
     if not expected_price or prev_close <= 0:
         s.day_skip = True
         s.close_reason = "GAP_RECHECK_UNAVAILABLE"
@@ -658,7 +697,10 @@ def _entry_candidate_tickers(s: state.State) -> list[str]:
     return tickers
 
 
-async def _pick_final_entry_candidate(s: state.State, exclude_tickers: set[str] | None = None) -> dict | None:
+async def _rank_final_entry_candidates(
+    s: state.State,
+    exclude_tickers: set[str] | None = None,
+) -> list[dict] | None:
     candidates = s.target_candidates or []
     candidate_by_ticker = {
         c.get("ticker"): c
@@ -667,16 +709,28 @@ async def _pick_final_entry_candidate(s: state.State, exclude_tickers: set[str] 
     }
     exclude_tickers = exclude_tickers or set()
     tickers = [ticker for ticker in _entry_candidate_tickers(s) if ticker not in exclude_tickers]
-    cash = await _fetch_available_cash()
-    total_amount = int(cash * ALLOC_RATIO)
     valid: list[dict] = []
     blocked_reasons: list[str] = []
 
-    for rank, ticker in enumerate(tickers, start=1):
-        expected_price, prev_close = await _fetch_expected_price(ticker)
+    async def recheck_one(rank: int, ticker: str) -> dict:
         candidate = candidate_by_ticker.get(ticker)
+        fallback_prev_close = _candidate_prev_close(candidate)
+        try:
+            expected_price, prev_close = await _fetch_expected_price(
+                ticker,
+                fallback_prev_close=fallback_prev_close,
+            )
+        except Exception as exc:
+            log(
+                "F3_RECHECK_QUOTE_ERROR",
+                level="WARN",
+                ticker=ticker,
+                candidate_rank=rank,
+                error=repr(exc),
+            )
+            expected_price, prev_close = 0.0, fallback_prev_close
         if prev_close <= 0:
-            prev_close = _candidate_prev_close(candidate)
+            prev_close = fallback_prev_close
         if candidate is None:
             log(
                 "F3_CANDIDATE_SNAPSHOT_MISSING",
@@ -686,6 +740,72 @@ async def _pick_final_entry_candidate(s: state.State, exclude_tickers: set[str] 
                 candidates=tickers,
             )
             candidate = {"ticker": ticker}
+        return {
+            "rank": rank,
+            "ticker": ticker,
+            "candidate": candidate,
+            "expected_price": expected_price,
+            "prev_close": prev_close,
+        }
+
+    async def fetch_available_cash_safe() -> float:
+        try:
+            return await _fetch_available_cash()
+        except Exception as exc:
+            log(
+                "BALANCE_QUERY_ERROR",
+                level="WARN",
+                reason="EXCEPTION",
+                error=repr(exc),
+            )
+            return 0.0
+
+    batch_started = time.perf_counter()
+    cash_task = asyncio.create_task(fetch_available_cash_safe())
+    recheck_tasks = [
+        asyncio.create_task(recheck_one(rank, ticker))
+        for rank, ticker in enumerate(tickers, start=1)
+    ]
+    task_tickers = dict(zip(recheck_tasks, tickers, strict=False))
+    if F3_RECHECK_BATCH_TIMEOUT_SEC > 0:
+        done, pending = await asyncio.wait(
+            recheck_tasks,
+            timeout=F3_RECHECK_BATCH_TIMEOUT_SEC,
+        )
+        if pending:
+            log(
+                "F3_RECHECK_BATCH_TIMEOUT",
+                level="WARN",
+                requested_count=len(recheck_tasks),
+                completed_count=len(done),
+                pending_count=len(pending),
+                pending_tickers=[task_tickers[task] for task in pending],
+                timeout_sec=F3_RECHECK_BATCH_TIMEOUT_SEC,
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+        recheck_rows = [task.result() for task in recheck_tasks if task in done]
+    else:
+        recheck_rows = await asyncio.gather(*recheck_tasks)
+    cash = await cash_task
+    batch_elapsed_ms = round((time.perf_counter() - batch_started) * 1000, 1)
+    log(
+        "F3_RECHECK_BATCH_TIMING",
+        level="DEBUG",
+        requested_count=len(recheck_tasks),
+        completed_count=len(recheck_rows),
+        elapsed_ms=batch_elapsed_ms,
+        timeout_sec=F3_RECHECK_BATCH_TIMEOUT_SEC,
+    )
+    total_amount = int(cash * ALLOC_RATIO)
+
+    for row in recheck_rows:
+        rank = int(row["rank"])
+        ticker = str(row["ticker"])
+        candidate = row["candidate"]
+        expected_price = float(row["expected_price"] or 0)
+        prev_close = float(row["prev_close"] or 0)
         if not expected_price or prev_close <= 0:
             blocked_reasons.append("GAP_RECHECK_UNAVAILABLE")
             _log_entry_blocked(
@@ -789,14 +909,16 @@ async def _pick_final_entry_candidate(s: state.State, exclude_tickers: set[str] 
         )
         return None
 
-    picked = max(
+    ranked = sorted(
         valid,
         key=lambda item: (
             item["candidate"].get("expected_amount", 0.0),
             item["candidate"].get("buy_sell_ratio", 0.0),
             -item["candidate_rank"],
         ),
+        reverse=True,
     )
+    picked = ranked[0]
     log(
         "F3_FINAL_PICK",
         level="INFO",
@@ -808,8 +930,109 @@ async def _pick_final_entry_candidate(s: state.State, exclude_tickers: set[str] 
         expected_price=picked["expected_price"],
         total_qty=picked["total_qty"],
     )
-    return picked
+    return ranked
 
+
+async def _pick_final_entry_candidate(
+    s: state.State,
+    exclude_tickers: set[str] | None = None,
+) -> dict | None:
+    ranked = await _rank_final_entry_candidates(s, exclude_tickers=exclude_tickers)
+    return ranked[0] if ranked else None
+
+
+async def _refresh_entry_candidate(picked: dict) -> dict | None:
+    ticker = str(picked["ticker"])
+    candidate = picked.get("candidate")
+    if not isinstance(candidate, dict):
+        candidate = None
+    fallback_prev_close = _candidate_prev_close(candidate)
+    expected_price, prev_close = await _fetch_expected_price(
+        ticker,
+        fallback_prev_close=fallback_prev_close,
+    )
+    if prev_close <= 0:
+        prev_close = fallback_prev_close
+    if not expected_price or prev_close <= 0:
+        _log_entry_blocked(
+            ticker,
+            "GAP_RECHECK_UNAVAILABLE",
+            candidate_rank=picked.get("candidate_rank"),
+            expected_price=expected_price,
+            prev_close=prev_close,
+            freshness_check=True,
+        )
+        log(
+            "GAP_RECHECK_UNAVAILABLE",
+            level="WARN",
+            ticker=ticker,
+            candidate_rank=picked.get("candidate_rank"),
+            expected_price=expected_price,
+            prev_close=prev_close,
+            freshness_check=True,
+            reason="MISSING_PREV_CLOSE" if prev_close <= 0 else "MISSING_EXPECTED_PRICE",
+        )
+        return None
+
+    gap = (expected_price / prev_close) - 1
+    log(
+        "F3_RECHECK",
+        level="INFO",
+        ticker=ticker,
+        candidate_rank=picked.get("candidate_rank"),
+        expected_price=expected_price,
+        prev_close=prev_close,
+        gap_pct=round(gap * 100, 2),
+        gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
+        gap_max_pct=round(GAP_MAX_RECHECK * 100, 2),
+        freshness_check=True,
+    )
+    if not (GAP_MIN_RECHECK <= gap < GAP_MAX_RECHECK):
+        reason = "BELOW_MIN" if gap < GAP_MIN_RECHECK else "ABOVE_MAX"
+        log(
+            "GAP_CHANGED",
+            level="WARN",
+            ticker=ticker,
+            candidate_rank=picked.get("candidate_rank"),
+            gap_at_lockup=None,
+            gap_at_entry=round(gap * 100, 2),
+            reason=reason,
+            freshness_check=True,
+        )
+        _log_entry_blocked(
+            ticker,
+            "GAP_CHANGED",
+            candidate_rank=picked.get("candidate_rank"),
+            gap_at_entry=round(gap * 100, 2),
+            gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
+            gap_max_pct=round(GAP_MAX_RECHECK * 100, 2),
+            gap_reason=reason,
+            freshness_check=True,
+        )
+        return None
+
+    total_amount = int(picked["total_amount"])
+    total_qty = int(total_amount / expected_price)
+    if total_qty == 0:
+        _log_entry_blocked(
+            ticker,
+            "QTY_ZERO",
+            candidate_rank=picked.get("candidate_rank"),
+            cash=picked.get("cash"),
+            alloc_ratio=ALLOC_RATIO,
+            order_price=expected_price,
+            total_amount=total_amount,
+            freshness_check=True,
+        )
+        return None
+
+    refreshed = dict(picked)
+    refreshed.update({
+        "expected_price": expected_price,
+        "prev_close": prev_close,
+        "total_qty": total_qty,
+    })
+    return refreshed
 
 def _today() -> str:
     return datetime.now(KST).strftime("%Y%m%d")
@@ -941,7 +1164,10 @@ async def _run_dry_entry(ticker: str) -> None:
     )
 
 
-async def _fetch_expected_price(ticker: str) -> tuple[float, float]:
+async def _fetch_expected_price(
+    ticker: str,
+    fallback_prev_close: float = 0.0,
+) -> tuple[float, float]:
     """Return expected price and previous close. Before open, prefer antc_cnpr."""
     last_expected = 0.0
     last_prev_close = 0.0
@@ -954,8 +1180,9 @@ async def _fetch_expected_price(ticker: str) -> tuple[float, float]:
         out = resp.get("output", {}) if isinstance(resp.get("output"), dict) else {}
         expected = float(out.get("antc_cnpr") or out.get("stck_prpr") or 0)
         prev_close = float(out.get("stck_prdy_clpr") or 0)
-        last_expected, last_prev_close = expected, prev_close
-        if expected and prev_close > 0:
+        effective_prev_close = prev_close if prev_close > 0 else fallback_prev_close
+        last_expected, last_prev_close = expected, effective_prev_close
+        if expected and effective_prev_close > 0:
             if attempt > 1:
                 log(
                     "F3_RECHECK_QUOTE_RECOVERED",
@@ -964,9 +1191,9 @@ async def _fetch_expected_price(ticker: str) -> tuple[float, float]:
                     attempt=attempt,
                     max_attempts=F3_RECHECK_MAX_ATTEMPTS,
                     expected_price=expected,
-                    prev_close=prev_close,
+                    prev_close=effective_prev_close,
                 )
-            return expected, prev_close
+            return expected, effective_prev_close
         if attempt < F3_RECHECK_MAX_ATTEMPTS:
             log(
                 "F3_RECHECK_QUOTE_RETRY",
@@ -976,14 +1203,13 @@ async def _fetch_expected_price(ticker: str) -> tuple[float, float]:
                 max_attempts=F3_RECHECK_MAX_ATTEMPTS,
                 retry_after_sec=F3_RECHECK_RETRY_DELAY_SEC,
                 expected_price=expected,
-                prev_close=prev_close,
+                prev_close=effective_prev_close,
                 rt_cd=resp.get("rt_cd"),
                 msg_cd=resp.get("msg_cd"),
                 msg1=resp.get("msg1"),
             )
             await asyncio.sleep(F3_RECHECK_RETRY_DELAY_SEC)
     return last_expected, last_prev_close
-
 
 async def _fetch_current_price(ticker: str) -> float:
     """현재 체결가 반환."""
@@ -1234,3 +1460,5 @@ async def _poll_fill(
                 "poll_last_error": str(exc)[:160],
             })
         await asyncio.sleep(1)
+
+

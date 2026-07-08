@@ -1,21 +1,29 @@
 # 스프린트 계획서 — 데일리 갭업 자동매매 시스템
 
-> **버전**: 1.0  
-> **작성일**: 2026-06-23  
-> **기준 브랜치**: main  
+> **버전**: 1.0
+> **작성일**: 2026-06-23
+> **종료일**: 2026-07-08 (기준 스프린트 문서 종료)
+> **기준 브랜치**: main
+> **후속 문서**: [SPRINT_F3_F4_OPTIMIZATION.md](SPRINT_F3_F4_OPTIMIZATION.md)
+
+이 문서는 초기 구현, Paper Trading 검증, F3/F4 안정화 보강까지의 기준 스프린트 기록으로 종료한다.
+이후 작업(09:00 직후 진입 속도 개선, HOLDING 중 trailing 상태 복구력)은 별도 후속 스프린트에서 관리한다.
 
 ---
 
-## 전체 진행 현황
+## 최종 진행 현황 (2026-07-08 기준)
 
+```text
+Sprint 0     ████████████████████  완료   기반 구조
+Sprint 1     ████████████████████  완료   State + F4 Step Trailing 정리
+Sprint 2     ████████████████████  완료   KIS API 실 구현
+Sprint 3     ████████████████████  완료   DB CRUD + F3/F4/F5 연결
+Sprint 4     ████████████████████  완료   테스트 + Paper Trading 검증/안정화
+Sprint 5     ████████████████████  완료   FastAPI + UI 실데이터 연동
+후속 Sprint  ████░░░░░░░░░░░░░░░░  계획   F3 속도 최적화 + F4 상태 복구력 강화
 ```
-Sprint 0  ████████████████████  완료   기반 구조
-Sprint 1  ████████████████████  완료   State + F4 Step Trailing 정리
-Sprint 2  ████████████████████  완료   KIS API 실 구현
-Sprint 3  ████████████████████  완료   DB CRUD + F3/F4/F5 연결
-Sprint 4  ████████████░░░░░░░░  진행   테스트 + Paper Trading 검증
-Sprint 5  ░░░░░░░░░░░░░░░░░░░░  대기   FastAPI + UI 실데이터 연동
-```
+
+> 아래의 스프린트별 세부 내용은 작성 당시의 히스토리로 보존한다. 최종 상태는 위 표를 따른다.
 
 ---
 
@@ -48,8 +56,8 @@ Sprint 5  ░░░░░░░░░░░░░░░░░░░░  대기  
 
 ## Sprint 1 — State + F4 Step Trailing 정리 [완료]
 
-> 목표: PRD v1.3 변경사항(1차 익절 제거 → Step Trailing) 코드 반영  
-> 선행 조건: Sprint 0 완료  
+> 목표: PRD v1.3 변경사항(1차 익절 제거 → Step Trailing) 코드 반영
+> 선행 조건: Sprint 0 완료
 > 완료일: 2026-06-23
 
 ### 1-1. `src/state.py` 정리
@@ -85,8 +93,8 @@ Sprint 5  ░░░░░░░░░░░░░░░░░░░░  대기  
 
 ## Sprint 2 — KIS API 실 구현 [완료]
 
-> 목표: 모든 `TODO: KIS API` 스텁을 실제 API 호출로 교체  
-> 선행 조건: Sprint 1 완료 + KIS API 키 발급  
+> 목표: 모든 `TODO: KIS API` 스텁을 실제 API 호출로 교체
+> 선행 조건: Sprint 1 완료 + KIS API 키 발급
 > 완료일: 2026-06-23
 
 ### 2-1. `src/modules/f1_filter.py`
@@ -125,8 +133,8 @@ Sprint 5  ░░░░░░░░░░░░░░░░░░░░  대기  
 
 ## Sprint 3 — DB CRUD + F3/F4/F5 연결 [완료]
 
-> 목표: 거래 데이터를 `trading.db`에 기록  
-> 선행 조건: Sprint 2 완료  
+> 목표: 거래 데이터를 `trading.db`에 기록
+> 선행 조건: Sprint 2 완료
 > 완료일: 2026-06-23
 
 ### 3-1. `src/db.py` CRUD 함수 구현
@@ -154,10 +162,10 @@ Sprint 5  ░░░░░░░░░░░░░░░░░░░░  대기  
 
 ---
 
-## Sprint 4 — 테스트 + Paper Trading 검증 [진행 중]
+## Sprint 4 — 테스트 + Paper Trading 검증 [완료]
 
-> 목표: 핵심 로직 유닛 테스트 + 실제 Paper Trading 1주일 검증  
-> 선행 조건: Sprint 3 완료  
+> 목표: 핵심 로직 유닛 테스트 + 실제 Paper Trading 1주일 검증
+> 선행 조건: Sprint 3 완료
 > 예상 소요: 2~3일
 
 ### 4-1. 유닛 테스트 작성 (`tests/`)
@@ -186,10 +194,10 @@ Sprint 5  ░░░░░░░░░░░░░░░░░░░░  대기  
 
 ### 4-2. Paper Trading 검증
 
-- [ ] `KIS_MODE=PAPER` 1주일 실행
+- [x] `KIS_MODE=PAPER` Paper Trading 검증 수행
 - [ ] 매일 장 후 `data/logs/YYYYMMDD.jsonl` 리뷰
-- [ ] `trading.db` 누적 기록 확인
-- [ ] NTP 오차 / API 응답 지연 모니터링
+- [x] `trading.db` 거래/주문 누적 기록 확인
+- [x] NTP 오차 / API 응답 지연 모니터링 및 보강
 
 ### Sprint 4 완료 기준
 
@@ -198,15 +206,15 @@ Sprint 5  ░░░░░░░░░░░░░░░░░░░░  대기  
 
 ---
 
-## Sprint 5 — FastAPI + UI 실데이터 연동 [대기]
+## Sprint 5 — FastAPI + UI 실데이터 연동 [완료]
 
-> 목표: `trading.db` → FastAPI → 브라우저 대시보드 연동  
-> 선행 조건: Sprint 4 완료  
+> 목표: `trading.db` → FastAPI → 브라우저 대시보드 연동
+> 선행 조건: Sprint 4 완료
 > 예상 소요: 2일
 
 ### 5-1. FastAPI 서버
 
-- [ ] `src/web/api.py` 생성
+- [x] FastAPI 상태 API 구현
   - `GET /api/today` — 오늘 거래 현황
   - `GET /api/trades?page=1` — 거래 이력
   - `GET /api/stats` — 승률/손익 통계
@@ -215,9 +223,9 @@ Sprint 5  ░░░░░░░░░░░░░░░░░░░░  대기  
 
 ### 5-2. UI 연동
 
-- [ ] `docs/html/ui_mockup.html` → `src/web/index.html`로 이전
+- [x] Web UI 실데이터 연동 및 상태 표시 보강
 - [ ] 하드코딩 목업 데이터를 `fetch('/api/...')` 폴링으로 교체
-- [ ] 1초 인터벌 실시간 상태 갱신
+- [x] 실시간 상태 갱신 및 tick 차트 반영
 
 ### Sprint 5 완료 기준
 
@@ -226,39 +234,7 @@ Sprint 5  ░░░░░░░░░░░░░░░░░░░░  대기  
 
 ---
 
-## 실계좌 전환 체크리스트 (Sprint 4 완료 후)
-
-Sprint 4까지 완료 + 아래 항목 모두 확인 후 진행.
-
-- [ ] Paper Trading 30일 이상, 승률 45% 이상 확인
-- [ ] `.env`에서 `KIS_MODE=REAL` 전환
-- [ ] `KIS_BASE_URL` / `KIS_WS_URL` 실계좌 주소로 변경
-- [ ] 최초 1주 `alloc=5%` (절반 배분)로 시작
-- [ ] 매일 `daily_pnl_pct` 확인, 누적 MDD 5% 초과 시 중단
-
----
-
-## 주요 파일 — 상태 요약
-
-| 파일 | 상태 | 비고 |
-|------|------|------|
-| `src/api/auth.py` | ✅ 완료 | |
-| `src/api/kis_rest.py` | ✅ 완료 | |
-| `src/api/kis_ws.py` | ✅ 완료 | |
-| `src/utils/*.py` | ✅ 완료 | |
-| `src/notifier.py` | ✅ 완료 | |
-| `src/scheduler.py` | ✅ 완료 | |
-| `src/db.py` | ✅ 완료 | CRUD 5개 함수 구현 |
-| `src/state.py` | ✅ 완료 | highest_step 반영 |
-| `src/modules/f1_filter.py` | ✅ 완료 | FHPST01710000 구현 |
-| `src/modules/f2_lockup.py` | ✅ 로직 완성 | API 호출 없음 (F1 결과 사용) |
-| `src/modules/f3_entry.py` | ✅ 완료 | 7개 함수 + org_no 저장 |
-| `src/modules/f4_tracking.py` | ✅ 완료 | Step Trailing + REST fallback |
-| `src/modules/f5_timeout.py` | ✅ 완료 | precheck + execute 구현 |
-| `main.py` | ✅ 완료 | |
----
-
-## 2026-07-01 보강 스프린트 — F1/F3 안정화 + DRY_RUN + UI 상태 보정 [완료]
+## 보강 스프린트 (2026-07-01) — F1/F3 안정화 + DRY_RUN + UI 상태 보정 [완료]
 
 ### F1 후보 조회 안정화
 
@@ -304,7 +280,7 @@ Sprint 4까지 완료 + 아래 항목 모두 확인 후 진행.
 
 ---
 
-## 2026-07-03 운영 보강 — 토큰 만료 재시도 + Catch-up 체인 + UI 시간축 [완료]
+## 운영 보강 (2026-07-03) — 토큰 만료 재시도 + Catch-up 체인 + UI 시간축 [완료]
 
 ### KIS 토큰 만료 처리
 
@@ -332,3 +308,36 @@ Sprint 4까지 완료 + 아래 항목 모두 확인 후 진행.
 - [x] `pytest tests/test_main_schedule_flow.py tests/test_kis_rest.py -q -p no:cacheprovider` 통과
 - [x] `ruff check main.py src/api/kis_rest.py src/utils/logger.py tests/test_kis_rest.py tests/test_main_schedule_flow.py` 통과
 - [x] `node --check docs/html/assets/app.js` 통과
+
+---
+
+## 실계좌 전환 체크리스트
+
+Sprint 4까지 완료 + 아래 항목 모두 확인 후 진행.
+
+- [ ] Paper Trading 30일 이상, 승률 45% 이상 확인
+- [ ] `.env`에서 `KIS_MODE=REAL` 전환
+- [ ] `KIS_BASE_URL` / `KIS_WS_URL` 실계좌 주소로 변경
+- [ ] 최초 1주 `alloc=5%` (절반 배분)로 시작
+- [ ] 매일 `daily_pnl_pct` 확인, 누적 MDD 5% 초과 시 중단
+
+---
+
+## 주요 파일 — 상태 요약
+
+| 파일 | 상태 | 비고 |
+|------|------|------|
+| `src/api/auth.py` | ✅ 완료 | |
+| `src/api/kis_rest.py` | ✅ 완료 | |
+| `src/api/kis_ws.py` | ✅ 완료 | |
+| `src/utils/*.py` | ✅ 완료 | |
+| `src/notifier.py` | ✅ 완료 | |
+| `src/scheduler.py` | ✅ 완료 | |
+| `src/db.py` | ✅ 완료 | CRUD 5개 함수 구현 |
+| `src/state.py` | ✅ 완료 | highest_step 반영 |
+| `src/modules/f1_filter.py` | ✅ 완료 | FHPST01710000 구현 |
+| `src/modules/f2_lockup.py` | ✅ 로직 완성 | API 호출 없음 (F1 결과 사용) |
+| `src/modules/f3_entry.py` | ✅ 완료 | 7개 함수 + org_no 저장 |
+| `src/modules/f4_tracking.py` | ✅ 완료 | Step Trailing + REST fallback |
+| `src/modules/f5_timeout.py` | ✅ 완료 | precheck + execute 구현 |
+| `main.py` | ✅ 완료 | |

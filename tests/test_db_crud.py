@@ -90,6 +90,39 @@ async def test_update_order_fill_sets_filled(mem):
     assert row["fill_latency_ms"] == 150
 
 
+
+async def test_update_trade_progress_stores_high_and_step(mem):
+    trade_id = await db.open_trade("20260623", "005930", 75_000.0, 10)
+
+    await db.update_trade_progress(trade_id, 78_500.0, 0.05)
+
+    conn = db.get()
+    async with conn.execute(
+        "SELECT high_price, highest_step, status FROM trades WHERE id=?",
+        (trade_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    assert row["high_price"] == pytest.approx(78_500.0)
+    assert row["highest_step"] == pytest.approx(0.05)
+    assert row["status"] == "OPEN"
+
+
+async def test_update_trade_progress_ignores_closed_trade(mem):
+    trade_id = await db.open_trade("20260623", "005930", 75_000.0, 10)
+    await db.close_trade(trade_id, 76_000.0, "TRAILING", 1.33, 0.025)
+
+    await db.update_trade_progress(trade_id, 80_000.0, 0.075)
+
+    conn = db.get()
+    async with conn.execute(
+        "SELECT high_price, highest_step, status FROM trades WHERE id=?",
+        (trade_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    assert row["high_price"] is None
+    assert row["highest_step"] == pytest.approx(0.025)
+    assert row["status"] == "CLOSED"
+
 # ── close_trade ───────────────────────────────────────────────────────
 
 async def test_close_trade_status_is_closed(mem):

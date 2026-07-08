@@ -105,6 +105,123 @@ async def test_below_first_step_no_trailing():
     assert s.trailing_active is False
 
 
+
+async def test_process_tick_persists_state_immediately_when_step_advances(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    events = []
+    persist = AsyncMock()
+    s = _state_mod.get()
+    s.trade_id = 123
+
+    monkeypatch.setattr(f4.state, "persist", persist)
+    monkeypatch.setattr(f4, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(f4, "_last_state_persist_at", 0.0)
+
+    await _run_tick(ENTRY * 1.026)
+
+    persist.assert_awaited_once()
+    assert persist.await_args.args[1] == "20260623"
+    persisted = [kwargs for event, kwargs in events if event == "F4_STATE_PERSISTED"][-1]
+    assert persisted["highest_step"] == pytest.approx(STEP_SIZE)
+    assert persisted["trailing_active"] is True
+    assert persisted["force"] is True
+
+
+
+async def test_process_tick_updates_trade_progress_db(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    persist = AsyncMock()
+    update_progress = AsyncMock()
+    s = _state_mod.get()
+    s.trade_id = 123
+
+    monkeypatch.setattr(f4.state, "persist", persist)
+    monkeypatch.setattr(f4.db, "update_trade_progress", update_progress)
+    monkeypatch.setattr(f4, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(f4, "_last_state_persist_at", 0.0)
+
+    await _run_tick(ENTRY * 1.026)
+
+    persist.assert_awaited_once()
+    update_progress.assert_awaited_once_with(123, pytest.approx(ENTRY * 1.026), STEP_SIZE)
+
+
+async def test_tracking_state_db_progress_survives_state_persist_error(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    events = []
+    update_progress = AsyncMock()
+    s = _state_mod.get()
+    s.trade_id = 123
+
+    monkeypatch.setattr(f4.state, "persist", AsyncMock(side_effect=OSError("disk full")))
+    monkeypatch.setattr(f4.db, "update_trade_progress", update_progress)
+    monkeypatch.setattr(f4, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(f4, "_last_state_persist_at", 0.0)
+
+    saved = await f4._persist_tracking_state(force=True)
+
+    assert saved is True
+    update_progress.assert_awaited_once_with(123, ENTRY, 0.0)
+    assert "F4_STATE_PERSIST_ERROR" in [event for event, _ in events]
+    persisted = [kwargs for event, kwargs in events if event == "F4_STATE_PERSISTED"][-1]
+    assert persisted["state_saved"] is False
+    assert persisted["db_saved"] is True
+
+async def test_late_trailing_close_does_not_persist_before_sell(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    persist = AsyncMock()
+    s = _state_mod.get()
+    s.trade_id = 123
+
+    monkeypatch.setattr(f4.state, "persist", persist)
+    monkeypatch.setattr(f4.db, "update_trade_progress", AsyncMock())
+    monkeypatch.setattr(f4, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(f4, "_last_state_persist_at", 0.0)
+
+    mock_close = await _run_tick(ENTRY * 0.98, hour=10, minute=50, set_closed_return=True)
+
+    mock_close.assert_awaited_once()
+    persist.assert_not_awaited()
+
+async def test_process_tick_throttles_high_price_only_state_persist(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    persist = AsyncMock()
+    s = _state_mod.get()
+    s.trade_id = 123
+
+    monkeypatch.setattr(f4.state, "persist", persist)
+    monkeypatch.setattr(f4, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(f4, "F4_STATE_PERSIST_INTERVAL_SEC", 1.0)
+    monkeypatch.setattr(f4, "_last_state_persist_at", 100.0)
+    monkeypatch.setattr(f4.time, "monotonic", lambda: 100.5)
+
+    await _run_tick(ENTRY * 1.001)
+
+    persist.assert_not_awaited()
+
+
+async def test_process_tick_persists_high_price_after_throttle_interval(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    persist = AsyncMock()
+    s = _state_mod.get()
+    s.trade_id = 123
+
+    monkeypatch.setattr(f4.state, "persist", persist)
+    monkeypatch.setattr(f4, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(f4, "F4_STATE_PERSIST_INTERVAL_SEC", 1.0)
+    monkeypatch.setattr(f4, "_last_state_persist_at", 100.0)
+    monkeypatch.setattr(f4.time, "monotonic", lambda: 101.1)
+
+    await _run_tick(ENTRY * 1.001)
+
+    persist.assert_awaited_once()
+
 # ── Hard Stop ─────────────────────────────────────────────────────────
 
 async def test_hard_stop_at_exact_boundary():
