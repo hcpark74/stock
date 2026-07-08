@@ -923,6 +923,7 @@ async def _rank_final_entry_candidates(
         "F3_FINAL_PICK",
         level="INFO",
         ticker=picked["ticker"],
+        name=picked["candidate"].get("name"),
         candidate_rank=picked["candidate_rank"],
         checked_count=len(tickers),
         valid_count=len(valid),

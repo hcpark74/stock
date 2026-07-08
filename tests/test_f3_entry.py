@@ -890,6 +890,8 @@ async def test_entry_retries_next_candidate_when_order_rejected(monkeypatch):
     assert send_buy.await_args_list[1].args == ("GOOD02", 91, "PAPER")
     assert state.get().target_ticker == "GOOD02"
     assert state.get().position_status == "HOLDING"
+    final_pick = [kwargs for event, kwargs in events if event == "F3_FINAL_PICK"][-1]
+    assert final_pick["name"] == "Bad"
     assert "ENTRY_CANDIDATE_RETRY" in [event for event, _ in events]
     f3.db.record_skip.assert_not_awaited()
     f3.notifier.send.assert_awaited_once()

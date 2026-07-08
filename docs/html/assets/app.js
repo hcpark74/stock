@@ -18,6 +18,13 @@ const fmtWon = n => n==null ? '—' : `${fmt(n)}<span class="u">원</span>`;
 const fmtStep = n => n ? fmtPct(Number(n) * 100) : '<span style="color:var(--mu)">—</span>';
 const cls = (el, c) => { el.className = el.className.replace(/\b(up|dn|flat)\b/g,''); el.classList.add(c); };
 const esc = s => String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+const tickerName = (ticker, name) => name || (ticker ? TICKER_NAMES[ticker] : '') || '';
+const stockText = (ticker, name, fallback='—') => {
+  const code = ticker ? String(ticker) : '';
+  const nm = tickerName(code, name);
+  if(code && nm && nm !== code) return `${code} ${nm}`;
+  return code || nm || fallback;
+};
 
 // ── 탭 전환 ──────────────────────────────────────────────────────────────
 function go(id, btn) {
@@ -138,7 +145,7 @@ function applyStatus(d) {
 
   // 탑바 심볼
   $('tb-sym').textContent = d.ticker || '—';
-  $('tb-sname').textContent = d.ticker ? (TICKER_NAMES[d.ticker]||d.ticker) : '대기중';
+  $('tb-sname').textContent = d.ticker ? tickerName(d.ticker, d.name) : '대기중';
 
   // 모드 뱃지
   const isReal = d.mode!=='PAPER';
@@ -163,8 +170,8 @@ function applyStatus(d) {
   const badge = $('st-badge');
   badge.textContent = {IDLE:'대기중',ENTERING:'진입중',HOLDING:'보유중',CLOSED:'청산됨'}[d.position_status]||d.position_status;
   badge.className = 'st-badge '+(d.position_status||'IDLE');
-  $('st-tk').textContent  = d.ticker||'';
-  $('st-name').textContent = d.ticker ? (TICKER_NAMES[d.ticker]||'') : '';
+  $('st-tk').textContent  = d.ticker || '';
+  $('st-name').textContent = d.ticker ? tickerName(d.ticker, d.name) : '';
 
   // PnL 필
   const pills = $('tv-pills');
@@ -304,7 +311,7 @@ function renderF1(d) {
     ['예상체결 보강', d.expected_valid ?? 0],
     ['Gap 3~7%', d.gap_pass ?? 0],
     ['유동성 정렬', d.liquidity_pass ?? 0],
-    ['후보 확정', d.selected?.ticker || '—'],
+    ['후보 확정', stockText(d.selected?.ticker, d.selected?.name)],
   ];
   $('f1-steps').innerHTML = steps.map((s,i)=>`
     <div class="f1-step ${f1StepClass(status, i)}">
@@ -538,7 +545,7 @@ function renderSelection(d) {
   $('sel-status').className = 'sc2-val ' + (status === 'DONE' ? 'pup' : status === 'NO_TARGET' || status === 'FAILED' ? 'pdn' : '');
   $('sel-raw').textContent = d?.raw_count ?? 0;
   $('sel-expected').textContent = d?.expected_valid ?? 0;
-  $('sel-selected').textContent = d?.selected?.ticker || '—';
+  $('sel-selected').textContent = stockText(d?.selected?.ticker, d?.selected?.name);
 
   const rows = d?.candidates || [];
   const processRows = d?.selection_process || [];
@@ -734,11 +741,11 @@ function renderOrders(rows) {
     return;
   }
   body.innerHTML = orders.map(o => {
-    const tickerName = TICKER_NAMES[o.ticker] || '';
+    const orderTickerName = TICKER_NAMES[o.ticker] || '';
     return `<tr>
       <td>${esc(o.kis_order_id || (o.id ? `DB#${o.id}` : '—'))}</td>
       <td>${esc(shortTime(o.ordered_at))}</td>
-      <td>${esc(o.ticker || '—')} ${esc(tickerName)}</td>
+      <td>${esc(o.ticker || '—')} ${esc(orderTickerName)}</td>
       <td>${esc(orderSideLabel(o))}</td>
       <td>${fmt(o.order_qty)}</td>
       <td>${o.order_price == null ? '—' : fmt(o.order_price)}</td>
@@ -815,14 +822,14 @@ function renderLogs(logs) {
     const cur = i===0 ? '<span class="ev-cur">▌</span>' : '';
     return `<div class="ev ${info.cls||lvCls}">
       <div class="ev-t">${t}</div>
-      <div><div class="ev-n">${eventName}${cur}</div><div class="ev-d">${detail}</div></div>
+      <div><div class="ev-n">${esc(eventName)}${cur}</div><div class="ev-d">${esc(detail)}</div></div>
     </div>`;
   }).join('');
 }
 
 function buildLogDetail(l) {
   const parts=[];
-  if(l.ticker) parts.push(l.ticker);
+  if(l.ticker || l.name) parts.push(stockText(l.ticker, l.name));
   if(l.reason) parts.push(`사유 ${l.reason}`);
   if(l.order_id) parts.push(`주문 ${l.order_id}`);
   if(l.offset_ms!=null) parts.push(`+${l.offset_ms}ms ${l.level}`);

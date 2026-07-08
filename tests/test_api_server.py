@@ -36,8 +36,8 @@ def test_selection_process_summarizes_f1_f2_f3():
         "candidates": [{"ticker": "006340"}, {"ticker": "036930"}],
     }
     logs = [
-        {"event": "TARGET_LOCKED", "ticker": "006340", "target_tickers": ["006340", "036930"], "gap_pct": 3.49},
-        {"event": "F3_FINAL_PICK", "ticker": "006340", "checked_count": 2, "valid_count": 1, "expected_price": 10670},
+        {"event": "TARGET_LOCKED", "ticker": "006340", "name": "Daewon", "target_tickers": ["006340", "036930"], "target_names": ["Daewon", "Jusung"], "gap_pct": 3.49},
+        {"event": "F3_FINAL_PICK", "ticker": "006340", "name": "Daewon", "checked_count": 2, "valid_count": 1, "expected_price": 10670},
     ]
 
     result = server._selection_process_from_logs(summary, logs)
@@ -45,9 +45,30 @@ def test_selection_process_summarizes_f1_f2_f3():
     assert [row["phase"] for row in result] == ["F1 선정", "F2 잠금", "F3 최종"]
     assert result[0]["status"] == "완료"
     assert result[1]["status"] == "잠금"
-    assert result[1]["detail"] == "006340, 036930"
+    assert result[1]["detail"] == "006340 Daewon, 036930 Jusung"
+    assert result[1]["name"] == "Daewon"
+    assert result[1]["names"] == ["Daewon", "Jusung"]
+    assert result[2]["name"] == "Daewon"
     assert result[2]["status"] == "최종"
     assert result[2]["detail"] == "1 / 2 재검증"
+
+def test_selection_process_derives_f3_name_from_snapshot_when_log_has_no_name():
+    summary = {
+        "selected": {"ticker": "006340", "name": "Daewon", "gap_pct": 0.0349, "expected_amount": 147_000_000},
+        "liquidity_pass": 1,
+        "gap_pass": 1,
+        "candidates": [{"ticker": "006340", "name": "Daewon"}],
+    }
+    logs = [
+        {"event": "TARGET_LOCKED", "ticker": "006340", "target_tickers": ["006340"], "gap_pct": 3.49},
+        {"event": "F3_FINAL_PICK", "ticker": "006340", "checked_count": 1, "valid_count": 1},
+    ]
+
+    result = server._selection_process_from_logs(summary, logs)
+
+    assert result[1]["detail"] == "006340 Daewon"
+    assert result[1]["name"] == "Daewon"
+    assert result[2]["name"] == "Daewon"
 
 def test_selection_process_ignores_f2_from_different_f1_snapshot():
     summary = {

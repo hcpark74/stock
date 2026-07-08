@@ -179,6 +179,20 @@ def _selection_process_from_logs(summary: dict, logs: list[dict]) -> list[dict]:
     f1_ticker = selected.get("ticker")
     f1_count = summary.get("liquidity_pass") or summary.get("gap_pass") or 0
     candidate_tickers = {str(c.get("ticker")) for c in summary.get("candidates", []) if c.get("ticker")}
+    candidate_names = {
+        str(c.get("ticker")): c.get("name")
+        for c in summary.get("candidates", [])
+        if isinstance(c, dict) and c.get("ticker") and c.get("name")
+    }
+    if f1_ticker and selected.get("name"):
+        candidate_names[str(f1_ticker)] = selected.get("name")
+
+    def stock_label(ticker: str | None, name: str | None = None) -> str:
+        code = str(ticker) if ticker else ""
+        label_name = name or candidate_names.get(code)
+        if code and label_name:
+            return f"{code} {label_name}"
+        return code or (label_name or "")
     steps = [{
         "key": "f1",
         "phase": "F1 선정",
@@ -200,16 +214,23 @@ def _selection_process_from_logs(summary: dict, logs: list[dict]) -> list[dict]:
         if candidate_tickers and not (set(map(str, f2_tickers)) & candidate_tickers):
             f2_event = None
             f2_tickers = []
+    f2_event_names = list(f2_event.get("target_names") or []) if f2_event else []
+    f2_names = [
+        (f2_event_names[idx] if idx < len(f2_event_names) else None) or candidate_names.get(str(ticker))
+        for idx, ticker in enumerate(f2_tickers)
+    ]
     steps.append({
         "key": "f2",
         "phase": "F2 잠금",
         "tickers": f2_tickers,
         "ticker": f2_event.get("ticker") if f2_event else None,
+        "names": f2_names,
+        "name": (f2_event.get("name") or (f2_names[0] if f2_names else None)) if f2_event else None,
         "gap_pct": (float(f2_event.get("gap_pct")) / 100) if f2_event and f2_event.get("gap_pct") is not None else None,
         "expected_price": f2_event.get("expected_price") if f2_event else None,
         "expected_amount": f2_event.get("expected_amount") if f2_event else None,
         "status": "잠금" if f2_event else "대기",
-        "detail": ", ".join(str(t) for t in f2_tickers) if f2_tickers else "최대 3개 lock",
+        "detail": ", ".join(stock_label(ticker, f2_names[idx] if idx < len(f2_names) else None) for idx, ticker in enumerate(f2_tickers)) if f2_tickers else "최대 3개 lock",
     })
 
     f3_events = {"F3_FINAL_PICK", "ENTRY_ORDER_SENT", "ENTRY_EXECUTED", "F3_ENTRY_BLOCKED", "F3_SKIPPED", "GAP_CHANGED", "GAP_RECHECK_UNAVAILABLE", "BUYABLE_QTY_QUERY_FAILED", "BUYABLE_QTY_ZERO"}
@@ -225,11 +246,13 @@ def _selection_process_from_logs(summary: dict, logs: list[dict]) -> list[dict]:
         "BUYABLE_QTY_QUERY_FAILED": "차단",
         "BUYABLE_QTY_ZERO": "차단",
     }.get(f3_event.get("event") if f3_event else None, "대기")
+    f3_ticker = f3_event.get("ticker") if f3_event else None
     steps.append({
         "key": "f3",
         "phase": "F3 최종",
-        "tickers": [f3_event.get("ticker")] if f3_event and f3_event.get("ticker") else [],
-        "ticker": f3_event.get("ticker") if f3_event else None,
+        "tickers": [f3_ticker] if f3_ticker else [],
+        "ticker": f3_ticker,
+        "name": (f3_event.get("name") or candidate_names.get(str(f3_ticker))) if f3_event else None,
         "expected_price": f3_event.get("expected_price") if f3_event else None,
         "status": f3_status,
         "detail": _f3_detail_from_event(f3_event),
