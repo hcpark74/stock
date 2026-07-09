@@ -1,4 +1,4 @@
-﻿"""FastAPI 웹 서버. UI에 실시간 데이터를 제공한다."""
+"""FastAPI 웹 서버. UI에 실시간 데이터를 제공한다."""
 
 import asyncio
 import json
@@ -174,6 +174,70 @@ def _f1_status_from_logs(logs: list[dict]) -> tuple[str, dict | None]:
     return status, last_event
 
 
+
+def _latest_entry_event(logs: list[dict]) -> dict | None:
+    return next(
+        (
+            e for e in reversed(logs)
+            if e.get("event") in {"ENTRY_EXECUTED", "DRY_RUN_ENTRY_EXECUTED"}
+            and e.get("ticker")
+        ),
+        None,
+    )
+
+
+def _event_ts(entry: dict | None) -> str:
+    return str(entry.get("ts") or "") if entry else ""
+
+
+def _at_or_before(entry: dict, cutoff_ts: str) -> bool:
+    if not cutoff_ts:
+        return True
+    ts = _event_ts(entry)
+    return not ts or ts <= cutoff_ts
+
+
+def _ticker_in_event(ticker: str | None, entry: dict | None) -> bool:
+    if not ticker or not entry:
+        return False
+    tickers = [str(t) for t in (entry.get("target_tickers") or []) if t]
+    if not tickers and entry.get("ticker"):
+        tickers = [str(entry.get("ticker"))]
+    return str(ticker) in tickers
+
+
+def _summary_with_trade_anchor(summary: dict, logs: list[dict], current_state=None) -> dict:
+    """Prefer the actually executed/restored trade over the latest F1 snapshot display."""
+    entry_event = _latest_entry_event(logs)
+    ticker = entry_event.get("ticker") if entry_event else None
+    name = entry_event.get("name") if entry_event else None
+
+    if not ticker and current_state is not None:
+        has_trade = bool(
+            getattr(current_state, "trade_id", 0)
+            or getattr(current_state, "entry_qty", None)
+            or getattr(current_state, "entry_price", None)
+        )
+        if has_trade and getattr(current_state, "position_status", None) in {"ENTERING", "HOLDING", "CLOSED"}:
+            ticker = getattr(current_state, "target_ticker", None)
+            name = getattr(current_state, "target_name", None)
+
+    if not ticker:
+        return summary
+
+    candidates = list(summary.get("candidates") or [])
+    matched = next((c for c in candidates if str(c.get("ticker")) == str(ticker)), {})
+    selected = {**matched, "ticker": ticker}
+    if name or matched.get("name"):
+        selected["name"] = name or matched.get("name")
+
+    return {
+        **summary,
+        "selected": selected,
+        "selected_tickers": [ticker],
+        "selection_source": "TRADE_EXECUTED" if entry_event else "STATE_TRADE",
+    }
+
 def _selection_process_from_logs(summary: dict, logs: list[dict]) -> list[dict]:
     selected = summary.get("selected") or {}
     f1_ticker = selected.get("ticker")
@@ -205,7 +269,18 @@ def _selection_process_from_logs(summary: dict, logs: list[dict]) -> list[dict]:
         "detail": f"{f1_count}개 후보",
     }]
 
-    f2_event = next((e for e in reversed(logs) if e.get("event") == "TARGET_LOCKED"), None)
+    entry_event = _latest_entry_event(logs)
+    entry_ticker = entry_event.get("ticker") if entry_event else None
+    entry_ts = _event_ts(entry_event)
+    f2_event = next(
+        (
+            e for e in reversed(logs)
+            if e.get("event") == "TARGET_LOCKED"
+            and _at_or_before(e, entry_ts)
+            and (not entry_ticker or _ticker_in_event(str(entry_ticker), e))
+        ),
+        None,
+    )
     f2_tickers = []
     if f2_event:
         f2_tickers = list(f2_event.get("target_tickers") or [])
@@ -234,7 +309,7 @@ def _selection_process_from_logs(summary: dict, logs: list[dict]) -> list[dict]:
     })
 
     f3_events = {"F3_FINAL_PICK", "ENTRY_ORDER_SENT", "ENTRY_EXECUTED", "F3_ENTRY_BLOCKED", "F3_SKIPPED", "GAP_CHANGED", "GAP_RECHECK_UNAVAILABLE", "BUYABLE_QTY_QUERY_FAILED", "BUYABLE_QTY_ZERO"}
-    f3_event = next((e for e in reversed(logs) if e.get("event") in f3_events), None) if f2_event else None
+    f3_event = entry_event or (next((e for e in reversed(logs) if e.get("event") in f3_events), None) if f2_event else None)
     f3_status = {
         "F3_FINAL_PICK": "최종",
         "ENTRY_ORDER_SENT": "주문전송",
@@ -502,7 +577,7 @@ async def api_orders(limit: int = 60) -> JSONResponse:
         conn = db.get()
         async with conn.execute(
             """SELECT o.id, o.kis_order_id, o.order_type, o.order_phase,
-                      o.ticker, o.order_qty, o.order_price, o.fill_price,
+                      o.ticker, o.name, o.order_qty, o.order_price, o.fill_price,
                       o.fill_qty, o.status, o.ordered_at, o.filled_at,
                       o.error_code, o.error_msg, t.date
                FROM orders o
@@ -526,7 +601,7 @@ async def api_f1() -> JSONResponse:
     logs = _read_today_logs(limit=500)
     status, last_event = _f1_status_from_logs(logs)
     snapshot_path, rows = _read_f1_snapshot()
-    summary = _f1_summary_from_rows(rows)
+    summary = _summary_with_trade_anchor(_f1_summary_from_rows(rows), logs, state.get())
     if rows and status in {"IDLE", "NO_TARGET"}:
         status = "DONE" if summary["gap_pass"] else "NO_TARGET"
 

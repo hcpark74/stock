@@ -264,7 +264,7 @@ async def test_api_orders_returns_today_orders(tmp_path, monkeypatch):
     today = "20260702"
     monkeypatch.setattr(server, "_today", lambda: today)
     trade_id = await db.open_trade(today, "005930", 75_000.0, 10)
-    order_id = await db.record_order(trade_id, "ORD001", "BUY", 10, 75_000.0, "FIRST_BUY", "005930")
+    order_id = await db.record_order(trade_id, "ORD001", "BUY", 10, 75_000.0, "FIRST_BUY", "005930", "삼성전자")
     await db.update_order_fill(order_id, 75_100.0, 10, 120)
     old_trade_id = await db.open_trade("20260701", "000660", 120_000.0, 1)
     await db.record_order(old_trade_id, "OLD001", "BUY", 1, 120_000.0, "FIRST_BUY", "000660")
@@ -274,6 +274,7 @@ async def test_api_orders_returns_today_orders(tmp_path, monkeypatch):
 
     assert '"kis_order_id":"ORD001"' in body
     assert '"order_phase":"FIRST_BUY"' in body
+    assert '"name":"삼성전자"' in body
     assert '"status":"FILLED"' in body
     assert "OLD001" not in body
     await db.close()
@@ -349,7 +350,7 @@ async def test_fetch_asset_snapshot_parses_kis_balance(monkeypatch):
     async def fake_get(*args, **kwargs):
         return {
             "output1": [
-                {"pdno": "005930", "hldg_qty": "2"},
+                {"pdno": "005930", "prdt_name": "Samsung", "hldg_qty": "2", "ord_psbl_qty": "2", "prpr": "70000", "pchs_avg_pric": "69000", "pchs_amt": "138000", "evlu_amt": "140000", "evlu_pfls_amt": "2000", "evlu_pfls_rt": "1.45"},
                 {"pdno": "000660", "hldg_qty": "0"},
             ],
             "output2": [{
@@ -377,6 +378,20 @@ async def test_fetch_asset_snapshot_parses_kis_balance(monkeypatch):
         "snapshot_source": "KIS",
     }.items()
     assert "captured_at" in result
+    assert result["holdings"] == [
+        {
+            "ticker": "005930",
+            "name": "Samsung",
+            "qty": 2,
+            "orderable_qty": 2,
+            "current_price": 70000.0,
+            "avg_price": 69000.0,
+            "purchase_amount": 138000.0,
+            "evaluation_amount": 140000.0,
+            "pnl_amount": 2000.0,
+            "pnl_pct": 1.45,
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -534,3 +549,45 @@ async def test_asset_snapshot_safe_records_failure_reason(monkeypatch):
     assert "EGW00123" in body
     assert events[0][0] == "ASSET_SNAPSHOT_FAILED"
     assert events[0][1]["error_type"] == "RuntimeError"
+
+
+def test_selection_process_prefers_executed_trade_over_later_restart_pick():
+    summary = {
+        "selected": {"ticker": "005930", "name": "Samsung", "gap_pct": 0.0396},
+        "selected_tickers": ["005930"],
+        "liquidity_pass": 3,
+        "gap_pass": 3,
+        "candidates": [
+            {"ticker": "005930", "name": "Samsung"},
+            {"ticker": "365660", "name": "Lemon"},
+        ],
+    }
+    logs = [
+        {
+            "ts": "2026-07-09T09:01:24+09:00",
+            "event": "TARGET_LOCKED",
+            "ticker": "009150",
+            "target_tickers": ["009150", "005930", "365660"],
+            "target_names": ["SamsungElecParts", "Samsung", "Lemon"],
+        },
+        {"ts": "2026-07-09T09:01:36+09:00", "event": "ENTRY_EXECUTED", "ticker": "365660", "name": "Lemon"},
+        {
+            "ts": "2026-07-09T09:09:45+09:00",
+            "event": "TARGET_LOCKED",
+            "ticker": "005930",
+            "target_tickers": ["005930", "005935", "365660"],
+            "target_names": ["Samsung", "SamsungPref", "Lemon"],
+        },
+        {"ts": "2026-07-09T09:09:49+09:00", "event": "F3_FINAL_PICK", "ticker": "005930", "name": "Samsung"},
+    ]
+
+    anchored = server._summary_with_trade_anchor(summary, logs)
+    result = server._selection_process_from_logs(anchored, logs)
+
+    assert anchored["selected"]["ticker"] == "365660"
+    assert anchored["selected"]["name"] == "Lemon"
+    assert result[0]["ticker"] == "365660"
+    assert result[1]["ticker"] == "009150"
+    assert result[1]["tickers"] == ["009150", "005930", "365660"]
+    assert result[2]["ticker"] == "365660"
+    assert result[2]["status"] == "체결"

@@ -29,6 +29,9 @@ F4_STATE_PERSIST_INTERVAL_SEC = float(os.getenv("F4_STATE_PERSIST_INTERVAL_SEC",
 _SELL_TR = {"REAL": "TTTC0011U", "PAPER": "VTTC0011U"}
 _CCLD_TR = {"REAL": "TTTC0081R", "PAPER": "VTTC0081R"}
 _last_state_persist_at = 0.0
+_close_in_progress = False
+_close_in_progress_warned = False
+_closing_task: asyncio.Task | None = None
 
 
 async def run() -> None:
@@ -104,9 +107,14 @@ async def run() -> None:
                     ticker=ticker,
                 )
     finally:
+        closing = _closing_task
         for task in tasks:
+            if task is closing:
+                continue
             if not task.done():
                 task.cancel()
+        if closing is not None and not closing.done():
+            await asyncio.shield(closing)
         await asyncio.gather(*tasks, return_exceptions=True)
         live.ws_connected = False
 
@@ -173,20 +181,55 @@ async def _process_tick(price: float, spike_filter: SpikeFilter) -> None:
 
     # [우선순위 1] Hard Stop (-2.0%): trailing 미활성 구간에서만 유효
     if not s.trailing_active and price <= entry * (1 - HARD_STOP_RATIO):
-        if await state.set_closed("HARD_STOP"):
-            await _execute_close(price, "HARD_STOP")
+        await _trigger_close(price, "HARD_STOP")
         return
 
     # [우선순위 2] Step Trailing
     if s.trailing_active:
         stop = entry * (1 + s.highest_step - STEP_TRAIL)
         if price <= stop:
-            if await state.set_closed("TRAILING"):
-                await _execute_close(price, "TRAILING")
+            await _trigger_close(price, "TRAILING")
             return
 
     if high_changed or step_changed or trailing_activated:
         await _persist_tracking_state(force=step_changed or trailing_activated)
+
+async def _trigger_close(price: float, reason: str) -> None:
+    """Run a close once; state becomes CLOSED only after sell/DB/persist succeeds."""
+    global _close_in_progress, _close_in_progress_warned, _closing_task
+    if _close_in_progress:
+        if not _close_in_progress_warned:
+            log("F4_CLOSE_ALREADY_IN_PROGRESS", level="WARN", ticker=state.get().target_ticker, reason=reason)
+            _close_in_progress_warned = True
+        return
+
+    _close_in_progress = True
+    _close_in_progress_warned = False
+    close_task = asyncio.create_task(
+        _execute_close(price, reason),
+        name=f"f4_execute_close_{reason.lower()}",
+    )
+    _closing_task = close_task
+    try:
+        await asyncio.shield(close_task)
+    except asyncio.CancelledError:
+        log("F4_CLOSE_CANCEL_REQUESTED", level="CRIT", ticker=state.get().target_ticker, reason=reason)
+        try:
+            await notifier.send(
+                "F4_CLOSE_CANCEL_REQUESTED",
+                level="CRIT",
+                message=f"F4 청산 태스크 취소 요청 감지: {state.get().target_ticker} {reason}. 청산 완료까지 대기합니다.",
+                ticker=state.get().target_ticker,
+            )
+        finally:
+            await asyncio.shield(close_task)
+            raise
+    finally:
+        if close_task.done():
+            _close_in_progress = False
+            _close_in_progress_warned = False
+            if _closing_task is close_task:
+                _closing_task = None
 
 async def _persist_tracking_state(force: bool = False) -> bool:
     """Persist in-trade trailing progress with a small throttle."""
@@ -248,7 +291,25 @@ async def _persist_tracking_state(force: bool = False) -> bool:
     )
     return True
 
-async def _execute_close(price: float, reason: str) -> None:
+async def _execute_close(price: float, reason: str) -> bool:
+    try:
+        return await _execute_close_impl(price, reason)
+    except asyncio.CancelledError:
+        s = state.get()
+        log("F4_CLOSE_TASK_CANCELLED", level="CRIT", ticker=s.target_ticker, reason=reason)
+        try:
+            await asyncio.shield(notifier.send(
+                "F4_CLOSE_TASK_CANCELLED",
+                level="CRIT",
+                message=f"F4 청산 태스크 직접 취소 감지: {s.target_ticker} {reason}. KIS 체결/잔고 확인 필요",
+                ticker=s.target_ticker,
+            ))
+        except Exception:
+            pass
+        raise
+
+
+async def _execute_close_impl(price: float, reason: str) -> bool:
     """잔여 전량 시장가 매도 후 로그/알림/DB 기록."""
     s = state.get()
     qty = s.remaining_qty or 0
@@ -267,15 +328,23 @@ async def _execute_close(price: float, reason: str) -> None:
         log(event_name, level=level, ticker=s.target_ticker,
             entry_price=entry, exit_price=exit_price, exit_qty=qty,
             pnl_pct=pnl_pct, dry_run=True, fill_latency_ms=0, **log_extra)
+        await state.set_closed(reason)
         await state.persist(os.getenv("STATE_DIR", "data/state"),
                             datetime.now(KST).strftime("%Y%m%d"))
-        return
+        return True
 
     sell_id = ""
     exit_price = price
     try:
         sell_resp = await _send_sell(s.target_ticker, qty, mode)
-        sell_id = sell_resp.get("output", {}).get("ODNO", "")
+        output = sell_resp.get("output") if isinstance(sell_resp.get("output"), dict) else {}
+        sell_id = output.get("ODNO", "")
+        if sell_resp.get("rt_cd") not in ("0", 0, None) or not sell_id:
+            raise RuntimeError(
+                f"sell rejected rt_cd={sell_resp.get('rt_cd')} "
+                f"msg_cd={sell_resp.get('msg_cd')} msg1={sell_resp.get('msg1')} "
+                f"order_id={sell_id or '-'}"
+            )
         fill = await _poll_fill(sell_id, timeout_sec=30)
         if fill:
             exit_price = fill["fill_price"]
@@ -287,17 +356,34 @@ async def _execute_close(price: float, reason: str) -> None:
             message=f"매도 주문 오류: {s.target_ticker} {repr(e)}. 수동 청산 필요",
             ticker=s.target_ticker,
         )
-        return
+        return False
 
     pnl_pct = round((exit_price / entry - 1) * 100, 2) if entry else 0.0
 
     if s.trade_id:
-        order_db_id = await db.record_order(
-            s.trade_id, sell_id, "SELL", qty, exit_price, "CLOSE_SELL", s.target_ticker,
-        )
-        await db.update_order_fill(order_db_id, exit_price, qty, 0)
-        await db.close_trade(s.trade_id, exit_price, reason, pnl_pct, s.highest_step)
-
+        try:
+            order_db_id = await db.record_order(
+                s.trade_id, sell_id, "SELL", qty, exit_price, "CLOSE_SELL", s.target_ticker, s.target_name,
+            )
+            await db.update_order_fill(order_db_id, exit_price, qty, 0)
+            await db.close_trade(s.trade_id, exit_price, reason, pnl_pct, s.highest_step)
+        except Exception as e:
+            log(
+                "F4_CLOSE_RECORD_ERROR",
+                level="CRIT",
+                ticker=s.target_ticker,
+                order_id=sell_id,
+                error=repr(e),
+            )
+            await notifier.send(
+                "F4_CLOSE_RECORD_ERROR",
+                level="CRIT",
+                message=f"F4 매도 성공 후 DB 기록 실패: {s.target_ticker} order_id={sell_id} {repr(e)}. 재매도 방지를 위해 CLOSED 처리합니다.",
+                ticker=s.target_ticker,
+            )
+            await state.set_closed(reason)
+            await state.persist(os.getenv("STATE_DIR", "data/state"), datetime.now(KST).strftime("%Y%m%d"))
+            return True
     event_name = "TRAILING_STOP" if reason == "TRAILING" else reason
     level = "INFO" if reason == "TRAILING" else "WARN"
 
@@ -314,8 +400,10 @@ async def _execute_close(price: float, reason: str) -> None:
         message=f"{reason} 청산: {s.target_ticker} @ {exit_price:,}원 (P&L {pnl_pct:+.2f}%)",
         ticker=s.target_ticker,
     )
+    await state.set_closed(reason)
     await state.persist(os.getenv("STATE_DIR", "data/state"),
                         datetime.now(KST).strftime("%Y%m%d"))
+    return True
 
 
 async def _run_dry_ticks(ticker: str, spike_filter: SpikeFilter) -> None:

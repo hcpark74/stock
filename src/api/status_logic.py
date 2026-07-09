@@ -34,6 +34,25 @@ def _optional_balance_float(source: dict, field: str) -> float | None:
         raise RuntimeError(f"KIS balance response invalid field {field}={value!r}") from exc
 
 
+def _asset_holding_from_item(item: dict) -> dict | None:
+    qty = int(_required_balance_float(item, "hldg_qty"))
+    if qty <= 0:
+        return None
+    ticker = str(item.get("pdno") or "").strip()
+    return {
+        "ticker": ticker,
+        "name": str(item.get("prdt_name") or "").strip(),
+        "qty": qty,
+        "orderable_qty": int(_optional_balance_float(item, "ord_psbl_qty") or 0),
+        "current_price": _optional_balance_float(item, "prpr"),
+        "avg_price": _optional_balance_float(item, "pchs_avg_pric"),
+        "purchase_amount": _optional_balance_float(item, "pchs_amt"),
+        "evaluation_amount": _optional_balance_float(item, "evlu_amt"),
+        "pnl_amount": _optional_balance_float(item, "evlu_pfls_amt"),
+        "pnl_pct": _optional_balance_float(item, "evlu_pfls_rt"),
+    }
+
+
 def parse_asset_snapshot_response(resp: dict) -> dict:
     rt_cd = resp.get("rt_cd")
     if rt_cd not in (None, "0", 0):
@@ -54,7 +73,7 @@ def parse_asset_snapshot_response(resp: dict) -> dict:
     if not isinstance(summary, dict):
         raise RuntimeError("KIS balance response output2[0] is not an object")
 
-    holdings = [item for item in output1 if int(_required_balance_float(item, "hldg_qty")) > 0]
+    holdings = [h for item in output1 if (h := _asset_holding_from_item(item)) is not None]
     cash = _required_balance_float(summary, "dnca_tot_amt")
     buyable = _optional_balance_float(summary, "ord_psbl_cash")
     stock_value = _required_balance_float(summary, "scts_evlu_amt")
@@ -68,6 +87,7 @@ def parse_asset_snapshot_response(resp: dict) -> dict:
         "total_asset": total,
         "pnl_amount": pnl,
         "holdings_count": len(holdings),
+        "holdings": holdings,
         "source": "KIS",
     }
 

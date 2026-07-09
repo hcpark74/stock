@@ -461,33 +461,34 @@ tr:hover td{background:var(--s2);}
         <div class="view-head">
           <div>
             <div class="view-title">자산 조회</div>
-            <div class="view-sub">KIS 잔고 기준 현재 계좌 상태</div>
+            <div class="view-sub">KIS 잔고 기준 현재 계좌 상태 · 자동매매 포지션은 별도 표시</div>
           </div>
           <div class="asset-action">
             <button class="refresh-btn" title="KIS 잔고 다시 조회">↻</button>
-            <span class="status-chip ok">최근 조회 09:15:23</span>
+            <span class="status-chip ok">최근 조회 09:10:15</span>
           </div>
         </div>
         <div class="scards asset-cards">
-          <div class="sc2"><div class="sc2-lbl">총평가금액</div><div class="sc2-val">9,987,445</div></div>
-          <div class="sc2"><div class="sc2-lbl">예수금</div><div class="sc2-val" style="color:var(--br)">492,845</div></div>
-          <div class="sc2"><div class="sc2-lbl">주문가능금액</div><div class="sc2-val" style="color:var(--br)">492,845</div><div class="sc2-note">예수금 기준</div></div>
-          <div class="sc2"><div class="sc2-lbl">유가평가</div><div class="sc2-val">9.49M</div></div>
-          <div class="sc2"><div class="sc2-lbl">당일손익</div><div class="sc2-val pup">+1.84%</div></div>
+          <div class="sc2"><div class="sc2-lbl">총평가금액</div><div class="sc2-val">8,813,179</div></div>
+          <div class="sc2"><div class="sc2-lbl">예수금</div><div class="sc2-val" style="color:var(--br)">10,064,148</div></div>
+          <div class="sc2"><div class="sc2-lbl">예수금 기준 주문가능</div><div class="sc2-val" style="color:var(--br)">10,064,148</div><div class="sc2-note">실매수 가능은 주문 전 조회</div></div>
+          <div class="sc2"><div class="sc2-lbl">주식평가금액</div><div class="sc2-val">8.79M</div></div>
+          <div class="sc2"><div class="sc2-lbl">평가손익</div><div class="sc2-val pdn">-1,252,579</div></div>
         </div>
         <div class="tbl-wrap">
           <table>
-            <thead><tr><th>구분</th><th>금액</th><th>비중</th><th>상태</th></tr></thead>
+            <thead><tr><th>구분</th><th>수량</th><th>평가금액</th><th>평가손익</th><th>상태</th></tr></thead>
             <tbody>
-              <tr><td>예수금</td><td>492,845</td><td>4.9%</td><td><span class="badge b-op">주문가능</span></td></tr>
-              <tr><td>삼성전자 107주</td><td>9,494,600</td><td>95.1%</td><td><span class="badge b-tr">보유중</span></td></tr>
-              <tr><td>평가손익</td><td class="pup">+174,600</td><td class="pup">+1.84%</td><td><span class="badge b-tr">양호</span></td></tr>
+              <tr><td>예수금</td><td>-</td><td>10,064,148</td><td>-</td><td><span class="badge b-op">예수금 기준</span></td></tr>
+              <tr><td>038110 에코플라스틱</td><td>1,208주</td><td>2,364,056</td><td class="pdn">-114,131</td><td><span class="badge b-tr">계좌보유</span></td></tr>
+              <tr><td>065770 CS</td><td>3,980주</td><td>6,324,220</td><td class="pdn">-1,142,818</td><td><span class="badge b-tr">계좌보유</span></td></tr>
+              <tr><td>365660 레몬헬스케어</td><td>9주</td><td>100,530</td><td class="pup">+4,370</td><td><span class="badge b-op">자동매매</span></td></tr>
+              <tr><td>계좌 보유 합계</td><td>3종목</td><td>8,788,806</td><td class="pdn">-1,252,579</td><td><span class="badge b-tr">KIS 잔고</span></td></tr>
             </tbody>
           </table>
         </div>
       </div>
     </div>
-
     <!-- ORDERS -->
     <div id="sc-orders" class="sc sc-hist">
       <div class="hist-inner">
@@ -497,8 +498,8 @@ tr:hover td{background:var(--s2);}
             <div class="view-sub">F3/F4/F5 주문 실행과 처리 결과</div>
           </div>
           <div class="ref-pill">
-            <span class="ref-k">주문가능 참조</span>
-            <span class="ref-v">492K</span>
+            <span class="ref-k">실매수 가능 참조</span>
+            <span class="ref-v">종목별 조회</span>
           </div>
         </div>
         <div class="scards">

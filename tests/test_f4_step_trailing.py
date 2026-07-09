@@ -1,4 +1,5 @@
 """F4 Step Trailing 로직 유닛 테스트."""
+import asyncio
 import math
 from datetime import datetime as _dt
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -252,6 +253,27 @@ async def test_hard_stop_skipped_when_trailing_active():
 
 # ── Step Trailing ─────────────────────────────────────────────────────
 
+
+async def test_close_trigger_does_not_mark_closed_before_sell_finishes(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    s = _state_mod.get()
+    s.trailing_active = True
+    s.highest_step = STEP_SIZE
+    observed_statuses = []
+
+    async def fake_execute_close(_price, _reason):
+        observed_statuses.append(_state_mod.get().position_status)
+        return False
+
+    monkeypatch.setattr(f4, "_execute_close", fake_execute_close)
+
+    stop = ENTRY * (1 + STEP_SIZE - STEP_TRAIL)
+    await _process_tick(stop, _spike_always_pass())
+
+    assert observed_statuses == ["HOLDING"]
+    assert _state_mod.get().position_status == "HOLDING"
+
 async def test_step_trailing_triggers_at_stop():
     """trailing 활성 + stop 가격 이하 → TRAILING 발동."""
     s = _state_mod.get()
@@ -424,6 +446,55 @@ async def test_rest_backup_survives_fetch_error(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_waits_for_close_task_when_sibling_monitor_finishes(monkeypatch):
+    import asyncio as real_asyncio
+
+    import src.modules.f4_tracking as f4
+
+    s = _state_mod.get()
+    s.target_ticker = "005930"
+    s.trailing_active = True
+    s.highest_step = STEP_SIZE
+
+    close_started = real_asyncio.Event()
+    release_close = real_asyncio.Event()
+
+    async def fake_execute_close(_price, reason):
+        close_started.set()
+        await release_close.wait()
+        await _state_mod.set_closed(reason)
+        return True
+
+    async def fake_subscribe(_ticker, on_tick, *, stop_if=None):
+        stop = ENTRY * (1 + STEP_SIZE - STEP_TRAIL)
+        await on_tick({"price": stop})
+
+    async def sibling_finishes(*_args, **_kwargs):
+        await close_started.wait()
+
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setattr(f4, "_close_in_progress", False)
+    monkeypatch.setattr(f4, "_closing_task", None)
+    monkeypatch.setattr(f4, "F4_REST_BACKUP_ENABLED", True)
+    monkeypatch.setattr(f4, "_execute_close", fake_execute_close)
+    monkeypatch.setattr(f4.kis_ws, "subscribe", fake_subscribe)
+    monkeypatch.setattr(f4, "_run_rest_price_backup", sibling_finishes)
+    monkeypatch.setattr(f4.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f4, "log", lambda *args, **kwargs: None)
+
+    task = real_asyncio.create_task(f4.run())
+    await real_asyncio.wait_for(close_started.wait(), 1)
+    await real_asyncio.sleep(0.05)
+
+    assert not task.done()
+    assert _state_mod.get().position_status == "HOLDING"
+
+    release_close.set()
+    await real_asyncio.wait_for(task, 1)
+
+    assert _state_mod.get().position_status == "CLOSED"
+
+@pytest.mark.asyncio
 async def test_run_keeps_monitoring_and_alerts_when_backup_crashes(monkeypatch):
     import asyncio as real_asyncio
 
@@ -492,8 +563,10 @@ async def test_execute_close_sends_critical_alert_on_sell_error(monkeypatch):
     monkeypatch.setattr("src.modules.f4_tracking.db.record_order", record_order)
     monkeypatch.setattr("src.modules.f4_tracking.state.persist", persist)
 
-    await _execute_close(ENTRY * 0.98, "HARD_STOP")
+    result = await _execute_close(ENTRY * 0.98, "HARD_STOP")
 
+    assert result is False
+    assert _state_mod.get().position_status == "HOLDING"
     notify.assert_awaited_once_with(
         "F4_SELL_ERROR",
         level="CRIT",
@@ -502,3 +575,99 @@ async def test_execute_close_sends_critical_alert_on_sell_error(monkeypatch):
     )
     record_order.assert_not_awaited()
     persist.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_execute_close_treats_rejected_sell_response_as_failure(monkeypatch):
+    from src.modules.f4_tracking import _execute_close
+
+    notify = AsyncMock()
+    record_order = AsyncMock()
+    close_trade = AsyncMock()
+    persist = AsyncMock()
+
+    monkeypatch.setattr(
+        "src.modules.f4_tracking._send_sell",
+        AsyncMock(return_value={"rt_cd": "1", "msg_cd": "EGW00001", "msg1": "rejected", "output": {}}),
+    )
+    monkeypatch.setattr("src.modules.f4_tracking.notifier.send", notify)
+    monkeypatch.setattr("src.modules.f4_tracking.db.record_order", record_order)
+    monkeypatch.setattr("src.modules.f4_tracking.db.close_trade", close_trade)
+    monkeypatch.setattr("src.modules.f4_tracking.state.persist", persist)
+
+    result = await _execute_close(ENTRY * 0.98, "HARD_STOP")
+
+    assert result is False
+    assert _state_mod.get().position_status == "HOLDING"
+    notify.assert_awaited_once()
+    record_order.assert_not_awaited()
+    close_trade.assert_not_awaited()
+    persist.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_execute_close_logs_and_alerts_when_directly_cancelled(monkeypatch):
+    from src.modules import f4_tracking as f4
+
+    notify = AsyncMock()
+    events = []
+
+    async def cancelled_sell(*_args, **_kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(f4, "_send_sell", cancelled_sell)
+    monkeypatch.setattr(f4.notifier, "send", notify)
+    monkeypatch.setattr(f4, "log", lambda event, **kwargs: events.append((event, kwargs)))
+
+    with pytest.raises(asyncio.CancelledError):
+        await f4._execute_close(ENTRY * 0.98, "HARD_STOP")
+
+    assert "F4_CLOSE_TASK_CANCELLED" in [event for event, _ in events]
+    notify.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_execute_close_closes_state_when_db_recording_fails_after_sell(monkeypatch):
+    from src.modules import f4_tracking as f4
+
+    notify = AsyncMock()
+    persist = AsyncMock()
+    close_trade = AsyncMock()
+    events = []
+    _state_mod.get().trade_id = 123
+
+    monkeypatch.setattr(
+        f4,
+        "_send_sell",
+        AsyncMock(return_value={"rt_cd": "0", "output": {"ODNO": "SELL001"}}),
+    )
+    monkeypatch.setattr(f4, "_poll_fill", AsyncMock(return_value={"fill_price": round(ENTRY * 0.98), "fill_qty": 100}))
+    monkeypatch.setattr(f4.db, "record_order", AsyncMock(side_effect=RuntimeError("db down")))
+    monkeypatch.setattr(f4.db, "close_trade", close_trade)
+    monkeypatch.setattr(f4.state, "persist", persist)
+    monkeypatch.setattr(f4.notifier, "send", notify)
+    monkeypatch.setattr(f4, "log", lambda event, **kwargs: events.append((event, kwargs)))
+
+    result = await f4._execute_close(ENTRY * 0.98, "HARD_STOP")
+
+    assert result is True
+    assert _state_mod.get().position_status == "CLOSED"
+    assert _state_mod.get().close_reason == "HARD_STOP"
+    assert "F4_CLOSE_RECORD_ERROR" in [event for event, _ in events]
+    notify.assert_awaited_once()
+    persist.assert_awaited_once()
+    close_trade.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_trigger_close_warns_only_once_while_close_is_in_progress(monkeypatch):
+    from src.modules import f4_tracking as f4
+
+    events = []
+    monkeypatch.setattr(f4, "_close_in_progress", True)
+    monkeypatch.setattr(f4, "_close_in_progress_warned", False)
+    monkeypatch.setattr(f4, "log", lambda event, **kwargs: events.append((event, kwargs)))
+
+    await f4._trigger_close(ENTRY * 0.98, "HARD_STOP")
+    await f4._trigger_close(ENTRY * 0.97, "HARD_STOP")
+
+    assert [event for event, _ in events] == ["F4_CLOSE_ALREADY_IN_PROGRESS"]
+    assert f4._close_in_progress_warned is True

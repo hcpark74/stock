@@ -159,6 +159,20 @@ def test_parse_asset_snapshot_response_parses_kis_balance():
         "total_asset": 1_500_000.0,
         "pnl_amount": 12_000.0,
         "holdings_count": 1,
+        "holdings": [
+            {
+                "ticker": "005930",
+                "name": "",
+                "qty": 2,
+                "orderable_qty": 0,
+                "current_price": None,
+                "avg_price": None,
+                "purchase_amount": None,
+                "evaluation_amount": None,
+                "pnl_amount": None,
+                "pnl_pct": None,
+            }
+        ],
         "source": "KIS",
     }
 

@@ -38,6 +38,7 @@ LOG_DIR = os.getenv("LOG_DIR", "data/logs")
 STATE_DIR = os.getenv("STATE_DIR", "data/state")
 NTP_SERVERS = [s.strip() for s in os.getenv("NTP_SERVER", "pool.ntp.org").split(",")]
 DB_PATH = os.path.join(os.getenv("DB_DIR", "data/db"), "trading.db")
+PID_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.pid")
 F2_RETRY_F1_ON_FAIL = os.getenv(
     "F2_RETRY_F1_ON_FAIL",
     "0" if os.getenv("KIS_MODE", "PAPER") == "REAL" else "1",
@@ -103,15 +104,40 @@ async def job_ntp_check() -> None:
     time_sync.check_ntp(NTP_SERVERS)
 
 
+
+async def _today_trade_exists() -> bool:
+    try:
+        return await db.get_trade_by_date(datetime.now(KST).strftime("%Y%m%d")) is not None
+    except Exception as exc:
+        logger.log("TRADE_EXISTENCE_CHECK_FAILED", level="WARN", error=repr(exc))
+        return False
+
+
+async def _skip_entry_pipeline_if_trade_exists(source: str) -> bool:
+    """Once today's buy exists, never rerun F1/F2/F3 catch-up or scheduled entry."""
+    global _f2_done, _f3_started
+    if not await _today_trade_exists():
+        return False
+    _f2_done = True
+    _f3_started = True
+    state.get().day_skip = True
+    state.get().close_reason = state.get().close_reason or "TRADE_ALREADY_EXISTS"
+    logger.log("TRADE_ALREADY_EXISTS", level="WARN", source=source, action="SKIP_ENTRY_PIPELINE")
+    return True
+
 async def job_f1() -> None:
     global _f1_result
     await _ensure_trading_day()
+    if await _skip_entry_pipeline_if_trade_exists("JOB_F1"):
+        return
     _f1_result = await f1_filter.run()
     await _run_f2_f3_after_f1(immediate=_past_f3_schedule())
 
 
 async def job_f2() -> None:
     await _ensure_trading_day()
+    if await _skip_entry_pipeline_if_trade_exists("JOB_F2"):
+        return
     # F1 completion can trigger F2/F3 immediately; this scheduled job is a safety net.
     if _f2_done:
         return
@@ -123,6 +149,8 @@ async def job_f2() -> None:
 async def job_f3() -> None:
     global _f3_started
     await _ensure_trading_day()
+    if await _skip_entry_pipeline_if_trade_exists("JOB_F3"):
+        return
     # Keep the scheduled F3 job as a fallback when F2 locked a target but chaining did not start F3.
     if _f3_started:
         return
@@ -232,6 +260,8 @@ async def _run_catchup() -> None:
     F3 fill deadline 이후엔 진입 마감이 지났으므로 catchup 불가.
     """
     await _ensure_trading_day()
+    if await _skip_entry_pipeline_if_trade_exists("CATCHUP"):
+        return
     dry_run = os.getenv("DRY_RUN", "0") == "1"
     force = dry_run or os.getenv("FORCE_CATCHUP", "0") == "1"
 
@@ -491,19 +521,102 @@ async def _recover_open_trade_from_db(today: str) -> None:
 
 # ── PID 파일 관리 ────────────────────────────────────────────────────
 
-def _write_pid() -> None:
+_pid_lock_file = None
+
+
+def _read_pid(path: str = PID_PATH) -> int | None:
     try:
-        with open("main.pid", "w") as f:
-            f.write(str(os.getpid()))
+        raw = open(path, encoding="utf-8").read().strip()
+        return int(raw) if raw else None
+    except (OSError, ValueError):
+        return None
+
+
+def _try_lock_pid_file(handle) -> bool:
+    try:
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        return True
+    except OSError:
+        return False
+
+
+def _unlock_pid_file(handle) -> None:
+    try:
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass
+
+
+def _write_pid() -> bool:
+    global _pid_lock_file
+    if _pid_lock_file is not None:
+        return True
+
+    path = PID_PATH
+    current_pid = os.getpid()
+    try:
+        handle = open(path, "a+", encoding="utf-8")
     except OSError as e:
-        logger.log("PID_WRITE_ERROR", level="WARN", path="main.pid", error=repr(e))
+        logger.log("PID_WRITE_ERROR", level="WARN", path=path, error=repr(e))
+        return False
+
+    if not _try_lock_pid_file(handle):
+        existing_pid = _read_pid(path)
+        logger.log(
+            "PROCESS_ALREADY_RUNNING",
+            level="CRIT",
+            path=path,
+            existing_pid=existing_pid,
+            current_pid=current_pid,
+        )
+        handle.close()
+        return False
+
+    try:
+        handle.seek(0)
+        existing_raw = handle.read().strip()
+        existing_pid = int(existing_raw) if existing_raw else None
+    except ValueError:
+        existing_pid = None
+
+    if existing_pid and existing_pid != current_pid:
+        logger.log(
+            "STALE_PID_REPLACED",
+            level="WARN",
+            path=path,
+            stale_pid=existing_pid,
+            current_pid=current_pid,
+        )
+
+    try:
+        handle.seek(0)
+        handle.truncate()
+        handle.write(str(current_pid))
+        handle.flush()
+        os.fsync(handle.fileno())
+        _pid_lock_file = handle
+        return True
+    except OSError as e:
+        _unlock_pid_file(handle)
+        handle.close()
+        logger.log("PID_WRITE_ERROR", level="WARN", path=path, error=repr(e))
+        return False
 
 
 def _clear_pid() -> None:
-    try:
-        os.remove("main.pid")
-    except OSError:
-        pass
+    global _pid_lock_file
+    handle = _pid_lock_file
+    if handle is None:
+        return
+    _pid_lock_file = None
+    _unlock_pid_file(handle)
+    handle.close()
 
 
 # ── 메인 ─────────────────────────────────────────────────────────────
@@ -511,7 +624,8 @@ def _clear_pid() -> None:
 async def main() -> None:
     dry_run = os.getenv("DRY_RUN", "0") == "1"
     logger.setup(LOG_DIR)
-    _write_pid()
+    if not _write_pid():
+        raise SystemExit(2)
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     await db.init(DB_PATH)
     await _ensure_trading_day()

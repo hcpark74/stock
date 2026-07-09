@@ -28,6 +28,7 @@ async def init(db_path: str) -> None:
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             date         TEXT NOT NULL UNIQUE,
             ticker       TEXT NOT NULL,
+            name            TEXT,
             entry_price  REAL,
             entry_qty    INTEGER,
             entry_at     TEXT,
@@ -61,6 +62,7 @@ async def init(db_path: str) -> None:
                                 'CLOSE_SELL','TIMEOUT_SELL','SLIPPAGE_SELL','CANCEL'
                             )),
             ticker          TEXT NOT NULL,
+            name            TEXT,
             order_qty       INTEGER NOT NULL,
             order_price     REAL,
             fill_price      REAL,
@@ -126,6 +128,14 @@ async def init(db_path: str) -> None:
         await _conn.execute("ALTER TABLE trades ADD COLUMN highest_step REAL")
     except Exception:
         pass  # 이미 존재하면 무시
+    try:
+        await _conn.execute("ALTER TABLE trades ADD COLUMN name TEXT")
+    except Exception:
+        pass  # already exists
+    try:
+        await _conn.execute("ALTER TABLE orders ADD COLUMN name TEXT")
+    except Exception:
+        pass  # 이미 존재하면 무시
     await _conn.commit()
 
 
@@ -149,6 +159,46 @@ async def close() -> None:
 def _now() -> str:
     return datetime.now(KST).isoformat()
 
+
+def _num(value):
+    if value is None or value == "":
+        return None
+    try:
+        return float(str(value).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def _asset_holdings_from_raw(raw_json: str | None) -> list[dict]:
+    if not raw_json:
+        return []
+    try:
+        raw = json.loads(raw_json)
+    except Exception:
+        return []
+    output1 = raw.get("output1") or []
+    if not isinstance(output1, list):
+        return []
+    holdings: list[dict] = []
+    for item in output1:
+        if not isinstance(item, dict):
+            continue
+        qty = int(_num(item.get("hldg_qty")) or 0)
+        if qty <= 0:
+            continue
+        holdings.append({
+            "ticker": str(item.get("pdno") or "").strip(),
+            "name": str(item.get("prdt_name") or "").strip(),
+            "qty": qty,
+            "orderable_qty": int(_num(item.get("ord_psbl_qty")) or 0),
+            "current_price": _num(item.get("prpr")),
+            "avg_price": _num(item.get("pchs_avg_pric")),
+            "purchase_amount": _num(item.get("pchs_amt")),
+            "evaluation_amount": _num(item.get("evlu_amt")),
+            "pnl_amount": _num(item.get("evlu_pfls_amt")),
+            "pnl_pct": _num(item.get("evlu_pfls_rt")),
+        })
+    return holdings
 
 async def open_trade(date: str, ticker: str, entry_price: float, entry_qty: int) -> int:
     """Insert a trade and return its id. Existing same-day trades are reused."""
@@ -195,6 +245,7 @@ async def record_order(
     price: float,
     phase: str,
     ticker: str,
+    name: str | None = None,
 ) -> int:
     """orders 테이블에 주문 INSERT. order_db_id 반환.
 
@@ -206,9 +257,9 @@ async def record_order(
     async with conn.execute(
         """INSERT INTO orders
                (trade_id, kis_order_id, order_type, order_phase,
-                ticker, order_qty, order_price, status, ordered_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)""",
-        (trade_id, kis_order_id, side, phase, ticker, qty, price, now),
+                ticker, name, order_qty, order_price, status, ordered_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)""",
+        (trade_id, kis_order_id, side, phase, ticker, name, qty, price, now),
     ) as cur:
         order_db_id = cur.lastrowid
     await conn.commit()
@@ -328,7 +379,7 @@ async def latest_asset_snapshot() -> dict | None:
     conn = get()
     async with conn.execute(
         """SELECT captured_at, total_asset, cash, buyable_cash, buyable_cash_source,
-                  stock_value, pnl_amount, holdings_count, source
+                  stock_value, pnl_amount, holdings_count, source, raw_json
            FROM asset_snapshots
            ORDER BY captured_at DESC, id DESC
            LIMIT 1"""
@@ -337,6 +388,10 @@ async def latest_asset_snapshot() -> dict | None:
     if row is None:
         return None
     result = dict(row)
+    raw_json = result.pop("raw_json", None)
     result["source"] = result.get("source") or "KIS"
     result["snapshot_source"] = "DB"
+    result["holdings"] = _asset_holdings_from_raw(raw_json)
+    if result.get("holdings_count") is None:
+        result["holdings_count"] = len(result["holdings"])
     return result

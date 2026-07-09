@@ -625,11 +625,22 @@ function renderSelectionFilters(rows) {
 }
 
 function positionAssetValues(d) {
-  if(!d) return {stockValue:null, pnlAmount:null, total:null, cash:null, buyable:null, holdings:0};
+  if(!d) return {stockValue:null, pnlAmount:null, total:null, cash:null, buyable:null, holdings:0, holdingsList:[]};
   const assets = d.assets || _lastAssets || {};
   const qty = Number(d.remaining_qty || 0);
   const cur = Number(d.current_price || 0);
   const entry = Number(d.entry_price || 0);
+  const fallbackHolding = qty > 0 && d.ticker ? [{
+    ticker: d.ticker,
+    name: d.name || tickerName(d.ticker),
+    qty,
+    orderable_qty: qty,
+    current_price: cur || null,
+    evaluation_amount: cur > 0 ? qty * cur : null,
+    pnl_amount: cur > 0 && entry > 0 ? (cur - entry) * qty : null,
+    pnl_pct: d.pnl_pct,
+  }] : [];
+  const holdingsList = Array.isArray(assets.holdings) && assets.holdings.length ? assets.holdings : fallbackHolding;
   const stockValue = assets.stock_value != null ? Number(assets.stock_value) : (qty > 0 && cur > 0 ? qty * cur : null);
   const pnlAmount = assets.pnl_amount != null ? Number(assets.pnl_amount) : (qty > 0 && cur > 0 && entry > 0 ? (cur - entry) * qty : null);
   return {
@@ -639,7 +650,8 @@ function positionAssetValues(d) {
     cash: assets.cash != null ? Number(assets.cash) : null,
     buyable: assets.buyable_cash != null ? Number(assets.buyable_cash) : null,
     buyableSource: assets.buyable_cash_source || null,
-    holdings: assets.holdings_count != null ? Number(assets.holdings_count) : (qty > 0 && d.ticker ? 1 : 0),
+    holdings: assets.holdings_count != null ? Number(assets.holdings_count) : holdingsList.length,
+    holdingsList,
   };
 }
 
@@ -673,7 +685,7 @@ function renderAssetSummary(d) {
   pnl.className = 'asset-v ' + (v.pnlAmount == null ? '' : v.pnlAmount >= 0 ? 'up' : 'dn');
   $('as-buyable').innerHTML = v.buyable == null ? '—' : fmtWon(v.buyable);
   if($('as-source')) $('as-source').textContent = assetSnapshotLabel(assets);
-  $('order-buyable').textContent = v.buyable == null ? '—' : fmtM(v.buyable);
+  $('order-buyable').textContent = '종목별 조회';
 }
 
 function renderAssets(d) {
@@ -683,26 +695,26 @@ function renderAssets(d) {
   $('asset-cash').textContent = v.cash == null ? '—' : fmt(v.cash);
   $('asset-buyable').textContent = v.buyable == null ? '—' : fmt(v.buyable);
   const assets = d?.assets || _lastAssets || null;
-  $('asset-buyable-source').textContent = `${buyableSourceLabel(v.buyableSource)} · ${assetSnapshotLabel(assets, 'KIS 현재 조회')}`;
+  $('asset-buyable-source').textContent = `${buyableSourceLabel(v.buyableSource)} · 실매수 가능은 주문 전 조회 · ${assetSnapshotLabel(assets, 'KIS 현재 조회')}`;
   $('asset-stock').textContent = v.stockValue == null ? '—' : fmtM(v.stockValue);
   $('asset-pnl').textContent = v.pnlAmount == null ? '—' : fmt(v.pnlAmount);
   $('asset-pnl').className = 'sc2-val ' + (v.pnlAmount == null ? '' : v.pnlAmount >= 0 ? 'pup' : 'pdn');
 
   const rows = [];
-  rows.push(`<tr><td>예수금</td><td>${v.cash == null ? '—' : fmt(v.cash)}</td><td>—</td><td><span class="badge ${v.cash == null ? 'b-to' : 'b-op'}">${v.cash == null ? 'API 대기' : '연동'}</span></td></tr>`);
-  rows.push(`<tr><td>주문가능금액</td><td>${v.buyable == null ? '—' : fmt(v.buyable)}</td><td>${esc(buyableSourceLabel(v.buyableSource))}</td><td><span class="badge ${v.buyable == null ? 'b-to' : 'b-op'}">${v.buyable == null ? 'API 대기' : '주문가능'}</span></td></tr>`);
-  if(v.holdings && d?.ticker) {
-    rows.push(`<tr><td>${esc(d.ticker)} ${esc(TICKER_NAMES[d.ticker] || '')}</td><td>${fmt(v.stockValue)}</td><td>—</td><td><span class="badge b-tr">보유중</span></td></tr>`);
-    rows.push(`<tr><td>평가손익</td><td class="${v.pnlAmount >= 0 ? 'pup' : 'pdn'}">${fmt(v.pnlAmount)}</td><td>${fmtPct(d.pnl_pct)}</td><td><span class="badge ${v.pnlAmount >= 0 ? 'b-tr' : 'b-hs'}">${v.pnlAmount >= 0 ? '수익' : '손실'}</span></td></tr>`);
-  } else if(v.holdings) {
-    rows.push(`<tr><td>보유종목</td><td>${fmt(v.holdings)}종목</td><td>—</td><td><span class="badge b-tr">보유중</span></td></tr>`);
+  rows.push(`<tr><td>예수금</td><td>—</td><td>${v.cash == null ? '—' : fmt(v.cash)}</td><td>—</td><td><span class="badge ${v.cash == null ? 'b-to' : 'b-op'}">${v.cash == null ? 'API 대기' : '예수금 기준'}</span></td></tr>`);
+  if(v.holdingsList.length) {
+    v.holdingsList.forEach(h => {
+      const isAuto = d?.ticker && String(h.ticker) === String(d.ticker);
+      const pnl = h.pnl_amount == null ? null : Number(h.pnl_amount);
+      rows.push(`<tr><td>${esc(stockText(h.ticker, h.name))}</td><td>${fmt(h.qty)}주</td><td>${h.evaluation_amount == null ? '—' : fmt(h.evaluation_amount)}</td><td class="${pnl == null ? '' : pnl >= 0 ? 'pup' : 'pdn'}">${pnl == null ? '—' : fmt(pnl)}</td><td><span class="badge ${isAuto ? 'b-op' : 'b-tr'}">${isAuto ? '자동매매' : '계좌보유'}</span></td></tr>`);
+    });
+    rows.push(`<tr><td>계좌 보유 합계</td><td>${fmt(v.holdings)}종목</td><td>${v.stockValue == null ? '—' : fmt(v.stockValue)}</td><td class="${v.pnlAmount == null ? '' : v.pnlAmount >= 0 ? 'pup' : 'pdn'}">${v.pnlAmount == null ? '—' : fmt(v.pnlAmount)}</td><td><span class="badge b-tr">KIS 잔고</span></td></tr>`);
   } else {
-    rows.push('<tr><td>보유종목</td><td>0</td><td>0%</td><td><span class="badge b-to">대기중</span></td></tr>');
+    rows.push('<tr><td>보유종목</td><td>0종목</td><td>—</td><td>—</td><td><span class="badge b-to">대기중</span></td></tr>');
   }
   $('asset-tbody').innerHTML = rows.join('');
   $('set-mode').textContent = d?.mode || 'PAPER';
 }
-
 function shortTime(s) {
   if(!s) return '—';
   const m = String(s).match(/T(\d{2}:\d{2}:\d{2})/);
@@ -741,7 +753,7 @@ function renderOrders(rows) {
     return;
   }
   body.innerHTML = orders.map(o => {
-    const orderTickerName = TICKER_NAMES[o.ticker] || '';
+    const orderTickerName = tickerName(o.ticker, o.name);
     return `<tr>
       <td>${esc(o.kis_order_id || (o.id ? `DB#${o.id}` : '—'))}</td>
       <td>${esc(shortTime(o.ordered_at))}</td>

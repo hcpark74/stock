@@ -551,7 +551,7 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
     trade_id = await db.open_trade(_today(), ticker, fill_price, fill_qty)
     state.get().trade_id = trade_id
     order_db_id = await db.record_order(
-        trade_id, order_id, "BUY", fill_qty, fill_price, "FIRST_BUY", ticker,
+        trade_id, order_id, "BUY", fill_qty, fill_price, "FIRST_BUY", ticker, state.get().target_name,
     )
     await db.update_order_fill(order_db_id, fill_price, fill_qty, 0)
     await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
@@ -596,7 +596,7 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
             s.remaining_qty = (s.remaining_qty or 0) + py_fill["fill_qty"]
             py_order_db_id = await db.record_order(
                 trade_id, py_id, "BUY", py_fill["fill_qty"],
-                py_fill["fill_price"], "PYRAMID_BUY", ticker,
+                py_fill["fill_price"], "PYRAMID_BUY", ticker, s.target_name,
             )
             await db.update_order_fill(
                 py_order_db_id, py_fill["fill_price"], py_fill["fill_qty"], 0,

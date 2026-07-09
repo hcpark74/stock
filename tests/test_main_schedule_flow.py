@@ -723,3 +723,52 @@ async def test_recover_state_db_open_trade_rt_cd_error_sends_alert_and_skips_res
     statuses = [kwargs.get("recovered_status") for event, kwargs in events if event == "PROCESS_RESTART_DETECTED"]
     assert "HOLDING_VERIFY_FAILED" in statuses
     assert "DB_OPEN_TRADE_NO_ACTUAL_HOLDING" in statuses
+
+
+async def test_catchup_skips_f1_f2_f3_when_today_trade_exists(monkeypatch):
+    now = main.datetime.now(main.KST)
+
+    def fake_scheduled_at(hour, minute, second=0):
+        key = (hour, minute, second)
+        if key == (main.F1_H, main.F1_M, 0):
+            return now - timedelta(minutes=1)
+        if key == (main.F3_H, main.F3_M, main.F3_S):
+            return now + timedelta(minutes=8)
+        if key == (main.F3_FILL_DEADLINE_H, main.F3_FILL_DEADLINE_M, 0):
+            return now + timedelta(minutes=9)
+        return now
+
+    f1_run = AsyncMock(return_value=[{"ticker": "005930"}])
+    f2_run = AsyncMock()
+    f3_run = AsyncMock()
+    monkeypatch.delenv("DRY_RUN", raising=False)
+    monkeypatch.delenv("FORCE_CATCHUP", raising=False)
+    monkeypatch.setattr(main, "_scheduled_at", fake_scheduled_at)
+    monkeypatch.setattr(main.db, "get_trade_by_date", AsyncMock(return_value={"id": 7, "ticker": "365660"}))
+    monkeypatch.setattr(main.f1_filter, "run", f1_run)
+    monkeypatch.setattr(main.f2_lockup, "run", f2_run)
+    monkeypatch.setattr(main.f3_entry, "run", f3_run)
+    monkeypatch.setattr(main.notifier, "send", AsyncMock())
+
+    await main._run_catchup()
+
+    f1_run.assert_not_awaited()
+    f2_run.assert_not_awaited()
+    f3_run.assert_not_awaited()
+    assert main._f2_done is True
+    assert main._f3_started is True
+    assert state_mod.get().day_skip is True
+    assert state_mod.get().close_reason == "TRADE_ALREADY_EXISTS"
+
+
+async def test_job_f1_skips_when_today_trade_exists(monkeypatch):
+    f1_run = AsyncMock(return_value=[{"ticker": "005930"}])
+    monkeypatch.setattr(main.db, "get_trade_by_date", AsyncMock(return_value={"id": 7, "ticker": "365660"}))
+    monkeypatch.setattr(main.f1_filter, "run", f1_run)
+    monkeypatch.setattr(main.f3_entry, "run", AsyncMock())
+
+    await main.job_f1()
+
+    f1_run.assert_not_awaited()
+    assert main._f2_done is True
+    assert main._f3_started is True

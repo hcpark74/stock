@@ -83,7 +83,7 @@ async def execute() -> None:
             if s.trade_id:
                 order_db_id = await db.record_order(
                     s.trade_id, sell_id, "SELL", qty, exit_price,
-                    "TIMEOUT_SELL", ticker,
+                    "TIMEOUT_SELL", ticker, s.target_name,
                 )
                 await db.update_order_fill(order_db_id, exit_price, qty, 0)
                 await db.close_trade(s.trade_id, exit_price, "TIMEOUT", pnl_pct, s.highest_step)

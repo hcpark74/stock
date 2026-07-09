@@ -286,3 +286,56 @@ async def test_latest_asset_snapshot_returns_newest(mem):
 
     assert latest["total_asset"] == pytest.approx(2.0)
     assert latest["snapshot_source"] == "DB"
+
+async def test_latest_asset_snapshot_restores_holdings_from_raw(mem):
+    await db.record_asset_snapshot(
+        {"total_asset": 2.0, "holdings_count": 1, "source": "KIS"},
+        raw={
+            "rt_cd": "0",
+            "output1": [
+                {
+                    "pdno": "365660",
+                    "prdt_name": "Lemon Healthcare",
+                    "hldg_qty": "9",
+                    "ord_psbl_qty": "9",
+                    "prpr": "11170",
+                    "evlu_amt": "100530",
+                    "evlu_pfls_amt": "4370",
+                    "evlu_pfls_rt": "4.54",
+                },
+                {"pdno": "000660", "hldg_qty": "0"},
+            ],
+            "output2": [{}],
+        },
+    )
+
+    latest = await db.latest_asset_snapshot()
+
+    assert latest["holdings"] == [
+        {
+            "ticker": "365660",
+            "name": "Lemon Healthcare",
+            "qty": 9,
+            "orderable_qty": 9,
+            "current_price": 11170.0,
+            "avg_price": None,
+            "purchase_amount": None,
+            "evaluation_amount": 100530.0,
+            "pnl_amount": 4370.0,
+            "pnl_pct": 4.54,
+        }
+    ]
+
+
+async def test_record_order_stores_name(tmp_path):
+    await db.init(str(tmp_path / "orders_name.db"))
+    trade_id = await db.open_trade("20260702", "005930", 75_000.0, 10)
+    order_id = await db.record_order(
+        trade_id, "ORD001", "BUY", 10, 75_000.0, "FIRST_BUY", "005930", "삼성전자"
+    )
+
+    async with db.get().execute("SELECT ticker, name FROM orders WHERE id=?", (order_id,)) as cur:
+        row = await cur.fetchone()
+
+    assert dict(row) == {"ticker": "005930", "name": "삼성전자"}
+    await db.close()
