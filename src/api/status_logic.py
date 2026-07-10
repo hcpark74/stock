@@ -76,13 +76,22 @@ def parse_asset_snapshot_response(resp: dict) -> dict:
     holdings = [h for item in output1 if (h := _asset_holding_from_item(item)) is not None]
     cash = _required_balance_float(summary, "dnca_tot_amt")
     buyable = _optional_balance_float(summary, "ord_psbl_cash")
+    settlement = _optional_balance_float(summary, "prvs_rcdl_excc_amt")
+    # ord_psbl_cash 부재 시: 매도대금 T+2 미결제 상태에서는 dnca_tot_amt가 과소평가되므로
+    # D+2 정산금(prvs_rcdl_excc_amt)과 비교해 큰 값을 주문가능금액으로 표시한다.
+    if buyable is not None:
+        buyable_cash, buyable_source = buyable, "ord_psbl_cash"
+    elif settlement is not None and settlement > cash:
+        buyable_cash, buyable_source = settlement, "prvs_rcdl_excc_amt"
+    else:
+        buyable_cash, buyable_source = cash, "dnca_tot_amt"
     stock_value = _required_balance_float(summary, "scts_evlu_amt")
     total = _required_balance_float(summary, "tot_evlu_amt")
     pnl = _required_balance_float(summary, "evlu_pfls_smtl_amt")
     return {
         "cash": cash,
-        "buyable_cash": buyable if buyable is not None else cash,
-        "buyable_cash_source": "ord_psbl_cash" if buyable is not None else "dnca_tot_amt",
+        "buyable_cash": buyable_cash,
+        "buyable_cash_source": buyable_source,
         "stock_value": stock_value,
         "total_asset": total,
         "pnl_amount": pnl,

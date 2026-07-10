@@ -1223,7 +1223,10 @@ async def _fetch_current_price(ticker: str) -> float:
 
 
 async def _fetch_available_cash() -> float:
-    """D+0 예수금 총금액 반환 (주식잔고조회 TTTC8434R)."""
+    """주문가능 현금 반환 (주식잔고조회 TTTC8434R).
+
+    ord_psbl_cash 우선, 부재 시 dnca_tot_amt와 prvs_rcdl_excc_amt(D+2 정산금) 중 큰 값.
+    """
     mode = os.getenv("KIS_MODE", "PAPER")
     resp = await kis_rest.get(
         "/uapi/domestic-stock/v1/trading/inquire-balance",
@@ -1260,11 +1263,15 @@ async def _fetch_available_cash() -> float:
     cash_source = "ord_psbl_cash"
     cash = ord_psbl_cash
     if not ord_psbl_present:
-        cash = dnca_tot_amt
-        cash_source = "dnca_tot_amt"
-        if cash <= 0:
+        # 매도대금 T+2 미결제 상태에서는 dnca_tot_amt가 실제 주문가능금액을 과소평가하므로
+        # D+2 정산금(prvs_rcdl_excc_amt)과 비교해 큰 값을 사용한다.
+        # 과대평가되더라도 주문 직전 종목별 매수가능조회(nrcvb_buy_qty)가 상한을 재적용한다.
+        if prvs_rcdl_excc_amt > dnca_tot_amt:
             cash = prvs_rcdl_excc_amt
             cash_source = "prvs_rcdl_excc_amt"
+        else:
+            cash = dnca_tot_amt
+            cash_source = "dnca_tot_amt"
 
     log(
         "BALANCE_CASH_CHECK",

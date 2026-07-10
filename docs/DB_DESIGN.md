@@ -238,7 +238,7 @@ CREATE TABLE IF NOT EXISTS asset_snapshots (
     total_asset         REAL,                   -- 총평가금액
     cash                REAL,                   -- 예수금
     buyable_cash        REAL,                   -- 주문가능금액
-    buyable_cash_source TEXT,                   -- ord_psbl_cash | dnca_tot_amt
+    buyable_cash_source TEXT,                   -- ord_psbl_cash | dnca_tot_amt | prvs_rcdl_excc_amt
     stock_value         REAL,                   -- 주식평가금액
     pnl_amount          REAL,                   -- 평가손익
     holdings_count      INTEGER,                -- 보유종목 수

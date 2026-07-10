@@ -193,6 +193,23 @@ def test_parse_asset_snapshot_response_falls_back_to_cash_when_buyable_missing()
     assert result["buyable_cash_source"] == "dnca_tot_amt"
 
 
+def test_parse_asset_snapshot_response_uses_settlement_amount_when_larger():
+    result = status_logic.parse_asset_snapshot_response({
+        "output1": [],
+        "output2": [{
+            "dnca_tot_amt": "120,543",
+            "prvs_rcdl_excc_amt": "8,865,465",
+            "scts_evlu_amt": "500000",
+            "tot_evlu_amt": "1500000",
+            "evlu_pfls_smtl_amt": "12000",
+        }],
+    })
+
+    assert result["cash"] == 120_543.0
+    assert result["buyable_cash"] == 8_865_465.0
+    assert result["buyable_cash_source"] == "prvs_rcdl_excc_amt"
+
+
 def test_parse_asset_snapshot_response_rejects_kis_error():
     try:
         status_logic.parse_asset_snapshot_response({

@@ -162,14 +162,34 @@ async def test_fetch_available_cash_falls_back_when_orderable_cash_missing(monke
         AsyncMock(return_value={
             "rt_cd": "0",
             "output2": [{
-                "dnca_tot_amt": "2,345",
-                "prvs_rcdl_excc_amt": "3,456",
+                "dnca_tot_amt": "3,456",
+                "prvs_rcdl_excc_amt": "2,345",
             }],
         }),
     )
     monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
 
-    assert await f3._fetch_available_cash() == 2345.0
+    assert await f3._fetch_available_cash() == 3456.0
+
+@pytest.mark.asyncio
+async def test_fetch_available_cash_uses_settlement_amount_when_larger(monkeypatch):
+    # 매도대금 T+2 미결제 상태: 예수금(dnca)은 작지만 D+2 정산금(prvs)이 실제 주문가능금액에 가깝다
+    events = []
+    monkeypatch.setattr(
+        f3.kis_rest,
+        "get",
+        AsyncMock(return_value={
+            "rt_cd": "0",
+            "output2": [{
+                "dnca_tot_amt": "120,543",
+                "prvs_rcdl_excc_amt": "8,865,465",
+            }],
+        }),
+    )
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+
+    assert await f3._fetch_available_cash() == 8_865_465.0
+    assert events[0][1]["cash_source"] == "prvs_rcdl_excc_amt"
 
 @pytest.mark.asyncio
 async def test_fetch_buyable_qty_uses_market_order_psbl_api(monkeypatch):
