@@ -21,6 +21,7 @@ _ACTIONABLE_ALERT_EVENTS = {
     "VI_FILTER_ALL_EXCLUDED",
     "GAP_CHANGED",
     "F2_RETRY_EXHAUSTED",
+    "MARKET_CLOSED",
 }
 _CRITICAL_ALERT_LEVELS = {"error"}
 _LEVEL_LABELS = {
@@ -41,6 +42,7 @@ _ALERT_TITLES = {
     "VI_FILTER_ALL_EXCLUDED": "오늘 진입 없음",
     "GAP_CHANGED": "진입 전 갭 변동",
     "F2_RETRY_EXHAUSTED": "오늘 진입 없음",
+    "MARKET_CLOSED": "휴장일",
     "TIMEOUT_ORDER_FAILED": "11시 청산 주문 실패",
     "F4_SELL_ERROR": "매도 주문 오류",
     "TOKEN_REFRESH_FAIL": "KIS 토큰 갱신 실패",

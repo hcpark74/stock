@@ -20,6 +20,7 @@ def reset_main_flow(monkeypatch):
     main._f1_result = []
     main._f2_done = False
     main._f3_started = False
+    main._market_closed_date = None
     monkeypatch.setattr(main, "_ensure_trading_day", AsyncMock())
     yield
     s.day_skip = False
@@ -29,6 +30,7 @@ def reset_main_flow(monkeypatch):
     main._f1_result = []
     main._f2_done = False
     main._f3_started = False
+    main._market_closed_date = None
 
 
 async def test_job_f1_runs_f3_without_force_before_f3_schedule(monkeypatch):
@@ -104,6 +106,7 @@ async def test_catchup_chains_f2_f3_before_scheduled_f2(monkeypatch):
     send = AsyncMock()
     monkeypatch.delenv("DRY_RUN", raising=False)
     monkeypatch.delenv("FORCE_CATCHUP", raising=False)
+    monkeypatch.setattr(main, "_is_trading_weekday", lambda: True)
     monkeypatch.setattr(main, "_scheduled_at", fake_scheduled_at)
     monkeypatch.setattr(main.f1_filter, "run", AsyncMock(return_value=[{"ticker": "005930"}]))
     monkeypatch.setattr(main.f2_lockup, "run", fake_f2_run)
@@ -116,6 +119,221 @@ async def test_catchup_chains_f2_f3_before_scheduled_f2(monkeypatch):
     f3_run.assert_awaited_once_with(force=False)
     assert main._f2_done is True
     assert main._f3_started is True
+
+
+async def test_holiday_check_marks_market_closed_and_skips_jobs(monkeypatch):
+    send = AsyncMock()
+    today = main._today()
+    monkeypatch.setenv("KIS_MODE", "REAL")
+    monkeypatch.setattr(
+        main.kis_rest,
+        "get",
+        AsyncMock(return_value={
+            "rt_cd": "0",
+            "output": [{"bass_dt": today, "opnd_yn": "N"}],
+        }),
+    )
+    monkeypatch.setattr(main.notifier, "send", send)
+    f1_run = AsyncMock()
+    monkeypatch.setattr(main.f1_filter, "run", f1_run)
+    f5_precheck = AsyncMock()
+    monkeypatch.setattr(main.f5_timeout, "precheck", f5_precheck)
+
+    await main._check_market_holiday()
+
+    assert main._is_market_closed_today() is True
+    assert state_mod.get().day_skip is True
+    send.assert_awaited_once()
+    assert send.await_args.args[0] == "MARKET_CLOSED"
+
+    await main.job_f1()
+    await main.job_f5_precheck()
+
+    f1_run.assert_not_awaited()
+    f5_precheck.assert_not_awaited()
+
+
+async def test_holiday_check_fails_open_on_api_error(monkeypatch):
+    monkeypatch.setenv("KIS_MODE", "REAL")
+    monkeypatch.setattr(
+        main.kis_rest,
+        "get",
+        AsyncMock(return_value={"rt_cd": "1", "msg_cd": "EGW00001", "msg1": "error"}),
+    )
+    monkeypatch.setattr(main.notifier, "send", AsyncMock())
+
+    await main._check_market_holiday()
+
+    assert main._is_market_closed_today() is False
+    assert state_mod.get().day_skip is False
+
+
+async def test_stale_holiday_flag_does_not_block_f5_when_api_fails_next_day(monkeypatch):
+    """[P1 회귀] 전일 휴장 플래그가 HOLDING으로 리셋되지 못한 채 남고,
+    당일 휴장 API까지 일시 실패해도 — 플래그가 날짜에 바인딩되므로
+    당일 잡(F5 청산)을 막지 않아야 한다."""
+    monkeypatch.setenv("KIS_MODE", "REAL")
+    main._market_closed_date = "20260101"  # 과거 휴장일에 세워진 플래그
+    monkeypatch.setattr(main.kis_rest, "get", AsyncMock(side_effect=RuntimeError("kis down")))
+    monkeypatch.setattr(main.notifier, "send", AsyncMock())
+
+    await main._check_market_holiday()
+
+    assert main._is_market_closed_today() is False
+
+    f5_exec = AsyncMock()
+    monkeypatch.setattr(main.f5_timeout, "execute", f5_exec)
+    await main.job_f5_exec()
+    f5_exec.assert_awaited_once()
+
+
+async def test_holiday_check_open_day_keeps_jobs_running(monkeypatch):
+    today = main._today()
+    monkeypatch.setenv("KIS_MODE", "REAL")
+    monkeypatch.setattr(
+        main.kis_rest,
+        "get",
+        AsyncMock(return_value={
+            "rt_cd": "0",
+            "output": [{"bass_dt": today, "opnd_yn": "Y"}],
+        }),
+    )
+    monkeypatch.setattr(main.notifier, "send", AsyncMock())
+
+    await main._check_market_holiday()
+
+    assert main._is_market_closed_today() is False
+    assert state_mod.get().day_skip is False
+
+
+async def test_holiday_check_clears_flag_on_open_day_so_f5_runs(monkeypatch):
+    """개장(Y) 확인 시 휴장 플래그를 해제해 F5 청산이 정상 실행되어야 한다."""
+    today = main._today()
+    monkeypatch.setenv("KIS_MODE", "REAL")
+    monkeypatch.setattr(
+        main.kis_rest,
+        "get",
+        AsyncMock(return_value={
+            "rt_cd": "0",
+            "output": [{"bass_dt": today, "opnd_yn": "Y"}],
+        }),
+    )
+    main._market_closed_date = main._today()
+
+    await main._check_market_holiday()
+
+    assert main._is_market_closed_today() is False
+
+    f5_exec = AsyncMock()
+    monkeypatch.setattr(main.f5_timeout, "execute", f5_exec)
+    await main.job_f5_exec()
+    f5_exec.assert_awaited_once()
+
+
+async def test_holiday_check_does_not_duplicate_notification(monkeypatch):
+    send = AsyncMock()
+    today = main._today()
+    monkeypatch.setenv("KIS_MODE", "REAL")
+    monkeypatch.setattr(
+        main.kis_rest,
+        "get",
+        AsyncMock(return_value={
+            "rt_cd": "0",
+            "output": [{"bass_dt": today, "opnd_yn": "N"}],
+        }),
+    )
+    monkeypatch.setattr(main.notifier, "send", send)
+
+    await main._check_market_holiday()
+    await main._check_market_holiday()
+
+    assert main._is_market_closed_today() is True
+    send.assert_awaited_once()
+
+
+async def test_holiday_check_fails_open_on_unexpected_opnd_yn(monkeypatch):
+    today = main._today()
+    monkeypatch.setenv("KIS_MODE", "REAL")
+    monkeypatch.setattr(
+        main.kis_rest,
+        "get",
+        AsyncMock(return_value={
+            "rt_cd": "0",
+            "output": [{"bass_dt": today, "opnd_yn": None}],
+        }),
+    )
+    monkeypatch.setattr(main.notifier, "send", AsyncMock())
+
+    await main._check_market_holiday()
+
+    assert main._is_market_closed_today() is False
+    assert state_mod.get().day_skip is False
+
+
+async def test_trading_day_rollover_while_holding_leaves_stale_flag_inert(monkeypatch):
+    s = state_mod.get()
+    s.trading_date = "20260701"
+    s.position_status = "HOLDING"
+    main._market_closed_date = "20260701"  # 전일 휴장에 세워진 플래그
+    monkeypatch.setattr(main, "_today", lambda: "20260702")
+
+    await _REAL_ENSURE_TRADING_DAY()
+
+    # HOLDING 중엔 일일 리셋이 막혀 플래그가 남지만,
+    # 날짜 바인딩 덕에 새 거래일에는 적용되지 않는다.
+    assert s.trading_date == "20260701"
+    assert main._market_closed_date == "20260701"
+    assert main._is_market_closed_today() is False
+
+
+async def test_holiday_check_skipped_in_paper_mode(monkeypatch):
+    kis_get = AsyncMock()
+    monkeypatch.setenv("KIS_MODE", "PAPER")
+    monkeypatch.setattr(main.kis_rest, "get", kis_get)
+
+    await main._check_market_holiday()
+
+    kis_get.assert_not_awaited()
+    assert main._is_market_closed_today() is False
+
+
+async def test_catchup_skips_when_market_closed(monkeypatch):
+    f1_run = AsyncMock(return_value=[{"ticker": "005930"}])
+    monkeypatch.delenv("DRY_RUN", raising=False)
+    monkeypatch.delenv("FORCE_CATCHUP", raising=False)
+    monkeypatch.setattr(main, "_is_trading_weekday", lambda: True)
+    monkeypatch.setattr(main.db, "get_trade_by_date", AsyncMock(return_value=None))
+    monkeypatch.setattr(main.f1_filter, "run", f1_run)
+    monkeypatch.setattr(main.notifier, "send", AsyncMock())
+    main._market_closed_date = main._today()
+
+    await main._run_catchup()
+
+    f1_run.assert_not_awaited()
+    assert main._f2_done is False
+    assert main._f3_started is False
+
+
+async def test_catchup_skips_on_weekend(monkeypatch):
+    f1_run = AsyncMock(return_value=[{"ticker": "005930"}])
+    f2_run = AsyncMock()
+    f3_run = AsyncMock()
+    monkeypatch.delenv("DRY_RUN", raising=False)
+    monkeypatch.delenv("FORCE_CATCHUP", raising=False)
+    monkeypatch.setattr(main, "_is_trading_weekday", lambda: False)
+    monkeypatch.setattr(main.db, "get_trade_by_date", AsyncMock(return_value=None))
+    monkeypatch.setattr(main.f1_filter, "run", f1_run)
+    monkeypatch.setattr(main.f2_lockup, "run", f2_run)
+    monkeypatch.setattr(main.f3_entry, "run", f3_run)
+    monkeypatch.setattr(main.notifier, "send", AsyncMock())
+
+    await main._run_catchup()
+
+    f1_run.assert_not_awaited()
+    f2_run.assert_not_awaited()
+    f3_run.assert_not_awaited()
+    assert main._f2_done is False
+    assert main._f3_started is False
 
 
 async def test_catchup_with_empty_f1_result_skips_f2_f3(monkeypatch):
@@ -135,6 +353,7 @@ async def test_catchup_with_empty_f1_result_skips_f2_f3(monkeypatch):
     f3_run = AsyncMock()
     monkeypatch.delenv("DRY_RUN", raising=False)
     monkeypatch.delenv("FORCE_CATCHUP", raising=False)
+    monkeypatch.setattr(main, "_is_trading_weekday", lambda: True)
     monkeypatch.setattr(main, "_scheduled_at", fake_scheduled_at)
     monkeypatch.setattr(main.f1_filter, "run", AsyncMock(return_value=[]))
     monkeypatch.setattr(main.f2_lockup, "run", f2_run)
@@ -352,6 +571,7 @@ async def test_trading_day_rollover_resets_chain_flags(monkeypatch):
     main._f1_result = [{"ticker": "005930"}]
     main._f2_done = True
     main._f3_started = True
+    main._market_closed_date = main._today()
 
     monkeypatch.setattr(main, "_today", lambda: "20260702")
 
@@ -362,6 +582,7 @@ async def test_trading_day_rollover_resets_chain_flags(monkeypatch):
     assert main._f1_result == []
     assert main._f2_done is False
     assert main._f3_started is False
+    assert main._is_market_closed_today() is False
 
 async def test_recover_state_uses_db_open_trade_when_state_file_missing(monkeypatch):
     events = []
@@ -743,6 +964,7 @@ async def test_catchup_skips_f1_f2_f3_when_today_trade_exists(monkeypatch):
     f3_run = AsyncMock()
     monkeypatch.delenv("DRY_RUN", raising=False)
     monkeypatch.delenv("FORCE_CATCHUP", raising=False)
+    monkeypatch.setattr(main, "_is_trading_weekday", lambda: True)
     monkeypatch.setattr(main, "_scheduled_at", fake_scheduled_at)
     monkeypatch.setattr(main.db, "get_trade_by_date", AsyncMock(return_value={"id": 7, "ticker": "365660"}))
     monkeypatch.setattr(main.f1_filter, "run", f1_run)

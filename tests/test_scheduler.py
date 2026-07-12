@@ -30,7 +30,13 @@ async def test_scheduler_jobs_allow_short_startup_misfires():
         }
         assert all(job.misfire_grace_time == MISFIRE_GRACE_TIME_SEC for job in jobs.values())
         assert all(job.coalesce is True for job in jobs.values())
-        assert str(jobs["token_refresh"].trigger) == "cron[hour='8', minute='29', second='30']"
-        assert str(jobs["ntp_check"].trigger) == "cron[hour='8', minute='30', second='10']"
+        # 주말(토·일) 실행 방지 — 모든 잡은 월~금에만 트리거되어야 한다
+        assert all("day_of_week='mon-fri'" in str(job.trigger) for job in jobs.values())
+        assert str(jobs["token_refresh"].trigger) == (
+            "cron[day_of_week='mon-fri', hour='8', minute='29', second='30']"
+        )
+        assert str(jobs["ntp_check"].trigger) == (
+            "cron[day_of_week='mon-fri', hour='8', minute='30', second='10']"
+        )
     finally:
         scheduler.shutdown(wait=False)

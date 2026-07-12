@@ -49,10 +49,17 @@ F2_RETRY_F1_INTERVAL_SEC = int(
 F2_RETRY_F1_MIN_REMAINING_SEC = int(os.getenv("F2_RETRY_F1_MIN_REMAINING_SEC", "2"))
 _BAL_TR = {"REAL": "TTTC8434R", "PAPER": "VTTC8434R"}
 
+# 국내휴장일조회 — 실전 전용 TR (모의투자 미지원)
+_HOLIDAY_CHECK_PATH = "/uapi/domestic-stock/v1/quotations/chk-holiday"
+_HOLIDAY_CHECK_TR_ID = "CTCA0903R"
+
 # F1 결과를 F2에 전달하기 위한 세션 변수
 _f1_result: list[dict] = []
 _f2_done = False
 _f3_started = False
+# 휴장 확인된 날짜(YYYYMMDD). 날짜를 함께 저장해 당일 확인된 휴장에만 적용 —
+# HOLDING으로 일일 리셋이 막히거나 휴장 API가 실패해도 다음 거래일을 막지 않는다.
+_market_closed_date: str | None = None
 
 
 def _today() -> str:
@@ -61,6 +68,14 @@ def _today() -> str:
 
 def _scheduled_at(hour: int, minute: int, second: int = 0) -> datetime:
     return datetime.now(KST).replace(hour=hour, minute=minute, second=second, microsecond=0)
+
+
+def _is_trading_weekday() -> bool:
+    return datetime.now(KST).weekday() < 5  # 월(0)~금(4)
+
+
+def _is_market_closed_today() -> bool:
+    return _market_closed_date == _today()
 
 
 def _past_f3_schedule() -> bool:
@@ -83,13 +98,83 @@ def _f2_retry_remaining_seconds() -> int:
 
 
 async def _ensure_trading_day() -> None:
-    global _f1_result, _f2_done, _f3_started
+    global _f1_result, _f2_done, _f3_started, _market_closed_date
     today = _today()
     if await state.ensure_trading_day(today):
         _f1_result = []
         _f2_done = False
         _f3_started = False
+        _market_closed_date = None
         logger.log("DAILY_STATE_RESET", level="INFO", date=today)
+
+
+async def _check_market_holiday() -> None:
+    """
+    KIS 휴장일 조회로 당일 개장 여부 확인. 휴장이면 당일 잡 전체를 스킵한다.
+    조회 실패·미확정 응답값은 fail-open(개장 가정) — 거래일을 놓치는 쪽이 더 큰 손실.
+    휴장 플래그는 확인된 날짜에 바인딩되므로(_market_closed_date) 실패 경로에서
+    전일 플래그가 남아도 당일 잡을 막지 않는다.
+    CTCA0903R은 모의투자 미지원이므로 PAPER 모드는 평일 가드만 적용한다.
+    """
+    global _market_closed_date
+    if os.getenv("KIS_MODE", "PAPER") != "REAL":
+        return
+
+    today = _today()
+    try:
+        resp = await kis_rest.get(
+            _HOLIDAY_CHECK_PATH,
+            tr_id=_HOLIDAY_CHECK_TR_ID,
+            params={"BASS_DT": today, "CTX_AREA_NK": "", "CTX_AREA_FK": ""},
+        )
+    except Exception as exc:
+        logger.log("HOLIDAY_CHECK_FAILED", level="WARN", error=repr(exc))
+        return
+
+    if str(resp.get("rt_cd", "0")) != "0":
+        logger.log(
+            "HOLIDAY_CHECK_FAILED",
+            level="WARN",
+            msg_cd=resp.get("msg_cd"),
+            msg1=resp.get("msg1"),
+        )
+        return
+
+    rows = resp.get("output", [])
+    row = next(
+        (r for r in rows if isinstance(r, dict) and r.get("bass_dt") == today), None
+    )
+    if row is None:
+        logger.log("HOLIDAY_CHECK_FAILED", level="WARN", reason="TODAY_NOT_IN_RESPONSE")
+        return
+
+    opnd_yn = str(row.get("opnd_yn") or "").strip().upper()
+    if opnd_yn == "Y":
+        _market_closed_date = None
+        return
+    if opnd_yn != "N":
+        # 미검증 스키마 대비 — 명시적 "N"만 휴장으로 인정하고 나머지는 fail-open
+        logger.log(
+            "HOLIDAY_CHECK_FAILED",
+            level="WARN",
+            reason="UNEXPECTED_OPND_YN",
+            opnd_yn=row.get("opnd_yn"),
+        )
+        return
+
+    if _market_closed_date == today:
+        return  # 기동 시 체크 후 08:29 잡 재확인 등 — 중복 로그·알림 방지
+
+    _market_closed_date = today
+    s = state.get()
+    s.day_skip = True
+    s.close_reason = s.close_reason or "MARKET_CLOSED"
+    logger.log("MARKET_CLOSED", level="INFO", date=today)
+    await notifier.send(
+        "MARKET_CLOSED",
+        level="INFO",
+        message=f"휴장일 감지({today}). 당일 거래 없음.",
+    )
 
 
 # ── 스케줄 작업 래퍼 ─────────────────────────────────────────────────
@@ -97,6 +182,7 @@ async def _ensure_trading_day() -> None:
 async def job_token_refresh() -> None:
     await _ensure_trading_day()
     await auth.refresh()
+    await _check_market_holiday()
 
 
 async def job_ntp_check() -> None:
@@ -128,6 +214,8 @@ async def _skip_entry_pipeline_if_trade_exists(source: str) -> bool:
 async def job_f1() -> None:
     global _f1_result
     await _ensure_trading_day()
+    if _is_market_closed_today():
+        return
     if await _skip_entry_pipeline_if_trade_exists("JOB_F1"):
         return
     _f1_result = await f1_filter.run()
@@ -136,6 +224,8 @@ async def job_f1() -> None:
 
 async def job_f2() -> None:
     await _ensure_trading_day()
+    if _is_market_closed_today():
+        return
     if await _skip_entry_pipeline_if_trade_exists("JOB_F2"):
         return
     # F1 completion can trigger F2/F3 immediately; this scheduled job is a safety net.
@@ -149,6 +239,8 @@ async def job_f2() -> None:
 async def job_f3() -> None:
     global _f3_started
     await _ensure_trading_day()
+    if _is_market_closed_today():
+        return
     if await _skip_entry_pipeline_if_trade_exists("JOB_F3"):
         return
     # Keep the scheduled F3 job as a fallback when F2 locked a target but chaining did not start F3.
@@ -162,11 +254,15 @@ async def job_f3() -> None:
 
 async def job_f5_precheck() -> None:
     await _ensure_trading_day()
+    if _is_market_closed_today():
+        return
     await f5_timeout.precheck()
 
 
 async def job_f5_exec() -> None:
     await _ensure_trading_day()
+    if _is_market_closed_today():
+        return
     await f5_timeout.execute()
 
 
@@ -260,10 +356,21 @@ async def _run_catchup() -> None:
     F3 fill deadline 이후엔 진입 마감이 지났으므로 catchup 불가.
     """
     await _ensure_trading_day()
-    if await _skip_entry_pipeline_if_trade_exists("CATCHUP"):
-        return
     dry_run = os.getenv("DRY_RUN", "0") == "1"
     force = dry_run or os.getenv("FORCE_CATCHUP", "0") == "1"
+
+    if not force and not _is_trading_weekday():
+        logger.log("CATCHUP_SKIP_WEEKEND", level="INFO",
+                   message="주말(토·일) 기동 — 진입 catchup 생략")
+        return
+
+    if not force and _is_market_closed_today():
+        logger.log("CATCHUP_SKIP_MARKET_CLOSED", level="INFO",
+                   message="휴장일 기동 — 진입 catchup 생략")
+        return
+
+    if await _skip_entry_pipeline_if_trade_exists("CATCHUP"):
+        return
 
     now = datetime.now(KST)
     f1_sched = _scheduled_at(F1_H, F1_M)
@@ -636,6 +743,8 @@ async def main() -> None:
     else:
         await auth.load_or_refresh()
         time_sync.check_ntp(NTP_SERVERS)
+        # 휴장일에 기동해도 catchup·스케줄 잡이 돌지 않도록 시작 시점에 1회 확인
+        await _check_market_holiday()
     await _recover_state()
 
     # F4: WebSocket 기반 장기 실행 (HOLDING 전까지 내부에서 대기)

@@ -12,6 +12,9 @@ KST = pytz.timezone("Asia/Seoul")
 Job = Callable[[], Coroutine[Any, Any, None]]
 MISFIRE_GRACE_TIME_SEC = 60
 
+# KRX 개장 요일 — 시장 고정 특성이므로 env로 노출하지 않는다 (임시 공휴일은 별도)
+TRADING_DAYS_OF_WEEK = "mon-fri"
+
 # 스케줄 시각 — catchup 로직과 단일 출처 공유
 F1_H, F1_M = 9, 0
 F2_H, F2_M = 9, 10
@@ -44,7 +47,7 @@ def build(
     )
 
     def cron(**kwargs: Any) -> CronTrigger:
-        return CronTrigger(timezone=KST, **kwargs)
+        return CronTrigger(timezone=KST, day_of_week=TRADING_DAYS_OF_WEEK, **kwargs)
 
     # 08:29:30 — KIS 토큰 선제 갱신, 08:30:10 — NTP 검증
     scheduler.add_job(token_refresh, cron(hour=8, minute=29, second=30), id="token_refresh")
