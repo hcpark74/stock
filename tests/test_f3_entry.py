@@ -45,6 +45,25 @@ def reset_fill_poll_summary(monkeypatch):
     f3._last_fill_poll_summary = {}
 
 
+def test_gap_in_order_range_boundaries():
+    """주문 전 갭 허용 구간의 경계 연산자를 고정한다: 하한 포함(<=), 상한 미포함(<).
+
+    원 단위 정수 가격 쌍으로는 계산된 갭이 상수와 정확히 같아지지 않아
+    (예: 10650/10000-1 == 0.06499999999999995) 가격 입력 테스트로는
+    <와 <=의 회귀를 잡을 수 없다. 상수를 직접 넣어 경계를 검증한다.
+    """
+    assert f3._gap_in_order_range(f3.GAP_MIN_RECHECK) is True
+    assert f3._gap_in_order_range(f3.GAP_MIN_RECHECK - 1e-9) is False
+    assert f3._gap_in_order_range(f3.GAP_MAX_ORDER) is False
+    assert f3._gap_in_order_range(f3.GAP_MAX_ORDER - 1e-9) is True
+
+
+def test_fill_gap_reaches_max_boundary():
+    """체결가 갭이 정확히 상한(7%)이면 청산 대상이다 (>=, 초과가 아닌 이상)."""
+    assert f3._fill_gap_reaches_max(f3.GAP_MAX_FILL) is True
+    assert f3._fill_gap_reaches_max(f3.GAP_MAX_FILL - 1e-9) is False
+
+
 def test_parse_deadline_logs_invalid_value(monkeypatch):
     events = []
     monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
@@ -1546,3 +1565,148 @@ async def test_recheck_cash_exception_becomes_zero_cash_skip(monkeypatch):
     assert "BALANCE_QUERY_ERROR" in [event for event, _ in events]
     f3.notifier.send.assert_awaited_once()
     f3.db.record_skip.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_slippage_guard_allows_fill_when_gap_stays_below_max(monkeypatch):
+    """체결가가 expected_price보다 비싸도 갭 상한(7%) 안이면 보유를 유지한다."""
+    _reset_state()
+    send_sell = AsyncMock()
+
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+    # 재검증 갭 3.09% (1000/970). 체결 1015원 → expected 대비 +1.5%지만 갭 4.64% < 7%.
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(1000.0, 970.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=10_000.0))
+    monkeypatch.setattr(f3, "_send_buy", AsyncMock(return_value={
+        "rt_cd": "0",
+        "msg_cd": "MCA00000",
+        "msg1": "OK",
+        "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
+    }))
+    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1015, "fill_qty": 9}))
+    monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=1015))
+    monkeypatch.setattr(f3, "_send_sell", send_sell)
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "record_order", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "update_order_fill", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+
+    await f3.run(force=True)
+
+    send_sell.assert_not_awaited()
+    f3.db.record_skip.assert_not_awaited()
+    assert state.get().position_status == "HOLDING"
+    assert state.get().day_skip is False
+    assert state.get().close_reason is None
+
+
+@pytest.mark.asyncio
+async def test_slippage_guard_exits_when_fill_gap_exceeds_max(monkeypatch):
+    """체결가 기준 갭이 상한(7%)을 넘으면 즉시 청산하고 당일 스킵한다."""
+    events = []
+    _reset_state()
+    send_sell = AsyncMock()
+
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    # 재검증 갭 6.19% (1030/970) 통과. 체결 1045원 → 갭 7.73% > 7% 상한.
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(1030.0, 970.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=10_000.0))
+    monkeypatch.setattr(f3, "_send_buy", AsyncMock(return_value={
+        "rt_cd": "0",
+        "msg_cd": "MCA00000",
+        "msg1": "OK",
+        "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
+    }))
+    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1045, "fill_qty": 9}))
+    monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=1045))
+    monkeypatch.setattr(f3, "_send_sell", send_sell)
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+
+    await f3.run(force=True)
+
+    send_sell.assert_awaited_once_with("006340", 9, "PAPER")
+    f3.db.open_trade.assert_not_awaited()
+    assert state.get().day_skip is True
+    assert state.get().close_reason == "SLIPPAGE_GUARD"
+    f3.db.record_skip.assert_awaited_once()
+    assert f3.db.record_skip.await_args.args[1] == "SLIPPAGE_GUARD"
+    guard = [kwargs for event, kwargs in events if event == "SLIPPAGE_GUARD"][-1]
+    assert guard["fill_gap_pct"] == pytest.approx(7.732, abs=0.001)
+    assert guard["gap_max_pct"] == 7.0
+
+
+@pytest.mark.asyncio
+async def test_entry_recheck_blocks_gap_between_order_max_and_fill_max(monkeypatch):
+    """주문 전 갭이 주문 상한(6.5%) 이상이면 체결 상한(7%) 미만이라도 주문하지 않는다.
+
+    상한 근처 갭은 시장가 슬리피지로 체결 상한을 넘겨 SLIPPAGE_GUARD
+    즉시 청산(확정 손실)으로 이어지기 쉬우므로, 6.5~7.0% 구간은
+    주문 전에 걸러 슬리피지 버퍼를 확보한다.
+    """
+    _reset_state()
+    send_buy = AsyncMock()
+
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+    # 재검증 갭 6.7% (10670/10000) — 주문 상한 6.5%와 체결 상한 7% 사이
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10670.0, 10000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    notify = AsyncMock()
+    monkeypatch.setattr(f3.notifier, "send", notify)
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3.run(force=True)
+
+    send_buy.assert_not_awaited()
+    assert state.get().day_skip is True
+    assert state.get().close_reason == "GAP_CHANGED"
+    f3.db.record_skip.assert_awaited_once()
+    assert f3.db.record_skip.await_args.args[1] == "GAP_CHANGED"
+
+
+@pytest.mark.asyncio
+async def test_slippage_guard_allows_fill_in_order_fill_buffer_zone(monkeypatch):
+    """체결가 갭이 주문 상한(6.5%)~체결 상한(7%) 사이면 보유를 유지한다.
+
+    체결 후 가드는 체결 상한(GAP_MAX_FILL) 기준이어야 하며,
+    주문 상한(GAP_MAX_ORDER)을 잘못 적용하면 버퍼 구간 체결이
+    불필요한 즉시 청산으로 이어진다.
+    """
+    _reset_state()
+    send_sell = AsyncMock()
+
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+    # 재검증 갭 6.19% (1030/970) 통과. 체결 1037원 → 갭 6.91% (6.5%~7% 버퍼 구간)
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(1030.0, 970.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=10_000.0))
+    monkeypatch.setattr(f3, "_send_buy", AsyncMock(return_value={
+        "rt_cd": "0",
+        "msg_cd": "MCA00000",
+        "msg1": "OK",
+        "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
+    }))
+    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1037, "fill_qty": 9}))
+    monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=1037))
+    monkeypatch.setattr(f3, "_send_sell", send_sell)
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "record_order", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "update_order_fill", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+
+    await f3.run(force=True)
+
+    send_sell.assert_not_awaited()
+    f3.db.record_skip.assert_not_awaited()
+    assert state.get().position_status == "HOLDING"
+    assert state.get().day_skip is False
+    assert state.get().close_reason is None

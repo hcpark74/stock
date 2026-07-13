@@ -1115,7 +1115,8 @@ function renderSettings(s) {
         ['1차/2차', `${fmt(s.f3?.first_ratio_pct, 0)}% / ${fmt(s.f3?.pyramid_ratio_pct, 0)}%`],
         ['주문 시각', `${s.f3?.first_order_at || '—'} · 2차 ${s.f3?.pyramid_at || '—'}`],
         ['재시도', `${fmt(s.f3?.max_attempts)}회 · ${s.f3?.retry_deadline || '—'}까지`],
-        ['슬리피지 제한', `${fmt(s.f3?.slippage_limit_pct, 2)}%`],
+        ['주문 전 갭 상한', `${fmt(s.f3?.order_gap_max_pct, 2)}%`],
+        ['체결가 갭 상한', `${fmt(s.f3?.fill_gap_max_pct, 2)}%`],
       ]),
       settingBox('F4 청산', [
         ['Hard Stop', `-${fmt(s.f4?.hard_stop_pct, 1)}%`],

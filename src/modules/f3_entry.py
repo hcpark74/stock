@@ -14,10 +14,10 @@ from src.utils.number import to_float
 KST = ZoneInfo("Asia/Seoul")
 
 GAP_MIN_RECHECK = 0.020   # 재검증 하한 (F1 3%보다 낮음 — 완충)
-GAP_MAX_RECHECK = 0.070
+GAP_MAX_ORDER = 0.065     # 주문 전 재검증 상한 — GAP_MAX_FILL과의 차이가 시장가 슬리피지 버퍼
+GAP_MAX_FILL = 0.070      # 체결가 갭 상한 — 이상이면 SLIPPAGE_GUARD 즉시 청산
 ALLOC_RATIO = float(os.getenv("F3_ALLOC_RATIO", "0.95"))  # 주문가능 현금 기본 95% 기준
 FIRST_RATIO = 1.00         # 1차 100%
-SLIPPAGE_LIMIT = 0.005     # 슬리피지 허용 +0.5%
 PYRAMID_MIN_UP = 0.005     # 피라미딩 조건 +0.5% 이상 유지
 F3_ENTRY_MAX_ATTEMPTS = max(1, int(os.getenv("F3_ENTRY_MAX_ATTEMPTS", "2")))
 F3_ENTRY_RETRY_DELAY_SEC = float(os.getenv("F3_ENTRY_RETRY_DELAY_SEC", "0.5"))
@@ -33,6 +33,16 @@ F3_RECHECK_BATCH_TIMEOUT_SEC = float(os.getenv("F3_RECHECK_BATCH_TIMEOUT_SEC", "
 F3_FIRST_ORDER_AT = "IMMEDIATE"
 F3_PYRAMID_AT = os.getenv("F3_PYRAMID_AT", "09:10:40")
 F3_PYRAMID_FILL_SEC = float(os.getenv("F3_PYRAMID_FILL_SEC", "10.0"))
+
+def _gap_in_order_range(gap: float) -> bool:
+    """주문 전 재검증 갭 허용 구간: 하한 포함, 상한 미포함."""
+    return GAP_MIN_RECHECK <= gap < GAP_MAX_ORDER
+
+
+def _fill_gap_reaches_max(fill_gap: float) -> bool:
+    """체결가 갭이 체결 상한 이상이면 SLIPPAGE_GUARD 청산 대상."""
+    return fill_gap >= GAP_MAX_FILL
+
 
 # KIS TR ID (PAPER/REAL 분기) — 신TR 기준
 _BUY_TR    = {"REAL": "TTTC0012U", "PAPER": "VTTC0012U"}
@@ -220,9 +230,9 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
         prev_close=prev_close,
         gap_pct=round(gap * 100, 2),
         gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
-        gap_max_pct=round(GAP_MAX_RECHECK * 100, 2),
+        gap_max_pct=round(GAP_MAX_ORDER * 100, 2),
     )
-    if not (GAP_MIN_RECHECK <= gap < GAP_MAX_RECHECK):
+    if not _gap_in_order_range(gap):
         s.day_skip = True
         s.close_reason = "GAP_CHANGED"
         gap_reason = "BELOW_MIN" if gap < GAP_MIN_RECHECK else "ABOVE_MAX"
@@ -236,7 +246,7 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
             "GAP_CHANGED",
             gap_at_entry=round(gap * 100, 2),
             gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
-            gap_max_pct=round(GAP_MAX_RECHECK * 100, 2),
+            gap_max_pct=round(GAP_MAX_ORDER * 100, 2),
             gap_reason=gap_reason,
         )
         await notifier.send("GAP_CHANGED", level="WARN",
@@ -530,20 +540,31 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
     fill_price: float = fill["fill_price"]
     fill_qty: int = fill["fill_qty"]
 
-    # ── 슬리피지 가드 ────────────────────────────────────────────────
-    if fill_price > expected_price * (1 + SLIPPAGE_LIMIT):
+    # ── 슬리피지 가드: 체결가 기준 갭이 체결 상한을 벗어나면 청산 ────
+    fill_gap = (fill_price / prev_close) - 1
+    if _fill_gap_reaches_max(fill_gap):
         slippage_pct = (fill_price / expected_price - 1) * 100
         log("SLIPPAGE_GUARD", level="WARN", ticker=ticker,
             expected_price=expected_price, fill_price=fill_price,
+            prev_close=prev_close,
+            fill_gap_pct=round(fill_gap * 100, 3),
+            gap_max_pct=round(GAP_MAX_FILL * 100, 2),
             slippage_pct=round(slippage_pct, 3))
-        await notifier.send("SLIPPAGE_GUARD", level="WARN",
-                            message=f"슬리피지 {slippage_pct:.2f}% 초과. 즉시 청산.",
-                            ticker=ticker)
+        await notifier.send(
+            "SLIPPAGE_GUARD", level="WARN",
+            message=(
+                f"체결가 갭 {fill_gap * 100:.2f}%가 상한 "
+                f"{GAP_MAX_FILL * 100:.1f}% 이상. 즉시 청산."
+            ),
+            ticker=ticker)
         await _send_sell(ticker, fill_qty, mode)
         s.day_skip = True
         s.close_reason = "SLIPPAGE_GUARD"
-        await db.record_skip(_today(), "SLIPPAGE_GUARD",
-                             f"expected={expected_price},fill={fill_price}")
+        await db.record_skip(
+            _today(), "SLIPPAGE_GUARD",
+            f"expected={expected_price},fill={fill_price},"
+            f"prev_close={prev_close},fill_gap_pct={round(fill_gap * 100, 3)}",
+        )
         return
 
     # ── HOLDING 전환 + DB 기록 + 영속화 ──────────────────────────────
@@ -837,9 +858,9 @@ async def _rank_final_entry_candidates(
             prev_close=prev_close,
             gap_pct=round(gap * 100, 2),
             gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
-            gap_max_pct=round(GAP_MAX_RECHECK * 100, 2),
+            gap_max_pct=round(GAP_MAX_ORDER * 100, 2),
         )
-        if not (GAP_MIN_RECHECK <= gap < GAP_MAX_RECHECK):
+        if not _gap_in_order_range(gap):
             reason = "BELOW_MIN" if gap < GAP_MIN_RECHECK else "ABOVE_MAX"
             blocked_reasons.append("GAP_CHANGED")
             log(
@@ -857,7 +878,7 @@ async def _rank_final_entry_candidates(
                 candidate_rank=rank,
                 gap_at_entry=round(gap * 100, 2),
                 gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
-                gap_max_pct=round(GAP_MAX_RECHECK * 100, 2),
+                gap_max_pct=round(GAP_MAX_ORDER * 100, 2),
                 gap_reason=reason,
             )
             continue
@@ -985,10 +1006,10 @@ async def _refresh_entry_candidate(picked: dict) -> dict | None:
         prev_close=prev_close,
         gap_pct=round(gap * 100, 2),
         gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
-        gap_max_pct=round(GAP_MAX_RECHECK * 100, 2),
+        gap_max_pct=round(GAP_MAX_ORDER * 100, 2),
         freshness_check=True,
     )
-    if not (GAP_MIN_RECHECK <= gap < GAP_MAX_RECHECK):
+    if not _gap_in_order_range(gap):
         reason = "BELOW_MIN" if gap < GAP_MIN_RECHECK else "ABOVE_MAX"
         log(
             "GAP_CHANGED",
@@ -1006,7 +1027,7 @@ async def _refresh_entry_candidate(picked: dict) -> dict | None:
             candidate_rank=picked.get("candidate_rank"),
             gap_at_entry=round(gap * 100, 2),
             gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
-            gap_max_pct=round(GAP_MAX_RECHECK * 100, 2),
+            gap_max_pct=round(GAP_MAX_ORDER * 100, 2),
             gap_reason=reason,
             freshness_check=True,
         )

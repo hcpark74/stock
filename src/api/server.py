@@ -50,8 +50,9 @@ from src.modules.f3_entry import (
     F3_PYRAMID_AT,
     F3_PYRAMID_FILL_SEC,
     FIRST_RATIO,
+    GAP_MAX_FILL,
+    GAP_MAX_ORDER,
     PYRAMID_MIN_UP,
-    SLIPPAGE_LIMIT,
 )
 from src.utils.logger import log
 
@@ -513,7 +514,8 @@ async def api_settings() -> JSONResponse:
                 "first_ratio_pct": round(FIRST_RATIO * 100, 2),
                 "pyramid_ratio_pct": round((1 - FIRST_RATIO) * 100, 2),
                 "pyramid_min_up_pct": round(PYRAMID_MIN_UP * 100, 2),
-                "slippage_limit_pct": round(SLIPPAGE_LIMIT * 100, 2),
+                "order_gap_max_pct": round(GAP_MAX_ORDER * 100, 2),
+                "fill_gap_max_pct": round(GAP_MAX_FILL * 100, 2),
                 "first_order_at": F3_FIRST_ORDER_AT,
                 "pyramid_at": F3_PYRAMID_AT,
                 "max_attempts": F3_ENTRY_MAX_ATTEMPTS,
