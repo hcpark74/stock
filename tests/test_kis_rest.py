@@ -7,6 +7,17 @@ import pytest
 import src.api.kis_rest as kis_rest
 
 
+def test_default_rate_interval_follows_kis_mode(monkeypatch):
+    monkeypatch.setenv("KIS_MODE", "PAPER")
+    assert kis_rest.default_rate_interval() == 1.1
+
+    monkeypatch.setenv("KIS_MODE", "REAL")
+    assert kis_rest.default_rate_interval() == 0.20
+
+    monkeypatch.delenv("KIS_MODE", raising=False)
+    assert kis_rest.default_rate_interval() == 1.1
+
+
 def test_account_helpers_accept_documented_env_names(monkeypatch):
     monkeypatch.delenv("KIS_ACCT_NO", raising=False)
     monkeypatch.delenv("KIS_ACCT_CD", raising=False)

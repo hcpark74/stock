@@ -7,8 +7,15 @@ import httpx
 from src.api import auth
 from src.utils.logger import log
 
+
+def default_rate_interval() -> float:
+    # KIS 유량 정책(2026-04-20): 실전 초당 18건 / 모의 초당 1건.
+    # 모의는 1.0s 정각 간격 시 서버 도착 시점 jitter로 같은 초에 2건이 몰릴 수 있어 10% 여유.
+    return 0.20 if os.getenv("KIS_MODE", "PAPER") == "REAL" else 1.1
+
+
 _last_call_at: float = 0.0
-_RATE_INTERVAL = float(os.getenv("KIS_RATE_INTERVAL_SEC", "0.20"))
+_RATE_INTERVAL = float(os.getenv("KIS_RATE_INTERVAL_SEC", "") or default_rate_interval())
 _MAX_TRANSIENT_RETRIES = int(os.getenv("KIS_MAX_TRANSIENT_RETRIES", "2"))
 _TRANSIENT_RETRY_BASE_SEC = float(os.getenv("KIS_TRANSIENT_RETRY_BASE_SEC", "1.0"))
 _TRANSIENT_RETRY_MAX_SEC = float(os.getenv("KIS_TRANSIENT_RETRY_MAX_SEC", "8.0"))

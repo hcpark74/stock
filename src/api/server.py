@@ -518,7 +518,9 @@ async def api_settings() -> JSONResponse:
         account_configured = bool(kis_rest.account_no())
         app_key_configured = bool(os.getenv("KIS_APP_KEY"))
         app_secret_configured = bool(os.getenv("KIS_APP_SECRET"))
-        kis_rate_interval_sec = _env_float("KIS_RATE_INTERVAL_SEC", 0.20, errors)
+        kis_rate_interval_sec = _env_float(
+            "KIS_RATE_INTERVAL_SEC", kis_rest.default_rate_interval(), errors
+        )
 
         if "KIS_ACCT_NO" in os.environ and not os.getenv("KIS_ACCT_NO", ""):
             errors.append("KIS_ACCT_NO is set but empty.")

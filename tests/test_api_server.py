@@ -185,7 +185,14 @@ async def test_status_includes_tick_history_while_holding_and_closed(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_api_settings_survives_invalid_numeric_env(monkeypatch):
+@pytest.mark.parametrize(
+    ("kis_mode", "expected_fallback"),
+    [("PAPER", 1.1), ("REAL", 0.20)],
+)
+async def test_api_settings_survives_invalid_numeric_env(
+    monkeypatch, kis_mode, expected_fallback
+):
+    monkeypatch.setenv("KIS_MODE", kis_mode)
     monkeypatch.setenv("KIS_ACCOUNT_NO", "12345678")
     monkeypatch.setenv("KIS_APP_KEY", "key")
     monkeypatch.setenv("KIS_APP_SECRET", "secret")
@@ -197,7 +204,7 @@ async def test_api_settings_survives_invalid_numeric_env(monkeypatch):
 
     assert payload["valid"] is False
     assert any("KIS_RATE_INTERVAL_SEC" in err for err in payload["errors"])
-    assert payload["safety"]["kis_rate_interval_sec"] == 0.20
+    assert payload["safety"]["kis_rate_interval_sec"] == expected_fallback
 
 
 @pytest.mark.asyncio

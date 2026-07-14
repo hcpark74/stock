@@ -159,7 +159,8 @@ TELEGRAM_CHAT_ID=your_chat_id_here
 
 # ── API 호출 속도/재시도 ───────────────────────
 # API 호출 사이 최소 간격(초) — 증권사 호출 횟수 제한 준수용
-KIS_RATE_INTERVAL_SEC=0.20
+# 미설정 시 KIS_MODE 기본값: REAL=0.20 (초당 18건 제한) / PAPER=1.1 (초당 1건 제한)
+# KIS_RATE_INTERVAL_SEC=0.20
 # 일시적 통신 오류 시 재시도 횟수와 대기 시간(초, 시작~최대)
 KIS_MAX_TRANSIENT_RETRIES=2
 KIS_TRANSIENT_RETRY_BASE_SEC=1.0
