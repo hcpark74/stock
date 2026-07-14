@@ -696,7 +696,11 @@ async def test_recover_state_terminal_state_file_skips_db_fallback(monkeypatch):
 
     await main._recover_state()
 
-    assert state_mod.get().position_status == "IDLE"
+    # 당일 CLOSED 상태는 복원한다 — 재시작 후에도 UI가 청산 차트/마커를 유지하고,
+    # CLOSED 상태가 당일 재진입도 막는다. DB fallback은 여전히 생략.
+    assert state_mod.get().position_status == "CLOSED"
+    assert state_mod.get().target_ticker == "005930"
+    assert state_mod.get().close_reason == "TRAILING"
     get_trade.assert_not_awaited()
     skipped = [kwargs for event, kwargs in events if event == "PROCESS_RESTART_DETECTED"][-1]
     assert skipped["recovered_status"] == "STATE_FILE_TERMINAL_SKIP_DB_FALLBACK"
@@ -867,6 +871,47 @@ async def test_recover_state_stale_state_file_allows_today_db_fallback(monkeypat
     assert send.await_args_list[1].args[0] == "PROCESS_RESTART_DETECTED"
     persist.assert_awaited_once()
 
+async def test_recover_state_stale_holding_blocks_todays_entry(monkeypatch):
+    """전일 상태가 HOLDING이면 계좌 확인 전까지 당일 자동 진입을 차단한다."""
+    send = AsyncMock()
+    data = {
+        "date": "20260713",
+        "ticker": "000660",
+        "remaining_qty": 5,
+        "position_status": "HOLDING",
+    }
+    monkeypatch.setattr(main.state, "load", lambda _state_dir: data)
+    monkeypatch.setattr(main.db, "get_trade_by_date", AsyncMock(return_value=None))
+    monkeypatch.setattr(main.notifier, "send", send)
+    monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
+
+    await main._recover_state()
+
+    assert state_mod.get().day_skip is True
+    assert send.await_args_list[0].args[0] == "STALE_POSITION_DETECTED"
+    assert "차단" in send.await_args_list[0].kwargs["message"]
+
+
+async def test_recover_state_stale_closed_does_not_block_entry(monkeypatch):
+    """전일 상태가 CLOSED(정상 청산)면 알림만 보내고 당일 거래는 진행한다."""
+    send = AsyncMock()
+    data = {
+        "date": "20260713",
+        "ticker": "000660",
+        "remaining_qty": 5,
+        "position_status": "CLOSED",
+    }
+    monkeypatch.setattr(main.state, "load", lambda _state_dir: data)
+    monkeypatch.setattr(main.db, "get_trade_by_date", AsyncMock(return_value=None))
+    monkeypatch.setattr(main.notifier, "send", send)
+    monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
+
+    await main._recover_state()
+
+    assert state_mod.get().day_skip is False
+    assert send.await_args_list[0].args[0] == "STALE_POSITION_DETECTED"
+
+
 async def test_recover_state_holding_state_rt_cd_error_sends_alert_and_skips_restore(monkeypatch):
     events = []
     send = AsyncMock()
@@ -898,7 +943,8 @@ async def test_recover_state_holding_state_rt_cd_error_sends_alert_and_skips_res
     assert state_mod.get().position_status == "IDLE"
     send.assert_awaited_once()
     assert send.await_args.args[0] == "PROCESS_RESTART_DETECTED"
-    statuses = [kwargs.get("recovered_status") for event, kwargs in events if event == "PROCESS_RESTART_DETECTED"]
+    statuses = [kwargs.get("recovered_status")
+                for event, kwargs in events if event == "PROCESS_RESTART_DETECTED"]
     assert "HOLDING_VERIFY_FAILED" in statuses
     assert "HOLDING_VERIFY_FAILED_SKIP_RESTORE" in statuses
 
@@ -941,7 +987,8 @@ async def test_recover_state_db_open_trade_rt_cd_error_sends_alert_and_skips_res
     persist.assert_not_awaited()
     send.assert_awaited()
     assert send.await_args_list[0].args[0] == "PROCESS_RESTART_DETECTED"
-    statuses = [kwargs.get("recovered_status") for event, kwargs in events if event == "PROCESS_RESTART_DETECTED"]
+    statuses = [kwargs.get("recovered_status")
+                for event, kwargs in events if event == "PROCESS_RESTART_DETECTED"]
     assert "HOLDING_VERIFY_FAILED" in statuses
     assert "DB_OPEN_TRADE_NO_ACTUAL_HOLDING" in statuses
 
@@ -966,7 +1013,8 @@ async def test_catchup_skips_f1_f2_f3_when_today_trade_exists(monkeypatch):
     monkeypatch.delenv("FORCE_CATCHUP", raising=False)
     monkeypatch.setattr(main, "_is_trading_weekday", lambda: True)
     monkeypatch.setattr(main, "_scheduled_at", fake_scheduled_at)
-    monkeypatch.setattr(main.db, "get_trade_by_date", AsyncMock(return_value={"id": 7, "ticker": "365660"}))
+    monkeypatch.setattr(
+        main.db, "get_trade_by_date", AsyncMock(return_value={"id": 7, "ticker": "365660"}))
     monkeypatch.setattr(main.f1_filter, "run", f1_run)
     monkeypatch.setattr(main.f2_lockup, "run", f2_run)
     monkeypatch.setattr(main.f3_entry, "run", f3_run)
@@ -985,7 +1033,8 @@ async def test_catchup_skips_f1_f2_f3_when_today_trade_exists(monkeypatch):
 
 async def test_job_f1_skips_when_today_trade_exists(monkeypatch):
     f1_run = AsyncMock(return_value=[{"ticker": "005930"}])
-    monkeypatch.setattr(main.db, "get_trade_by_date", AsyncMock(return_value={"id": 7, "ticker": "365660"}))
+    monkeypatch.setattr(
+        main.db, "get_trade_by_date", AsyncMock(return_value={"id": 7, "ticker": "365660"}))
     monkeypatch.setattr(main.f1_filter, "run", f1_run)
     monkeypatch.setattr(main.f3_entry, "run", AsyncMock())
 

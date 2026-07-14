@@ -16,14 +16,19 @@ from src import db, live, state
 from src.api import kis_rest
 from src.api.status_logic import (
     f1_summary_from_rows as _f1_summary_from_rows,
-    f1_verdict as _f1_verdict,
-    f3_detail_from_event as _f3_detail_from_event,
-    latest_today_snapshot_path as _latest_today_snapshot_path,
-    parse_asset_snapshot_response as _parse_asset_snapshot_response,
-    pipeline_from_logs as _pipeline_from_logs,
-    sort_f1_candidates_for_display as _sort_f1_candidates_for_display,
 )
-from src.modules.f4_tracking import HARD_STOP_RATIO, STEP_SIZE, STEP_TRAIL
+from src.api.status_logic import (
+    f3_detail_from_event as _f3_detail_from_event,
+)
+from src.api.status_logic import (
+    latest_today_snapshot_path as _latest_today_snapshot_path,
+)
+from src.api.status_logic import (
+    parse_asset_snapshot_response as _parse_asset_snapshot_response,
+)
+from src.api.status_logic import (
+    pipeline_from_logs as _pipeline_from_logs,
+)
 from src.modules.f1_filter import (
     F1_DEADLINE_H,
     F1_DEADLINE_M,
@@ -54,6 +59,7 @@ from src.modules.f3_entry import (
     GAP_MAX_ORDER,
     PYRAMID_MIN_UP,
 )
+from src.modules.f4_tracking import HARD_STOP_RATIO, STEP_SIZE, STEP_TRAIL
 from src.utils.logger import log
 
 KST = ZoneInfo("Asia/Seoul")
@@ -72,7 +78,7 @@ _BAL_TR = {"REAL": "TTTC8434R", "PAPER": "VTTC8434R"}
 app = FastAPI(title="Daily1 Trading UI", docs_url=None, redoc_url=None)
 
 
-# ???? ?癲ル슢캉????????/ ?癲ル슢?????????????????????????????????????????????????????????????????????????????????????????????????????
+# ─── 상태/선정 요약 헬퍼 ───────────────────────────────────────────────
 
 app.mount("/static", StaticFiles(directory=str(_HTML_DIR)), name="static")
 app.mount("/assets", StaticFiles(directory=str(_HTML_DIR / "assets")), name="assets")
@@ -219,7 +225,8 @@ def _summary_with_trade_anchor(summary: dict, logs: list[dict], current_state=No
             or getattr(current_state, "entry_qty", None)
             or getattr(current_state, "entry_price", None)
         )
-        if has_trade and getattr(current_state, "position_status", None) in {"ENTERING", "HOLDING", "CLOSED"}:
+        status_now = getattr(current_state, "position_status", None)
+        if has_trade and status_now in {"ENTERING", "HOLDING", "CLOSED"}:
             ticker = getattr(current_state, "target_ticker", None)
             name = getattr(current_state, "target_name", None)
 
@@ -243,7 +250,8 @@ def _selection_process_from_logs(summary: dict, logs: list[dict]) -> list[dict]:
     selected = summary.get("selected") or {}
     f1_ticker = selected.get("ticker")
     f1_count = summary.get("liquidity_pass") or summary.get("gap_pass") or 0
-    candidate_tickers = {str(c.get("ticker")) for c in summary.get("candidates", []) if c.get("ticker")}
+    candidate_tickers = {
+        str(c.get("ticker")) for c in summary.get("candidates", []) if c.get("ticker")}
     candidate_names = {
         str(c.get("ticker")): c.get("name")
         for c in summary.get("candidates", [])
@@ -292,7 +300,8 @@ def _selection_process_from_logs(summary: dict, logs: list[dict]) -> list[dict]:
             f2_tickers = []
     f2_event_names = list(f2_event.get("target_names") or []) if f2_event else []
     f2_names = [
-        (f2_event_names[idx] if idx < len(f2_event_names) else None) or candidate_names.get(str(ticker))
+        (f2_event_names[idx] if idx < len(f2_event_names) else None)
+        or candidate_names.get(str(ticker))
         for idx, ticker in enumerate(f2_tickers)
     ]
     steps.append({
@@ -302,15 +311,30 @@ def _selection_process_from_logs(summary: dict, logs: list[dict]) -> list[dict]:
         "ticker": f2_event.get("ticker") if f2_event else None,
         "names": f2_names,
         "name": (f2_event.get("name") or (f2_names[0] if f2_names else None)) if f2_event else None,
-        "gap_pct": (float(f2_event.get("gap_pct")) / 100) if f2_event and f2_event.get("gap_pct") is not None else None,
+        "gap_pct": (
+            (float(f2_event.get("gap_pct")) / 100)
+            if f2_event and f2_event.get("gap_pct") is not None else None
+        ),
         "expected_price": f2_event.get("expected_price") if f2_event else None,
         "expected_amount": f2_event.get("expected_amount") if f2_event else None,
         "status": "잠금" if f2_event else "대기",
-        "detail": ", ".join(stock_label(ticker, f2_names[idx] if idx < len(f2_names) else None) for idx, ticker in enumerate(f2_tickers)) if f2_tickers else "최대 3개 lock",
+        "detail": (
+            ", ".join(
+                stock_label(ticker, f2_names[idx] if idx < len(f2_names) else None)
+                for idx, ticker in enumerate(f2_tickers)
+            ) if f2_tickers else "최대 3개 lock"
+        ),
     })
 
-    f3_events = {"F3_FINAL_PICK", "ENTRY_ORDER_SENT", "ENTRY_EXECUTED", "F3_ENTRY_BLOCKED", "F3_SKIPPED", "GAP_CHANGED", "GAP_RECHECK_UNAVAILABLE", "BUYABLE_QTY_QUERY_FAILED", "BUYABLE_QTY_ZERO"}
-    f3_event = entry_event or (next((e for e in reversed(logs) if e.get("event") in f3_events), None) if f2_event else None)
+    f3_events = {
+        "F3_FINAL_PICK", "ENTRY_ORDER_SENT", "ENTRY_EXECUTED", "F3_ENTRY_BLOCKED",
+        "F3_SKIPPED", "GAP_CHANGED", "GAP_RECHECK_UNAVAILABLE",
+        "BUYABLE_QTY_QUERY_FAILED", "BUYABLE_QTY_ZERO",
+    }
+    f3_event = entry_event or (
+        next((e for e in reversed(logs) if e.get("event") in f3_events), None)
+        if f2_event else None
+    )
     f3_status = {
         "F3_FINAL_PICK": "최종",
         "ENTRY_ORDER_SENT": "주문전송",
@@ -342,7 +366,10 @@ async def _fetch_asset_snapshot() -> dict:
         tr_id=_BAL_TR[mode],
         params=kis_rest.balance_inquiry_params(),
     )
-    snapshot = {**_parse_asset_snapshot_response(resp), "captured_at": datetime.now(KST).isoformat()}
+    snapshot = {
+        **_parse_asset_snapshot_response(resp),
+        "captured_at": datetime.now(KST).isoformat(),
+    }
     try:
         snapshot_id = await db.record_asset_snapshot(snapshot, raw=resp)
         snapshot = {**snapshot, "asset_snapshot_id": snapshot_id, "snapshot_source": "KIS"}
@@ -402,7 +429,29 @@ async def _latest_asset_snapshot_from_db() -> dict | None:
         return None
 
 
-# ???? /api/status ????????????????????????????????????????????????????????????????????????????????????????????????????????????
+# ─── /api/status ──────────────────────────────────────────────────────
+
+async def _today_trade_marks() -> list[dict]:
+    """오늘 체결된 매수/매도 주문 목록 — UI 가격흐름 차트의 매매 마커용."""
+    try:
+        conn = db.get()
+        async with conn.execute(
+            """SELECT o.order_type, o.order_phase, o.ticker,
+                      o.fill_price, o.fill_qty, o.filled_at
+               FROM orders o
+               JOIN trades t ON t.id = o.trade_id
+               WHERE t.date = ? AND o.fill_price > 0
+                 AND (o.status IN ('FILLED', 'PARTIAL_FILL')
+                      OR (o.status = 'CANCELLED' AND o.fill_qty > 0))
+               ORDER BY o.filled_at ASC, o.id ASC""",
+            (_today(),),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+    except Exception as exc:
+        log("API_STATUS_TRADE_MARKS_FAILED", level="WARN", error=repr(exc))
+        return []
+
 
 @app.get("/api/status")
 async def api_status() -> JSONResponse:
@@ -413,7 +462,7 @@ async def api_status() -> JSONResponse:
     cur = live.last_tick_price
     pnl_pct = round((cur / entry - 1) * 100, 2) if (cur and entry) else None
 
-    # ???β뼯爰????熬곥굥萸???醫딆쓧?????影??낟??
+    # 스탑 기준가 계산 — Hard Stop은 진입가 기준, Trail Stop은 활성 시 최고 스텝 기준
     hard_stop = round(entry * (1 - HARD_STOP_RATIO)) if entry else None
     trail_stop: float | None = None
     if s.trailing_active and entry and s.highest_step:
@@ -440,13 +489,24 @@ async def api_status() -> JSONResponse:
         "ntp_level": live.ntp_level,
         "close_reason": s.close_reason,
         "assets": assets,
-        "tick_history": live.tick_history(s.target_ticker, since=s.entry_at) if s.position_status == "HOLDING" else [],
-        "minute_price_history": live.minute_price_history(s.target_ticker, since=s.entry_at) if s.position_status == "HOLDING" else [],
+        # 청산(CLOSED) 후에도 당일 리뷰용으로 tick 이력을 유지해 내려준다.
+        "tick_history": (
+            live.tick_history(s.target_ticker, since=s.entry_at)
+            if s.position_status in ("HOLDING", "CLOSED") else []
+        ),
+        "minute_price_history": (
+            live.minute_price_history(s.target_ticker, since=s.entry_at)
+            if s.position_status in ("HOLDING", "CLOSED") else []
+        ),
+        "trade_marks": (
+            await _today_trade_marks()
+            if s.position_status in ("HOLDING", "CLOSED") else []
+        ),
         **_pipeline_from_logs(logs, s.position_status),
     })
 
 
-# ???? /api/logs ????????????????????????????????????????????????????????????????????????????????????????????????????????????????
+# ─── /api/logs ────────────────────────────────────────────────────────
 
 @app.get("/api/settings")
 async def api_settings() -> JSONResponse:
@@ -571,7 +631,7 @@ async def api_logs(n: int = 60) -> JSONResponse:
     return JSONResponse(lines)
 
 
-# ???? /api/orders ????????????????????????????????????????????????????????????????????????????????????????????????????????????
+# ─── /api/orders ──────────────────────────────────────────────────────
 
 @app.get("/api/orders")
 async def api_orders(limit: int = 60) -> JSONResponse:
@@ -596,7 +656,7 @@ async def api_orders(limit: int = 60) -> JSONResponse:
         return JSONResponse([])
 
 
-# ???? /api/history ??????????????????????????????????????????????????????????????????????????????????????????????????????????
+# ─── /api/history ─────────────────────────────────────────────────────
 
 @app.get("/api/f1")
 async def api_f1() -> JSONResponse:
@@ -640,7 +700,7 @@ async def api_history(limit: int = 60) -> JSONResponse:
     return JSONResponse(result)
 
 
-# ???? /api/stats ??????????????????????????????????????????????????????????????????????????????????????????????????????????????
+# ─── /api/stats ───────────────────────────────────────────────────────
 
 @app.get("/api/stats")
 async def api_stats() -> JSONResponse:
@@ -756,7 +816,7 @@ async def api_stats() -> JSONResponse:
                              "by_step": {}, "by_entry_hour": []})
 
 
-# ???? /api/stream (SSE) ????????????????????????????????????????????????????????????????????????????????????????????????
+# ─── /api/stream (SSE) ────────────────────────────────────────────────
 
 @app.get("/api/stream")
 async def api_stream(request: Request) -> StreamingResponse:

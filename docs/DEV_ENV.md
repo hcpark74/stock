@@ -1,7 +1,7 @@
 [개발환경] 데일리 갭 자동매매 시스템 개발환경 설정 가이드
 
-문서 버전: v1.0
-작성일: 2026년 6월 23일
+문서 버전: v1.1
+작성일: 2026년 6월 23일 / 최종 수정: 2026년 7월 14일
 대상 OS: Windows 11 (운영 환경) / Windows 11 또는 WSL2 (개발 환경)
 연관 문서: PRD.md
 
@@ -37,12 +37,15 @@
   ├── src/                      # 핵심 소스
   │   ├── __init__.py
   │   ├── state.py              # 전역 State 스키마 및 atomic 조작
+  │   ├── live.py               # SSE 상태, 원시 tick/분 단위 가격 이력
+  │   ├── db.py                 # SQLite 스키마 및 비동기 CRUD
   │   ├── scheduler.py          # APScheduler 설정 (F1~F5 등록)
   │   ├── notifier.py           # Telegram 알림 비동기 큐
   │   │
   │   ├── modules/
   │   │   ├── __init__.py
   │   │   ├── f1_filter.py      # F1: 갭/유동성 필터링
+  │   │   ├── f1_selector.py    # F1 후보 점수 계산 및 최종 선택
   │   │   ├── f2_lockup.py      # F2: 타겟 락업 엔진
   │   │   ├── f3_entry.py       # F3: 진입 주문 모듈
   │   │   ├── f4_tracking.py    # F4: 장중 추적 스탑
@@ -52,7 +55,9 @@
   │   │   ├── __init__.py
   │   │   ├── kis_rest.py       # KIS REST API 래퍼 (rate limit 포함)
   │   │   ├── kis_ws.py         # KIS WebSocket 클라이언트
-  │   │   └── auth.py           # 토큰 발급/갱신/캐시 관리
+  │   │   ├── auth.py           # 토큰 발급/갱신/캐시 관리
+  │   │   ├── status_logic.py    # API 상태/로그 해석 보조 로직
+  │   │   └── server.py          # Web UI 정적 파일 및 JSON/SSE API
   │   │
   │   └── utils/
   │       ├── __init__.py
@@ -70,7 +75,12 @@
   │   ├── __init__.py
   │   ├── test_state.py
   │   ├── test_f1_filter.py
+  │   ├── test_live.py
+  │   ├── test_f5_timeout.py
+  │   ├── test_api_server.py
+  │   ├── test_state_daily_reset.py
   │   ├── test_f4_tracking.py
+  │   ├── js/price_flow_checks.js
   │   └── fixtures/             # 테스트용 mock 시세 데이터
   │
   ├── scripts/
@@ -80,7 +90,12 @@
   │
   └── docs/
       ├── PRD.md
-      └── DEV_ENV.md            # 이 문서
+      ├── DEV_ENV.md            # 이 문서
+      ├── UI_DESIGN.md
+      ├── DB_DESIGN.md
+      ├── TABLE_DESIGN.md
+      ├── CODING_GUIDELINES.md
+      └── html/                 # 운영 UI 정적 파일
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 3. Python 환경 설정
@@ -560,26 +575,29 @@ F3_PYRAMID_FILL_SEC=10.0
 - 주문/체결 내역은 `/api/stream`의 로그 이벤트 수신 시 즉시 `/api/orders`를 재조회하고, 5초 폴링을 백업으로 둔다.
 - `주문가능금액`은 자산 데이터이므로 `/api/assets`가 원천이다. 주문 메뉴에서는 주문 판단용 보조 참조값으로만 노출한다.
 - KIS 잔고 조회 응답에 `ord_psbl_cash`가 없으면 UI의 주문가능금액은 `dnca_tot_amt`와 `prvs_rcdl_excc_amt`(D+2 정산금) 중 큰 값을 fallback으로 사용한다(매도대금 T+2 미결제 시 `dnca_tot_amt` 과소평가 보정). 종목별 정확한 주문가능수량/금액 판단은 F3의 매수가능조회 경로를 우선한다.
-- 보유 후 가격흐름은 `live.push_tick()`이 관리하는 최근 tick ring buffer를 `/api/status.tick_history`로 내려받아 표시한다.
-  - 차트의 가로축은 tick 순번이 아니라 실제 tick 수신 시각(`HH:mm:ss`)이다.
-  - 최소 1분 시간창을 사용해 짧은 보유 구간에서도 선이 화면 전체로 과도하게 벌어지지 않게 한다.
-  - 캔버스 표시 폭은 최대 760px로 제한한다.
+- 보유 후 가격흐름은 `/api/status`의 `tick_history`, `minute_price_history`, `trade_marks`를 함께 사용한다.
+  - 원시 tick은 최대 5,000개, 분 단위 마지막 가격은 별도 버퍼에 최대 180분 보관한다.
+  - 보유 중에는 최근 20분 슬라이딩 창, 청산 후에는 진입부터 마지막 체결/tick까지 고정 범위를 표시한다.
+  - SSE tick은 증분 추가하고 렌더링은 최소 150ms 간격으로 묶는다. 화면 폭을 넘으면 구간별 최솟값/최댓값 보존 방식으로 다운샘플링한다.
+  - 차트는 컨테이너 폭 100%를 사용하며 시간 범위에 따라 1/2/5/10분 격자와 적응형 라벨 간격을 선택한다.
+  - 당일 체결 주문은 매수/매도 마커로 표시하고, 마지막 가격은 가격 점·현재가·마지막 매도·마지막 매수 순으로 fallback한다.
 
 ### 테스트 명령
 
 현재 검증 기준은 가상환경 파이썬을 명시해서 실행한다.
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\test_kis_rest.py tests\test_f1_filter.py tests\test_f2_lockup.py tests\test_f3_entry.py tests\test_f4_step_trailing.py tests\test_api_server.py tests\test_notifier.py -q -p no:cacheprovider
-.\.venv\Scripts\python.exe -m ruff check src\notifier.py tests\test_notifier.py
+.\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider
+node tests\js\price_flow_checks.js
 ```
 
 운영 보강 변경만 빠르게 확인할 때:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\test_main_schedule_flow.py tests\test_kis_rest.py -q -p no:cacheprovider
-.\.venv\Scripts\python.exe -m ruff check main.py src\api\kis_rest.py src\utils\logger.py tests\test_kis_rest.py tests\test_main_schedule_flow.py
+.\.venv\Scripts\python.exe -m pytest tests\test_f5_timeout.py tests\test_live.py tests\test_api_server.py tests\test_state_daily_reset.py -q -p no:cacheprovider
+.\.venv\Scripts\python.exe -m ruff check src\modules\f5_timeout.py src\live.py src\api\server.py tests\test_f5_timeout.py tests\test_live.py tests\test_api_server.py
 node --check docs\html\assets\app.js
+node tests\js\price_flow_checks.js
 ```
 
 ### Telegram 알림 확인

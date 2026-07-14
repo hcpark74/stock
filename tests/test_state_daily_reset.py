@@ -95,7 +95,8 @@ async def test_set_holding_records_entry_at():
     assert s.entry_at is not None
     assert state.datetime.fromisoformat(s.entry_at)
 
-async def test_set_closed_clears_tick_history():
+async def test_set_closed_keeps_tick_history_for_review():
+    """청산 후에도 당일 가격흐름 차트를 보여주기 위해 tick 이력을 유지한다."""
     s = state.get()
     s.position_status = "HOLDING"
     live.push_tick(75_000.0, ticker="005930")
@@ -103,7 +104,9 @@ async def test_set_closed_clears_tick_history():
     changed = await state.set_closed("TRAILING")
 
     assert changed is True
-    assert live.tick_history() == []
+    assert len(live.tick_history()) == 1
+
+    live.clear_tick_history()
 
 
 async def test_target_candidates_persist_restore_round_trip(tmp_path):

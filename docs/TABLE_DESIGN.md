@@ -2,6 +2,7 @@
 
 > 상세 컬럼과 SQL 정의의 원천은 `docs/DB_DESIGN.md`입니다.  
 > 이 문서는 테이블의 책임, 관계, 화면별 데이터 원천만 빠르게 확인하기 위한 지도입니다.
+> 최종 수정: 2026-07-14
 
 ## 테이블 책임
 
@@ -32,7 +33,7 @@ asset_snapshots  # 조회 시각 기준 누적 이력, FK 없음
 
 | 화면 | 주 원천 | 보조 원천 |
 |---|---|---|
-| 오늘 | `/api/status`, JSONL 로그, 최근 tick buffer | `asset_snapshots` fallback |
+| 오늘 | `/api/status`, JSONL 로그, 원시 tick/분 단위 메모리 버퍼 | `trade_marks`, `asset_snapshots` fallback |
 | 자산 | KIS 잔고 조회 `/api/assets` | 마지막 `asset_snapshots` |
 | 주문 | `orders` + `trades` JOIN | JSONL 로그 이벤트 |
 | 이력 | `trades` | `orders`, `partial_exits` |
@@ -48,6 +49,15 @@ asset_snapshots  # 조회 시각 기준 누적 이력, FK 없음
 | 거래 스킵 | 당일 1행을 `daily_skips` 저장 |
 | 자산 조회 | KIS 조회 성공 시마다 `asset_snapshots` 저장 |
 | 진행 단계/진단 이벤트 | DB가 아니라 JSONL 로그 기준 |
+| 원시 tick | 메모리 deque 최대 5,000개, 프로세스 재시작 또는 거래일 변경 시 초기화 |
+| 분 단위 가격 | 메모리 deque 최대 180분, 같은 분의 마지막 가격과 tick 수 유지 |
+
+## 오늘 가격흐름 조합
+
+- `tick_history`: 진입 이후의 최근 원시 tick. 최근 구간의 세밀한 선과 SSE 증분 갱신에 사용합니다.
+- `minute_price_history`: 원시 tick 버퍼가 20분을 담지 못할 때 앞 구간을 보완합니다.
+- `trade_marks`: 당일 `orders`의 체결 데이터를 종목별·체결시각 오름차순으로 조회해 매수/매도 마커와 가격 fallback에 사용합니다.
+- 위 세 데이터는 운영 화면용 조회 모델이며 SQLite에 새로운 시세 테이블을 만들지 않습니다.
 
 ## 유지보수 규칙
 

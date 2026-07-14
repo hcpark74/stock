@@ -7,9 +7,9 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-import src.api.server as server
-from src import db
-import src.modules.f1_filter as f1_filter
+import src.api.server as server  # noqa: E402 — fastapi 미설치 시 모듈 스킵 이후 임포트
+import src.modules.f1_filter as f1_filter  # noqa: E402
+from src import db  # noqa: E402
 
 
 def test_server_uses_f1_snapshot_dir_constant():
@@ -30,14 +30,19 @@ def test_f1_snapshot_saved_is_only_weak_done_signal():
 
 def test_selection_process_summarizes_f1_f2_f3():
     summary = {
-        "selected": {"ticker": "006340", "name": "대원전선", "gap_pct": 0.0349, "expected_amount": 147_000_000},
+        "selected": {
+            "ticker": "006340", "name": "대원전선",
+            "gap_pct": 0.0349, "expected_amount": 147_000_000},
         "liquidity_pass": 10,
         "gap_pass": 12,
         "candidates": [{"ticker": "006340"}, {"ticker": "036930"}],
     }
     logs = [
-        {"event": "TARGET_LOCKED", "ticker": "006340", "name": "Daewon", "target_tickers": ["006340", "036930"], "target_names": ["Daewon", "Jusung"], "gap_pct": 3.49},
-        {"event": "F3_FINAL_PICK", "ticker": "006340", "name": "Daewon", "checked_count": 2, "valid_count": 1, "expected_price": 10670},
+        {"event": "TARGET_LOCKED", "ticker": "006340", "name": "Daewon",
+         "target_tickers": ["006340", "036930"],
+         "target_names": ["Daewon", "Jusung"], "gap_pct": 3.49},
+        {"event": "F3_FINAL_PICK", "ticker": "006340", "name": "Daewon",
+         "checked_count": 2, "valid_count": 1, "expected_price": 10670},
     ]
 
     result = server._selection_process_from_logs(summary, logs)
@@ -54,13 +59,16 @@ def test_selection_process_summarizes_f1_f2_f3():
 
 def test_selection_process_derives_f3_name_from_snapshot_when_log_has_no_name():
     summary = {
-        "selected": {"ticker": "006340", "name": "Daewon", "gap_pct": 0.0349, "expected_amount": 147_000_000},
+        "selected": {
+            "ticker": "006340", "name": "Daewon",
+            "gap_pct": 0.0349, "expected_amount": 147_000_000},
         "liquidity_pass": 1,
         "gap_pass": 1,
         "candidates": [{"ticker": "006340", "name": "Daewon"}],
     }
     logs = [
-        {"event": "TARGET_LOCKED", "ticker": "006340", "target_tickers": ["006340"], "gap_pct": 3.49},
+        {"event": "TARGET_LOCKED", "ticker": "006340",
+         "target_tickers": ["006340"], "gap_pct": 3.49},
         {"event": "F3_FINAL_PICK", "ticker": "006340", "checked_count": 1, "valid_count": 1},
     ]
 
@@ -78,7 +86,8 @@ def test_selection_process_ignores_f2_from_different_f1_snapshot():
         "candidates": [{"ticker": "028050"}, {"ticker": "073240"}],
     }
     logs = [
-        {"event": "TARGET_LOCKED", "ticker": "006340", "target_tickers": ["006340"], "gap_pct": 3.49},
+        {"event": "TARGET_LOCKED", "ticker": "006340",
+         "target_tickers": ["006340"], "gap_pct": 3.49},
         {"event": "F3_FINAL_PICK", "ticker": "006340", "checked_count": 1, "valid_count": 1},
     ]
 
@@ -137,10 +146,11 @@ async def test_status_does_not_fetch_asset_snapshot(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_status_includes_tick_history_only_while_holding(monkeypatch):
+async def test_status_includes_tick_history_while_holding_and_closed(monkeypatch):
     s = server.state.get()
     server.live.clear_tick_history()
-    server.live._tick_history.append({"ts": "2026-07-06T09:10:00+09:00", "ticker": "005930", "price": 75_000.0})
+    server.live._tick_history.append(
+        {"ts": "2026-07-06T09:10:00+09:00", "ticker": "005930", "price": 75_000.0})
     monkeypatch.setattr(server, "_read_today_logs", lambda limit=None: [])
     monkeypatch.setattr(s, "position_status", "HOLDING")
     monkeypatch.setattr(s, "target_ticker", "005930")
@@ -149,18 +159,27 @@ async def test_status_includes_tick_history_only_while_holding(monkeypatch):
     monkeypatch.setattr(s, "remaining_qty", 1)
     monkeypatch.setattr(s, "high_price", 75_500.0)
     monkeypatch.setattr(s, "entry_at", "2026-07-06T09:10:01+09:00")
-    server.live._tick_history.append({"ts": "2026-07-06T09:10:01+09:00", "ticker": "005930", "price": 75_500.0})
+    server.live._tick_history.append(
+        {"ts": "2026-07-06T09:10:01+09:00", "ticker": "005930", "price": 75_500.0})
 
     resp = await server.api_status()
     body = resp.body.decode("utf-8")
 
     assert '"tick_history"' in body
+    assert '"trade_marks"' in body
     assert '"price":75500.0' in body
     assert '"price":75000.0' not in body
 
+    # 청산 후에도 당일 리뷰용으로 tick 이력을 유지해 내려준다.
+    monkeypatch.setattr(s, "position_status", "CLOSED")
+    resp = await server.api_status()
+    assert '"price":75500.0' in resp.body.decode("utf-8")
+
     monkeypatch.setattr(s, "position_status", "IDLE")
     resp = await server.api_status()
-    assert '"tick_history":[]' in resp.body.decode("utf-8")
+    body = resp.body.decode("utf-8")
+    assert '"tick_history":[]' in body
+    assert '"trade_marks":[]' in body
 
     server.live.clear_tick_history()
 
@@ -264,7 +283,8 @@ async def test_api_orders_returns_today_orders(tmp_path, monkeypatch):
     today = "20260702"
     monkeypatch.setattr(server, "_today", lambda: today)
     trade_id = await db.open_trade(today, "005930", 75_000.0, 10)
-    order_id = await db.record_order(trade_id, "ORD001", "BUY", 10, 75_000.0, "FIRST_BUY", "005930", "삼성전자")
+    order_id = await db.record_order(
+        trade_id, "ORD001", "BUY", 10, 75_000.0, "FIRST_BUY", "005930", "삼성전자")
     await db.update_order_fill(order_id, 75_100.0, 10, 120)
     old_trade_id = await db.open_trade("20260701", "000660", 120_000.0, 1)
     await db.record_order(old_trade_id, "OLD001", "BUY", 1, 120_000.0, "FIRST_BUY", "000660")
@@ -277,6 +297,49 @@ async def test_api_orders_returns_today_orders(tmp_path, monkeypatch):
     assert '"name":"삼성전자"' in body
     assert '"status":"FILLED"' in body
     assert "OLD001" not in body
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_today_trade_marks_returns_filled_orders_in_time_order(tmp_path, monkeypatch):
+    await db.init(str(tmp_path / "marks.db"))
+    today = "20260714"
+    monkeypatch.setattr(server, "_today", lambda: today)
+    trade_id = await db.open_trade(today, "005930", 75_000.0, 10)
+
+    buy_id = await db.record_order(
+        trade_id, "ORD-BUY", "BUY", 10, 75_000.0, "FIRST_BUY", "005930", "삼성전자")
+    await db.update_order_fill(buy_id, 75_100.0, 10, 120)
+    sell_id = await db.record_order(
+        trade_id, "ORD-SELL", "SELL", 10, 76_000.0, "CLOSE_SELL", "005930", "삼성전자")
+    await db.update_order_fill(sell_id, 76_050.0, 10, 90)
+    # 미체결(PENDING) 주문은 마커에서 제외되어야 한다.
+    await db.record_order(
+        trade_id, "ORD-PENDING", "BUY", 5, 75_200.0, "PYRAMID_BUY", "005930", "삼성전자")
+    # 부분체결 후 잔량이 취소된 주문(CANCELLED + fill_qty>0)은 마커에 포함되어야 한다.
+    pc_id = await db.record_order(
+        trade_id, "ORD-PARTIAL-CANCEL", "SELL", 10, 76_500.0, "TIMEOUT_SELL", "005930", "삼성전자")
+    await db.update_order_fill(pc_id, 76_400.0, 3, 80, status="PARTIAL_FILL")
+    await db.update_order_status(pc_id, "CANCELLED")
+    # 무체결 취소 주문은 제외되어야 한다.
+    nc_id = await db.record_order(
+        trade_id, "ORD-NOFILL-CANCEL", "SELL", 5, 76_600.0, "TIMEOUT_SELL", "005930", "삼성전자")
+    await db.update_order_status(nc_id, "CANCELLED")
+    # 다른 날짜의 체결은 제외되어야 한다.
+    old_trade_id = await db.open_trade("20260713", "000660", 120_000.0, 1)
+    old_id = await db.record_order(
+        old_trade_id, "ORD-OLD", "SELL", 1, 120_000.0, "TIMEOUT_SELL", "000660")
+    await db.update_order_fill(old_id, 119_000.0, 1, 50)
+
+    marks = await server._today_trade_marks()
+
+    assert [m["order_type"] for m in marks] == ["BUY", "SELL", "SELL"]
+    assert [m["order_phase"] for m in marks] == ["FIRST_BUY", "CLOSE_SELL", "TIMEOUT_SELL"]
+    assert marks[0]["fill_price"] == 75_100.0
+    assert marks[1]["fill_price"] == 76_050.0
+    assert marks[2]["fill_price"] == 76_400.0    # 부분체결 후 취소된 주문도 포함
+    assert all(m["ticker"] == "005930" for m in marks)
+    assert all(m["filled_at"] for m in marks)
     await db.close()
 
 
@@ -321,9 +384,12 @@ async def test_api_stats_returns_strategy_breakdowns_contract(tmp_path):
     await db.close_trade(third_id, 204_000.0, "TIMEOUT", 2.0, 0.075)
 
     conn = db.get()
-    await conn.execute("UPDATE trades SET entry_at=? WHERE id=?", ("2026-07-01T09:10:00+09:00", first_id))
-    await conn.execute("UPDATE trades SET entry_at=? WHERE id=?", ("2026-07-02T10:10:00+09:00", second_id))
-    await conn.execute("UPDATE trades SET entry_at=? WHERE id=?", ("2026-07-03T09:20:00+09:00", third_id))
+    await conn.execute(
+        "UPDATE trades SET entry_at=? WHERE id=?", ("2026-07-01T09:10:00+09:00", first_id))
+    await conn.execute(
+        "UPDATE trades SET entry_at=? WHERE id=?", ("2026-07-02T10:10:00+09:00", second_id))
+    await conn.execute(
+        "UPDATE trades SET entry_at=? WHERE id=?", ("2026-07-03T09:20:00+09:00", third_id))
     await conn.commit()
 
     resp = await server.api_stats()
@@ -350,7 +416,10 @@ async def test_fetch_asset_snapshot_parses_kis_balance(monkeypatch):
     async def fake_get(*args, **kwargs):
         return {
             "output1": [
-                {"pdno": "005930", "prdt_name": "Samsung", "hldg_qty": "2", "ord_psbl_qty": "2", "prpr": "70000", "pchs_avg_pric": "69000", "pchs_amt": "138000", "evlu_amt": "140000", "evlu_pfls_amt": "2000", "evlu_pfls_rt": "1.45"},
+                {"pdno": "005930", "prdt_name": "Samsung", "hldg_qty": "2",
+                 "ord_psbl_qty": "2", "prpr": "70000", "pchs_avg_pric": "69000",
+                 "pchs_amt": "138000", "evlu_amt": "140000",
+                 "evlu_pfls_amt": "2000", "evlu_pfls_rt": "1.45"},
                 {"pdno": "000660", "hldg_qty": "0"},
             ],
             "output2": [{
@@ -570,7 +639,8 @@ def test_selection_process_prefers_executed_trade_over_later_restart_pick():
             "target_tickers": ["009150", "005930", "365660"],
             "target_names": ["SamsungElecParts", "Samsung", "Lemon"],
         },
-        {"ts": "2026-07-09T09:01:36+09:00", "event": "ENTRY_EXECUTED", "ticker": "365660", "name": "Lemon"},
+        {"ts": "2026-07-09T09:01:36+09:00", "event": "ENTRY_EXECUTED",
+         "ticker": "365660", "name": "Lemon"},
         {
             "ts": "2026-07-09T09:09:45+09:00",
             "event": "TARGET_LOCKED",
@@ -578,7 +648,8 @@ def test_selection_process_prefers_executed_trade_over_later_restart_pick():
             "target_tickers": ["005930", "005935", "365660"],
             "target_names": ["Samsung", "SamsungPref", "Lemon"],
         },
-        {"ts": "2026-07-09T09:09:49+09:00", "event": "F3_FINAL_PICK", "ticker": "005930", "name": "Samsung"},
+        {"ts": "2026-07-09T09:09:49+09:00", "event": "F3_FINAL_PICK",
+         "ticker": "005930", "name": "Samsung"},
     ]
 
     anchored = server._summary_with_trade_anchor(summary, logs)

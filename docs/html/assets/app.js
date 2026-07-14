@@ -133,10 +133,8 @@ let _lastAssets = null;
 let _priceFlow = [];
 let _priceFlowTicks = [];
 let _priceFlowTicker = null;
-const PRICE_FLOW_TICK_WINDOW = 240;
-const PRICE_FLOW_SESSION_START_HOUR = 9;
-const PRICE_FLOW_SESSION_END_HOUR = 11;
-const PRICE_FLOW_GRID_INTERVAL_MIN = 10;
+const PRICE_FLOW_TICK_WINDOW = 5000;  // 서버 tick 버퍼(live._TICK_HISTORY_MAX)와 동일
+const PRICE_FLOW_VIEW_MIN = 20;       // 보유 중 슬라이딩 창 크기(분)
 
 function applyStatus(d) {
   if(d.assets) _lastAssets = d.assets;
@@ -361,14 +359,25 @@ function updatePriceFlow(d) {
     _priceFlow = [];
     _priceFlowTicks = [];
   }
-  if(Array.isArray(d?.tick_history) && d.tick_history.length) {
-    _priceFlowTicks = d.tick_history
+  // 신선도 가드: SSE 증분 추가 후에는 d가 지난 폴링 payload(stale)일 수 있다.
+  // payload의 마지막 tick이 버퍼보다 오래됐으면 재파싱하지 않아 tick 유실과
+  // tick당 O(n) 재가공을 모두 막는다. 새 /api/status 응답은 항상 통과한다.
+  const payloadTicks = Array.isArray(d?.tick_history) ? d.tick_history : [];
+  const payloadLastTs = payloadTicks.length
+    ? (Date.parse(payloadTicks[payloadTicks.length - 1].ts) || 0) : 0;
+  const bufferLastTs = _priceFlowTicks[_priceFlowTicks.length - 1]?.ts || 0;
+  if(payloadTicks.length && payloadLastTs >= bufferLastTs) {
+    _priceFlowTicks = payloadTicks
       .map(row => ({ts: Date.parse(row.ts) || Date.now(), price: Number(row.price || 0)}))
       .filter(row => row.price > 0)
       .slice(-PRICE_FLOW_TICK_WINDOW);
   }
-  if(Array.isArray(d?.minute_price_history) && d.minute_price_history.length) {
-    _priceFlow = d.minute_price_history
+  const payloadMinutes = Array.isArray(d?.minute_price_history) ? d.minute_price_history : [];
+  const payloadLastMinuteTs = payloadMinutes.length
+    ? (Date.parse(payloadMinutes[payloadMinutes.length - 1].ts) || 0) : 0;
+  const bufferLastMinuteTs = _priceFlow[_priceFlow.length - 1]?.ts || 0;
+  if(payloadMinutes.length && payloadLastMinuteTs >= bufferLastMinuteTs) {
+    _priceFlow = payloadMinutes
       .map(row => ({
         ts: Date.parse(row.ts) || Date.now(),
         price: Number(row.price || 0),
@@ -380,7 +389,23 @@ function updatePriceFlow(d) {
   if(price > 0 && d?.position_status === 'HOLDING' && !_priceFlow.length) {
     appendPriceFlowTick(Date.now(), price, ticker);
   }
-  drawPriceFlow(d);
+  requestPriceFlowDraw(d);
+}
+
+// tick 폭주 시에도 그리기는 최소 간격으로 1회만 수행 (마지막 상태로 코얼레싱)
+const PRICE_FLOW_DRAW_MIN_INTERVAL_MS = 150;
+let _flowPendingStatus = null;
+let _flowDrawTimer = null;
+let _flowLastDrawAt = 0;
+function requestPriceFlowDraw(d) {
+  _flowPendingStatus = d;
+  if(_flowDrawTimer) return;
+  const delay = Math.max(0, PRICE_FLOW_DRAW_MIN_INTERVAL_MS - (Date.now() - _flowLastDrawAt));
+  _flowDrawTimer = setTimeout(() => {
+    _flowDrawTimer = null;
+    _flowLastDrawAt = Date.now();
+    drawPriceFlow(_flowPendingStatus);
+  }, delay);
 }
 function fmtFlowTime(ts) {
   const dt = new Date(ts);
@@ -396,14 +421,64 @@ function fmtFlowMinute(ts) {
   return `${p(dt.getHours())}:${p(dt.getMinutes())}`;
 }
 
-function priceFlowSessionWindow(d) {
-  const anchorTs = Date.parse(d?.entry_at) || _priceFlow[0]?.ts || Date.now();
-  const day = new Date(anchorTs);
-  const start = new Date(day);
-  start.setHours(PRICE_FLOW_SESSION_START_HOUR, 0, 0, 0);
-  const end = new Date(day);
-  end.setHours(PRICE_FLOW_SESSION_END_HOUR, 0, 0, 0);
-  return {startTs: start.getTime(), endTs: end.getTime()};
+function downsampleFlowPoints(points, maxBuckets) {
+  // 시간 버킷별 min/max만 남기는 다운샘플링 — 스파이크를 보존하면서
+  // 그리기 점 수를 픽셀 폭 기준(≤ 2×버킷)으로 제한한다.
+  if(points.length <= maxBuckets * 2) return points;
+  const first = points[0].ts;
+  const span = (points[points.length - 1].ts - first) || 1;
+  const out = [];
+  let bucketIdx = -1, lo = null, hi = null;
+  const flush = () => {
+    if(!lo) return;
+    if(lo === hi) out.push(lo);
+    else if(lo.ts <= hi.ts) out.push(lo, hi);
+    else out.push(hi, lo);
+  };
+  for(const p of points) {
+    const b = Math.min(maxBuckets - 1, Math.floor((p.ts - first) / span * maxBuckets));
+    if(b !== bucketIdx) { flush(); bucketIdx = b; lo = p; hi = p; }
+    else {
+      if(p.price < lo.price) lo = p;
+      if(p.price > hi.price) hi = p;
+    }
+  }
+  flush();
+  return out;
+}
+
+function parseTradeMarks(d) {
+  // /api/status trade_marks(당일 체결 주문) → 차트 마커. filled_at 오름차순 유지.
+  return (Array.isArray(d?.trade_marks) ? d.trade_marks : [])
+    .map(m => ({
+      ts: Date.parse(m.filled_at) || 0,
+      price: Number(m.fill_price || 0),
+      side: m.order_type,
+      phase: m.order_phase,
+      ticker: m.ticker,
+    }))
+    .filter(m => m.ts > 0 && m.price > 0
+      && (!d?.ticker || String(m.ticker) === String(d.ticker)));
+}
+
+function priceFlowViewWindow(d, marks) {
+  // 보유 중: 증권사 차트처럼 "지금"이 오른쪽 끝인 최근 20분 슬라이딩 창.
+  // 청산 후: 진입~마지막 체결/tick 전체 구간을 고정해 매수/매도를 함께 리뷰.
+  const firstDataTs = _priceFlowTicks[0]?.ts || _priceFlow[0]?.ts;
+  const lastDataTs = _priceFlowTicks[_priceFlowTicks.length - 1]?.ts
+    || _priceFlow[_priceFlow.length - 1]?.ts;
+  const entryTs = Date.parse(d?.entry_at) || firstDataTs || Date.now();
+  if(d?.position_status === 'CLOSED') {
+    const firstMarkTs = marks?.length ? marks[0].ts : entryTs;
+    const lastMarkTs = marks?.length ? marks[marks.length - 1].ts : 0;
+    const edge = 30 * 1000; // 양끝 마커가 잘리지 않도록 30초 여백
+    const startTs = Math.min(entryTs, firstMarkTs) - edge;
+    const endTs = Math.max(lastDataTs || 0, lastMarkTs, startTs + 60 * 1000) + edge;
+    return {startTs, endTs};
+  }
+  const endTs = Math.max(Date.now(), entryTs + 60 * 1000);
+  const startTs = Math.max(entryTs, endTs - PRICE_FLOW_VIEW_MIN * 60 * 1000);
+  return {startTs, endTs};
 }
 
 function resizePriceFlowCanvas(c) {
@@ -429,9 +504,16 @@ function drawPriceFlow(d) {
   const pad = {l:46,r:14,t:14,b:36};
   const chartW = W - pad.l - pad.r;
   const chartH = H - pad.t - pad.b;
-  const {startTs, endTs} = priceFlowSessionWindow(d || {});
+  const marks = parseTradeMarks(d);
+  const {startTs, endTs} = priceFlowViewWindow(d || {}, marks);
   const xAtTs = ts => pad.l + Math.max(0, Math.min(1, (Number(ts) - startTs) / (endTs - startTs || 1))) * chartW;
   const sub = $('flow-sub');
+  const holding = d?.position_status === 'HOLDING';
+  const closed = d?.position_status === 'CLOSED';
+
+  const spanMin = Math.max(1, (endTs - startTs) / 60000);
+  // 창 크기에 맞춰 눈금 간격 선택: 20분 창이면 1분 눈금, 청산 후 장기 보유 리뷰면 확대
+  const gridMin = spanMin <= 21 ? 1 : spanMin <= 45 ? 2 : spanMin <= 90 ? 5 : 10;
 
   const drawGrid = () => {
     ctx.strokeStyle = themeVal('rgba(120,123,134,.18)', 'rgba(79,82,96,.18)');
@@ -444,23 +526,27 @@ function drawPriceFlow(d) {
     ctx.fillStyle = themeVal('#787b86', '#4f5260');
     ctx.font = '10px Noto Sans KR,sans-serif';
     ctx.textBaseline = 'top';
-    const gridStepMs = PRICE_FLOW_GRID_INTERVAL_MIN * 60 * 1000;
-    const labelEvery = chartW >= 620 ? 1 : (chartW >= 420 ? 2 : 3);
-    let gridIdx = 0;
-    for(let ts = startTs; ts <= endTs + 1; ts += gridStepMs, gridIdx++) {
+    const gridStepMs = gridMin * 60 * 1000;
+    const pxPerMin = chartW / spanMin;
+    // 시간 라벨은 겹치지 않도록 60px 이상 확보되는 "정각 분" 간격만 사용 (기본: 눈금 1분·라벨 5분)
+    const labelMin = [1, 2, 5, 10, 15, 30].find(m => m >= gridMin && m * pxPerMin >= 60) || 60;
+    const firstGridTs = Math.ceil(startTs / gridStepMs) * gridStepMs;
+    for(let ts = firstGridTs; ts <= endTs; ts += gridStepMs) {
       const x = xAtTs(ts);
-      const isHour = gridIdx % 6 === 0;
+      const dt = new Date(ts);
+      const minuteOfDay = dt.getHours() * 60 + dt.getMinutes();
+      const isHour = minuteOfDay % 60 === 0;
       ctx.strokeStyle = isHour
         ? themeVal('rgba(120,123,134,.28)', 'rgba(79,82,96,.28)')
         : themeVal('rgba(120,123,134,.12)', 'rgba(79,82,96,.14)');
       ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, pad.t + chartH); ctx.stroke();
-      if(gridIdx % labelEvery === 0 || ts >= endTs) {
-        ctx.textAlign = ts === startTs ? 'left' : (ts >= endTs ? 'right' : 'center');
+      if(minuteOfDay % labelMin === 0 && x >= pad.l + 18 && x <= W - pad.r - 18) {
+        ctx.textAlign = 'center';
         ctx.fillText(fmtFlowMinute(ts), x, pad.t + chartH + 8);
       }
     }
     const nowTs = Date.now();
-    if(nowTs >= startTs && nowTs <= endTs) {
+    if(holding && nowTs >= startTs && nowTs <= endTs) {
       const x = xAtTs(nowTs);
       ctx.strokeStyle = themeVal('rgba(247,166,0,.45)', 'rgba(247,166,0,.5)');
       ctx.setLineDash([3,4]);
@@ -475,14 +561,20 @@ function drawPriceFlow(d) {
 
   drawGrid();
 
-  const points = _priceFlow.filter(p => p.ts >= startTs && p.ts <= endTs);
+  // tick 버퍼(5,000건)가 20분을 못 담는 활발한 종목 대비:
+  // 첫 tick 이전 구간은 분 단위 이력으로 채우고, 그 뒤는 원시 tick으로 그린다.
+  const firstTickTs = _priceFlowTicks.length ? _priceFlowTicks[0].ts : Infinity;
+  const minutePrefix = _priceFlow.filter(p => p.ts < firstTickTs);
+  const points = minutePrefix.concat(_priceFlowTicks)
+    .filter(p => p.ts >= startTs && p.ts <= endTs);
+  const visibleMarks = marks.filter(m => m.ts >= startTs && m.ts <= endTs);
   const refs = [d?.entry_price, d?.high_price, d?.trail_stop, d?.hard_stop, d?.current_price]
     .map(Number).filter(v => v > 0);
-  const values = points.map(p => p.price).concat(refs);
+  const values = points.map(p => p.price).concat(refs).concat(visibleMarks.map(m => m.price));
 
-  if(!values.length || d?.position_status !== 'HOLDING') {
-    const emptyText = d?.position_status === 'CLOSED' ? '포지션 청산됨' : '보유 포지션 없음';
-    if(sub) sub.textContent = `09:00-11:00 · ${emptyText}`;
+  if(!values.length || (!holding && !closed)) {
+    const emptyText = closed ? '청산 완료 · 차트 데이터 없음' : '보유 포지션 없음';
+    if(sub) sub.textContent = emptyText;
     ctx.fillStyle = themeVal('#787b86', '#4f5260');
     ctx.font = '12px Noto Sans KR,sans-serif';
     ctx.textAlign = 'center';
@@ -493,8 +585,21 @@ function drawPriceFlow(d) {
 
   const firstTs = points[0]?.ts;
   const lastTs = points[points.length - 1]?.ts;
+  // 재시작 후 CLOSED에서는 tick이 없고 current_price도 null일 수 있다.
+  // 점 → 현재가 → 마지막 매도 마커 → 마지막 매수 마커 순으로 대체해 0원 표기를 막는다.
+  const lastSellPrice = [...visibleMarks].reverse().find(m => m.side === 'SELL')?.price;
+  const lastBuyPrice = [...visibleMarks].reverse().find(m => m.side === 'BUY')?.price;
+  const lastPrice = points[points.length - 1]?.price
+    || Number(d.current_price || 0)
+    || lastSellPrice || lastBuyPrice || 0;
   const timeLabel = firstTs && lastTs ? `${fmtFlowTime(firstTs)}-${fmtFlowTime(lastTs)}` : '시간 대기';
-  if(sub) sub.textContent = `09:00-11:00 · ${points.length}분 포인트 · 최근 ${_priceFlowTicks.length} ticks · ${timeLabel} · 현재 ${fmt(d.current_price)}원`;
+  if(sub) {
+    const stateLabel = closed
+      ? `청산 완료${d.close_reason ? ` (${d.close_reason})` : ''}`
+      : `최근 ${PRICE_FLOW_VIEW_MIN}분`;
+    const priceLabel = lastPrice > 0 ? ` · ${holding ? '현재' : '마지막'} ${fmt(lastPrice)}원` : '';
+    sub.textContent = `${fmtFlowMinute(startTs)}-${fmtFlowMinute(endTs)} · ${stateLabel} · 틱 ${points.length}개 · ${timeLabel}${priceLabel}`;
+  }
 
   let min = Math.min(...values), max = Math.max(...values);
   if(min === max) { min *= .998; max *= 1.002; }
@@ -515,20 +620,43 @@ function drawPriceFlow(d) {
   drawRef(d.high_price, '#7b9ef9', '최고');
 
   if(points.length > 1) {
-    ctx.strokeStyle = Number(d.current_price) >= Number(d.entry_price || d.current_price) ? '#26a69a' : '#ef5350';
+    const drawPoints = downsampleFlowPoints(points, Math.max(120, Math.round(chartW)));
+    ctx.strokeStyle = lastPrice >= Number(d.entry_price || lastPrice) ? '#26a69a' : '#ef5350';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    points.forEach((p,i) => {
+    drawPoints.forEach((p,i) => {
       const x = xAtTs(p.ts), y = yAt(p.price);
       if(i === 0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
     });
     ctx.stroke();
   }
   const last = points[points.length - 1];
-  if(last) {
+  if(last && holding) {
     ctx.fillStyle = Number(last.price) >= Number(d.entry_price || last.price) ? '#26a69a' : '#ef5350';
     ctx.beginPath(); ctx.arc(xAtTs(last.ts), yAt(last.price), 4, 0, Math.PI * 2); ctx.fill();
   }
+
+  // 매수/매도 체결 마커 — 한국 증권 관례: 매수 ▲ 빨강, 매도 ▼ 파랑
+  visibleMarks.forEach(m => {
+    const x = xAtTs(m.ts), y = yAt(m.price);
+    const isBuy = m.side === 'BUY';
+    const color = isBuy ? '#ef5350' : '#5b8def';
+    const dir = isBuy ? 1 : -1; // 매수는 점 아래에서 ▲, 매도는 점 위에서 ▼
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(x, y + dir * 4);
+    ctx.lineTo(x - 5, y + dir * 12);
+    ctx.lineTo(x + 5, y + dir * 12);
+    ctx.closePath();
+    ctx.fill();
+    ctx.font = '10px Noto Sans KR,sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = isBuy ? 'top' : 'alphabetic';
+    const label = isBuy ? (m.phase === 'PYRAMID_BUY' ? '추가매수' : '매수') : '매도';
+    ctx.fillText(label, x, y + dir * 14);
+  });
+  ctx.textBaseline = 'alphabetic';
+
   ctx.fillStyle = themeVal('#787b86', '#4f5260');
   ctx.font = '10px Noto Sans KR,sans-serif';
   ctx.textAlign = 'right';
@@ -1294,22 +1422,9 @@ function connectSSE() {
           if(_lastStatus.entry_price)
             _lastStatus.pnl_pct = +((tickPrice/_lastStatus.entry_price-1)*100).toFixed(2);
           if(_lastStatus.position_status === 'HOLDING' && tickPrice > 0) {
-            const tickRow = {ts: tickTs, ticker: tickTicker, price: tickPrice};
-            const ticks = Array.isArray(_lastStatus.tick_history) ? _lastStatus.tick_history.slice() : [];
-            ticks.push(tickRow);
-            _lastStatus.tick_history = ticks.slice(-PRICE_FLOW_TICK_WINDOW);
-
-            const tickMs = Date.parse(tickTs) || Date.now();
-            const minuteMs = Math.floor(tickMs / 60000) * 60000;
-            const minuteRows = Array.isArray(_lastStatus.minute_price_history) ? _lastStatus.minute_price_history.slice() : [];
-            const lastMinute = minuteRows[minuteRows.length - 1];
-            if(lastMinute && Math.floor((Date.parse(lastMinute.ts) || 0) / 60000) * 60000 === minuteMs) {
-              lastMinute.price = tickPrice;
-              lastMinute.tick_count = Number(lastMinute.tick_count || 0) + 1;
-            } else {
-              minuteRows.push({ts: new Date(minuteMs).toISOString(), ticker: tickTicker, price: tickPrice, tick_count: 1});
-            }
-            _lastStatus.minute_price_history = minuteRows;
+            // 배열 복사 없이 공유 버퍼(_priceFlowTicks/_priceFlow)에 tick 하나만 증분 추가.
+            // updatePriceFlow의 신선도 가드가 이후 stale payload 덮어쓰기를 막는다.
+            appendPriceFlowTick(tickTs, tickPrice, tickTicker);
           }
           applyStatus(_lastStatus);
         }

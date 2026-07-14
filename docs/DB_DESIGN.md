@@ -1,7 +1,7 @@
 # DB 설계 문서 — SQLite
 
-> **버전**: 1.0  
-> **최종 수정**: 2026-06-23  
+> **버전**: 1.1
+> **최종 수정**: 2026-07-14
 > **대상 파일**: `data/db/trading.db`
 
 ---
@@ -419,9 +419,18 @@ F4  _first_partial_exit()  → partial_exits.record()
                              orders.record_order(PARTIAL_SELL)
     _execute_close()        → orders.record_order(CLOSE_SELL)
                              trades.close_trade()
-F5  execute()           → orders.record_order(TIMEOUT_SELL)
-                           trades.close_trade(close_reason='TIMEOUT')
+F5  execute()           → 잔고 재검증
+                           orders.record_order(TIMEOUT_SELL, PENDING)
+                           orders.update_order_fill(확인된 체결수량)
+                           trades.close_trade(close_reason='TIMEOUT') [전량·체결가 확인 시]
 ```
+
+### F5 기록 규칙
+
+- 주문 API가 접수된 직후 `orders` 행을 `PENDING`으로 생성한다.
+- 부분체결 주문은 `PARTIAL_FILL`과 `fill_qty < order_qty`로 기록하며, 취소 확정 뒤 전송한 잔량 주문은 별도 `orders` 행으로 남긴다.
+- 실제 잔고가 0이어도 체결가를 확인하지 못하면 `trades`를 임의 가격으로 닫지 않고 `TIMEOUT_CLOSE_UNVERIFIED` 이벤트로 수동 대조를 요청한다.
+- 주문 전송 성공 후 발생한 `orders`/`trades` DB 기록 오류는 매도 주문 실패와 분리한다. DB 오류만으로 동일 주문을 다시 보내지 않는다.
 
 ---
 

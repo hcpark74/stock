@@ -3,6 +3,7 @@
 > **버전**: 1.0
 > **작성일**: 2026-06-23
 > **종료일**: 2026-07-08 (기준 스프린트 문서 종료)
+> **후속 갱신**: 2026-07-14 (운영 UI/F5 안정화 기록)
 > **기준 브랜치**: main
 > **후속 문서**: [SPRINT_F3_F4_OPTIMIZATION.md](SPRINT_F3_F4_OPTIMIZATION.md)
 
@@ -308,6 +309,38 @@ Sprint 5     ████████████████████  완�
 - [x] `pytest tests/test_main_schedule_flow.py tests/test_kis_rest.py -q -p no:cacheprovider` 통과
 - [x] `ruff check main.py src/api/kis_rest.py src/utils/logger.py tests/test_kis_rest.py tests/test_main_schedule_flow.py` 통과
 - [x] `node --check docs/html/assets/app.js` 통과
+
+---
+
+## 운영 UI/F5 안정화 후속 작업 (2026-07-14)
+
+### 오늘 가격흐름
+
+- [x] 원시 tick 최대 5,000개와 독립된 분 단위 가격 이력 최대 180분 유지
+- [x] 보유 중 최근 20분 슬라이딩 창, 청산 후 진입~마지막 체결/tick 고정 범위 적용
+- [x] SSE tick 증분 추가 및 150ms 렌더링 병합
+- [x] 화면 폭 기준 최솟값/최댓값 보존 다운샘플링
+- [x] 적응형 시간 눈금과 컨테이너 폭 100% 적용
+- [x] 당일 체결 주문 종목 필터·시간 정렬 및 매수/매도 마커 표시
+- [x] 가격 점 부재 시 마지막 매도/매수 마커 가격 fallback
+- [x] 정적 자산 버전 `20260714-flow20m`으로 갱신
+
+### F5 타임아웃 청산
+
+- [x] 잔고 조회 실패와 실제 잔고 0 구분
+- [x] 재주문 전 잔고 및 직전 주문 상태 확인
+- [x] 미체결 주문 취소 확정 후에만 잔량 재주문
+- [x] 부분체결 누적 및 거래 단위 가중평균 청산가 계산
+- [x] 주문 API 성공과 DB 기록 실패 예외 경로 분리
+- [x] 체결가 미확인 시 거래를 임의 종료하지 않고 `TIMEOUT_CLOSE_UNVERIFIED` 알림
+
+### 검증
+
+- [x] F5 잔고/주문상태/취소/부분체결/DB 오류 회귀 테스트 추가
+- [x] 원시 tick·분 이력·trade marks API 테스트 추가
+- [x] 브라우저 가격흐름 계산 Node 회귀 테스트 추가
+
+> 위 가격흐름 항목은 2026-07-08 Web UI 기록의 최소 1분 창·최대 760px 설계를 대체한다.
 
 ---
 

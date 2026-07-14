@@ -414,11 +414,37 @@ async def _recover_state() -> None:
     today = datetime.now(KST).strftime("%Y%m%d")
 
     if data is not None and data.get("date") != today:
-        await notifier.send(
-            "STALE_POSITION_DETECTED",
-            level="CRIT",
-            message=f"전일 포지션 잔류 의심. date={data.get('date')}",
-        )
+        stale_status = data.get("position_status")
+        if stale_status in ("HOLDING", "ENTERING"):
+            # 전일 미청산 포지션 의심 — 실계좌에 잔고가 남아 있을 수 있으므로
+            # 운영자가 확인하기 전까지 당일 자동 진입(F1~F3)을 차단한다.
+            # 해제: 계좌 확인 후 문제없으면 today_state.json 삭제 후 재시작.
+            state.get().day_skip = True
+            logger.log(
+                "STALE_POSITION_DETECTED",
+                level="CRIT",
+                stale_date=data.get("date"),
+                stale_status=stale_status,
+                ticker=data.get("ticker"),
+                entry_blocked=True,
+            )
+            await notifier.send(
+                "STALE_POSITION_DETECTED",
+                level="CRIT",
+                message=(
+                    f"전일 미청산 포지션 의심. date={data.get('date')} "
+                    f"ticker={data.get('ticker')} status={stale_status}. "
+                    "당일 자동 진입을 차단했습니다. 계좌 보유 수량과 미체결 주문을 "
+                    "확인하고, 문제없으면 today_state.json 삭제 후 재시작하세요."
+                ),
+                ticker=data.get("ticker"),
+            )
+        else:
+            await notifier.send(
+                "STALE_POSITION_DETECTED",
+                level="CRIT",
+                message=f"전일 포지션 잔류 의심. date={data.get('date')}",
+            )
         data = None
 
     if data is not None and data.get("position_status") == "HOLDING":
@@ -461,6 +487,10 @@ async def _recover_state() -> None:
         return
 
     if data is not None and _is_terminal_state(data):
+        if data.get("position_status") == "CLOSED":
+            # 당일 청산 완료 상태 복원 — 재시작 후에도 UI가 청산 차트와 매수/매도
+            # 마커를 유지하고, CLOSED 상태가 당일 재진입(set_entering)도 막는다.
+            state.restore_from(data)
         logger.log(
             "PROCESS_RESTART_DETECTED",
             level="WARN",
@@ -583,7 +613,10 @@ async def _recover_open_trade_from_db(today: str) -> None:
         await notifier.send(
             "PROCESS_RESTART_DETECTED",
             level="CRIT",
-            message=f"DB OPEN trade가 있지만 실제 보유 수량이 없습니다: {trade.get('ticker')}. 자동 복구 중단.",
+            message=(
+                f"DB OPEN trade가 있지만 실제 보유 수량이 없습니다: "
+                f"{trade.get('ticker')}. 자동 복구 중단."
+            ),
             ticker=trade.get("ticker"),
         )
         return

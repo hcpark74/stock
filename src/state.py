@@ -2,8 +2,8 @@ import asyncio
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from zoneinfo import ZoneInfo
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from src import live
 
@@ -99,13 +99,16 @@ async def set_holding(entry_price: float, entry_qty: int, order_id: str) -> None
 
 
 async def set_closed(reason: str) -> bool:
-    """HOLDING → CLOSED (atomic). 이중 청산 방지. 성공 시 True."""
+    """HOLDING → CLOSED (atomic). 이중 청산 방지. 성공 시 True.
+
+    tick 이력은 지우지 않는다 — 청산 후에도 UI 가격흐름 차트를 유지하고,
+    다음 거래일 시작 시 _clear_for_trading_day가 정리한다.
+    """
     async with _lock:
         if _state.position_status != "HOLDING":
             return False
         _state.position_status = "CLOSED"
         _state.close_reason = reason
-        live.clear_tick_history()
         return True
 
 

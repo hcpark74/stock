@@ -1,10 +1,11 @@
 """SQLite 연결 관리 — DB_DESIGN.md §4 PRAGMA 설정"""
 
-import aiosqlite
-import sqlite3
 import json
+import sqlite3
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+import aiosqlite
 
 from src.utils.logger import log
 
@@ -271,16 +272,27 @@ async def update_order_fill(
     fill_price: float,
     fill_qty: int,
     fill_latency_ms: int,
+    status: str = "FILLED",
 ) -> None:
-    """orders 체결 정보 갱신 (status → FILLED)."""
+    """orders 체결 정보 갱신 (기본 FILLED, 부분체결은 PARTIAL_FILL)."""
     now = _now()
     conn = get()
     await conn.execute(
         """UPDATE orders
            SET fill_price=?, fill_qty=?, fill_latency_ms=?,
-               status='FILLED', filled_at=?
+               status=?, filled_at=?
            WHERE id=?""",
-        (fill_price, fill_qty, fill_latency_ms, now, order_db_id),
+        (fill_price, fill_qty, fill_latency_ms, status, now, order_db_id),
+    )
+    await conn.commit()
+
+
+async def update_order_status(order_db_id: int, status: str) -> None:
+    """orders 상태만 갱신 (예: 취소 확정 → CANCELLED). 체결 정보는 보존한다."""
+    conn = get()
+    await conn.execute(
+        "UPDATE orders SET status=? WHERE id=?",
+        (status, order_db_id),
     )
     await conn.commit()
 

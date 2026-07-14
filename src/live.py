@@ -15,6 +15,9 @@ _MINUTE_HISTORY_MAX = 180
 last_tick_price: float | None = None
 last_tick_ticker: str | None = None
 _tick_history: deque[dict] = deque(maxlen=_TICK_HISTORY_MAX)
+# 분봉은 tick 버퍼에서 파생하지 않고 별도 누적한다 — 거래가 활발해 tick 버퍼(5,000건)가
+# 20분을 못 담아도 분 단위 가격흐름(최대 180분)은 유지된다.
+_minute_history: deque[dict] = deque(maxlen=_MINUTE_HISTORY_MAX)
 
 # WebSocket 연결 상태
 ws_connected: bool = False
@@ -32,25 +35,46 @@ def push_tick(price: float, ticker: str | None = None) -> None:
     global last_tick_price, last_tick_ticker
     last_tick_price = price
     last_tick_ticker = ticker
-    ts = datetime.now(KST).isoformat()
+    now = datetime.now(KST)
+    ts = now.isoformat()
     _tick_history.append({
         "ts": ts,
         "ticker": ticker,
         "price": price,
     })
+    _accumulate_minute(now, ticker, price)
     _broadcast({"type": "tick", "ticker": ticker, "price": price, "ts": ts})
 
 
-def tick_history(ticker: str | None = None, since: datetime | str | None = None) -> list[dict]:
-    since_dt: datetime | None = None
+def _accumulate_minute(ts_dt: datetime, ticker: str | None, price: float) -> None:
+    """같은 분이면 마지막 가격 갱신, 새 분이면 행 추가."""
+    minute_ts = ts_dt.replace(second=0, microsecond=0).isoformat()
+    last = _minute_history[-1] if _minute_history else None
+    if last and last.get("ts") == minute_ts and last.get("ticker") == ticker:
+        last["price"] = price
+        last["tick_count"] = int(last.get("tick_count", 0)) + 1
+    else:
+        _minute_history.append({
+            "ts": minute_ts,
+            "ticker": ticker,
+            "price": price,
+            "tick_count": 1,
+        })
+
+
+def _parse_since(since: datetime | str | None) -> datetime | None:
     if isinstance(since, str):
         try:
-            since_dt = datetime.fromisoformat(since)
+            return datetime.fromisoformat(since)
         except ValueError:
-            since_dt = None
-    elif isinstance(since, datetime):
-        since_dt = since
+            return None
+    if isinstance(since, datetime):
+        return since
+    return None
 
+
+def tick_history(ticker: str | None = None, since: datetime | str | None = None) -> list[dict]:
+    since_dt = _parse_since(since)
     rows = [row for row in _tick_history if not ticker or row.get("ticker") == ticker]
     if since_dt is None:
         return rows
@@ -66,27 +90,31 @@ def tick_history(ticker: str | None = None, since: datetime | str | None = None)
     return filtered
 
 
-def minute_price_history(ticker: str | None = None, since: datetime | str | None = None) -> list[dict]:
-    rows = tick_history(ticker, since=since)
-    buckets: dict[str, dict] = {}
-    for row in rows:
-        try:
-            row_ts = datetime.fromisoformat(str(row.get("ts")))
-        except ValueError:
+def minute_price_history(
+    ticker: str | None = None, since: datetime | str | None = None,
+) -> list[dict]:
+    """별도 누적된 분봉 조회. since는 분 단위로 내림해 진입 분을 포함한다."""
+    since_dt = _parse_since(since)
+    if since_dt is not None:
+        since_dt = since_dt.replace(second=0, microsecond=0)
+    rows: list[dict] = []
+    for row in _minute_history:
+        if ticker and row.get("ticker") != ticker:
             continue
-        minute_ts = row_ts.replace(second=0, microsecond=0).isoformat()
-        previous = buckets.get(minute_ts)
-        buckets[minute_ts] = {
-            "ts": minute_ts,
-            "ticker": row.get("ticker"),
-            "price": row.get("price"),
-            "tick_count": int((previous or {}).get("tick_count", 0)) + 1,
-        }
-    return list(buckets.values())[-_MINUTE_HISTORY_MAX:]
+        if since_dt is not None:
+            try:
+                row_ts = datetime.fromisoformat(str(row.get("ts")))
+            except ValueError:
+                continue
+            if row_ts < since_dt:
+                continue
+        rows.append(dict(row))
+    return rows
 
 
 def clear_tick_history() -> None:
     _tick_history.clear()
+    _minute_history.clear()
 
 
 def push_status() -> None:

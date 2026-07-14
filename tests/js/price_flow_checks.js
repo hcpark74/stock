@@ -1,0 +1,101 @@
+// 가격흐름 차트 순수 로직 검증 — app.js에서 함수를 추출해 실제 실행한다.
+// 실행: node tests\js\price_flow_checks.js
+const fs = require('fs');
+const path = require('path');
+const src = fs.readFileSync(
+  path.join(__dirname, '..', '..', 'docs', 'html', 'assets', 'app.js'), 'utf8');
+
+function extract(name) {
+  const start = src.indexOf(`function ${name}(`);
+  if (start < 0) throw new Error(`${name} not found`);
+  let depth = 0;
+  const open = src.indexOf('{', start);
+  for (let j = open; j < src.length; j++) {
+    if (src[j] === '{') depth++;
+    else if (src[j] === '}') { depth--; if (depth === 0) return src.slice(start, j + 1); }
+  }
+  throw new Error(`${name} unbalanced`);
+}
+
+const PRICE_FLOW_VIEW_MIN = 20;
+let _priceFlowTicks = [];
+let _priceFlow = [];
+eval(extract('parseTradeMarks'));
+eval(extract('priceFlowViewWindow'));
+eval(extract('downsampleFlowPoints'));
+
+const MIN = 60 * 1000;
+const T0 = Date.parse('2026-07-14T09:10:30+09:00');
+let failures = 0;
+const check = (label, cond) => {
+  console.log(`${cond ? 'PASS' : 'FAIL'}  ${label}`);
+  if (!cond) failures++;
+};
+
+// 1) 보유 중 · 진입 5분 경과 → 창은 [진입, 지금]
+_priceFlowTicks = [{ts: T0, price: 10000}, {ts: T0 + 5 * MIN, price: 10100}];
+const realNow = Date.now;
+Date.now = () => T0 + 5 * MIN;
+let w = priceFlowViewWindow({position_status: 'HOLDING', entry_at: '2026-07-14T09:10:30+09:00'}, []);
+check('보유 5분: 시작=진입시각', w.startTs === T0);
+check('보유 5분: 끝=지금', w.endTs === T0 + 5 * MIN);
+
+// 2) 보유 중 · 진입 40분 경과 → 최근 20분 슬라이딩
+Date.now = () => T0 + 40 * MIN;
+w = priceFlowViewWindow({position_status: 'HOLDING', entry_at: '2026-07-14T09:10:30+09:00'}, []);
+check('보유 40분: 창 크기=20분', w.endTs - w.startTs === 20 * MIN);
+check('보유 40분: 끝=지금', w.endTs === T0 + 40 * MIN);
+
+// 3) 청산 후 → 진입~마지막 체결 고정(양끝 30초 여백), 매도 마커 포함
+const marks = parseTradeMarks({
+  ticker: '005930',
+  trade_marks: [
+    {order_type: 'BUY', order_phase: 'FIRST_BUY', ticker: '005930',
+      fill_price: 10000, filled_at: '2026-07-14T09:10:31+09:00'},
+    {order_type: 'BUY', order_phase: 'PYRAMID_BUY', ticker: '005930',
+      fill_price: 10050, filled_at: '2026-07-14T09:10:45+09:00'},
+    {order_type: 'SELL', order_phase: 'CLOSE_SELL', ticker: '005930',
+      fill_price: 10200, filled_at: '2026-07-14T09:55:00+09:00'},
+  ],
+});
+check('마커 파싱: 3건', marks.length === 3);
+check('마커 파싱: 매도 가격', marks[2].price === 10200 && marks[2].side === 'SELL');
+
+w = priceFlowViewWindow({position_status: 'CLOSED', entry_at: '2026-07-14T09:10:30+09:00'}, marks);
+const sellTs = Date.parse('2026-07-14T09:55:00+09:00');
+check('청산 후: 시작 <= 진입-여백', w.startTs <= T0 - 29 * 1000);
+check('청산 후: 끝 >= 매도체결+여백', w.endTs >= sellTs + 29 * 1000);
+
+// 4) 같은 날 다른 종목의 체결은 현재 종목 마커에서 제외
+const filtered = parseTradeMarks({ticker: '005930', trade_marks: [
+  {order_type: 'BUY', order_phase: 'FIRST_BUY', ticker: '000660',
+    fill_price: 9000, filled_at: '2026-07-14T09:10:31+09:00'},
+  {order_type: 'BUY', order_phase: 'FIRST_BUY', ticker: '005930',
+    fill_price: 10000, filled_at: '2026-07-14T09:10:31+09:00'},
+]});
+check('타 종목 마커 필터링: 현재 종목만 유지', filtered.length === 1);
+check('타 종목 마커 필터링: 남은 마커는 현재 종목', filtered[0].ticker === '005930');
+
+// 5) 재시작 후 CLOSED(tick 없음) → 마커만으로 창 성립
+_priceFlowTicks = []; _priceFlow = [];
+w = priceFlowViewWindow({position_status: 'CLOSED', entry_at: '2026-07-14T09:10:30+09:00'}, marks);
+check('재시작 CLOSED: 매도까지 포함', w.endTs >= sellTs);
+
+// 6) 다운샘플링: 크기 제한 + 스파이크(min/max) 보존 + 시간순 유지
+const big = [];
+for (let i = 0; i < 10000; i++) {
+  big.push({ts: T0 + i * 100, price: 10000 + Math.round(200 * Math.sin(i / 50))});
+}
+big[7321] = {ts: big[7321].ts, price: 12000};  // 스파이크 최고가
+big[2222] = {ts: big[2222].ts, price: 9000};   // 스파이크 최저가
+const ds = downsampleFlowPoints(big, 700);
+check('다운샘플: 크기 <= 1400', ds.length <= 1400);
+check('다운샘플: 최고 스파이크 보존', ds.some(p => p.price === 12000));
+check('다운샘플: 최저 스파이크 보존', ds.some(p => p.price === 9000));
+check('다운샘플: 시간순 유지', ds.every((p, i) => i === 0 || p.ts >= ds[i - 1].ts));
+const small = big.slice(0, 100);
+check('다운샘플: 소량은 원본 그대로', downsampleFlowPoints(small, 700) === small);
+
+Date.now = realNow;
+console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
+process.exit(failures ? 1 : 0);
