@@ -687,7 +687,7 @@ async def api_history(limit: int = 60) -> JSONResponse:
     try:
         conn = db.get()
         async with conn.execute(
-            """SELECT date, ticker, entry_price, exit_price,
+            """SELECT date, ticker, name, entry_price, exit_price,
                       pnl_pct, close_reason, highest_step, pyramided, status
                FROM trades
                ORDER BY date DESC

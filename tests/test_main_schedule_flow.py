@@ -600,6 +600,7 @@ async def test_recover_state_uses_db_open_trade_when_state_file_missing(monkeypa
             "id": 77,
             "date": today,
             "ticker": "005930",
+            "name": "삼성전자",
             "entry_price": 75000.0,
             "entry_qty": 10,
             "entry_at": "2026-07-02T09:01:00+09:00",
@@ -621,6 +622,7 @@ async def test_recover_state_uses_db_open_trade_when_state_file_missing(monkeypa
 
     assert s.position_status == "HOLDING"
     assert s.target_ticker == "005930"
+    assert s.target_name == "삼성전자"
     assert s.entry_price == 75000.0
     assert s.remaining_qty == 10
     assert s.high_price == 78000.0

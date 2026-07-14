@@ -1052,10 +1052,10 @@ function renderHistory(trades, stats) {
     const rc = REASON_CLS[reason]||'b-to';
     const rl = REASON_LBL[reason]||reason;
     const pnlCls = t.pnl_pct==null?'':(t.pnl_pct>=0?'pup':'pdn');
-    const name = TICKER_NAMES[t.ticker]||'';
+    const name = tickerName(t.ticker, t.name);
     return `<tr>
       <td>${t.date||'—'}</td>
-      <td>${t.ticker||'—'} <span style="color:var(--mu);font-size:11px">${name}</span></td>
+      <td>${t.ticker||'—'} <span style="color:var(--mu);font-size:11px">${esc(name)}</span></td>
       <td>${t.entry_price?fmt(t.entry_price):'—'}</td>
       <td>${t.exit_price?fmt(t.exit_price):'<span style="color:var(--mu)">—</span>'}</td>
       <td class="${pnlCls}">${fmtPct(t.pnl_pct)}</td>

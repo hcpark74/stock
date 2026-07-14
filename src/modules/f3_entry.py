@@ -569,7 +569,9 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
 
     # ── HOLDING 전환 + DB 기록 + 영속화 ──────────────────────────────
     await state.set_holding(fill_price, fill_qty, order_id)
-    trade_id = await db.open_trade(_today(), ticker, fill_price, fill_qty)
+    trade_id = await db.open_trade(
+        _today(), ticker, fill_price, fill_qty, name=state.get().target_name,
+    )
     state.get().trade_id = trade_id
     order_db_id = await db.record_order(
         trade_id, order_id, "BUY", fill_qty, fill_price, "FIRST_BUY", ticker, state.get().target_name,
@@ -698,6 +700,11 @@ async def _block_existing_trade(ticker: str, existing_trade: dict) -> None:
         entry_price = float(existing_trade.get("entry_price") or 0)
         entry_qty = int(existing_trade.get("entry_qty") or 0)
         s.target_ticker = existing_ticker or s.target_ticker
+        if existing_ticker and existing_ticker != ticker:
+            # 다른 종목의 기존 거래를 복구하면 이전 후보의 종목명이 남지 않게 한다.
+            s.target_name = existing_trade.get("name")
+        else:
+            s.target_name = existing_trade.get("name") or s.target_name
         s.trade_id = trade_id
         if entry_price > 0 and entry_qty > 0 and s.position_status != "HOLDING":
             await state.set_holding(entry_price, entry_qty, s.order_id or "")

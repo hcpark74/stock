@@ -201,17 +201,20 @@ def _asset_holdings_from_raw(raw_json: str | None) -> list[dict]:
         })
     return holdings
 
-async def open_trade(date: str, ticker: str, entry_price: float, entry_qty: int) -> int:
+async def open_trade(
+    date: str, ticker: str, entry_price: float, entry_qty: int,
+    name: str | None = None,
+) -> int:
     """Insert a trade and return its id. Existing same-day trades are reused."""
     now = _now()
     conn = get()
     try:
         async with conn.execute(
             """INSERT INTO trades
-                   (date, ticker, entry_price, entry_qty, entry_at,
+                   (date, ticker, name, entry_price, entry_qty, entry_at,
                     status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, 'OPEN', ?, ?)""",
-            (date, ticker, entry_price, entry_qty, now, now, now),
+               VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)""",
+            (date, ticker, name, entry_price, entry_qty, now, now, now),
         ) as cur:
             trade_id = cur.lastrowid
         await conn.commit()
@@ -228,6 +231,12 @@ async def open_trade(date: str, ticker: str, entry_price: float, entry_qty: int)
                 existing_ticker=existing.get("ticker"),
                 trade_id=int(existing["id"]),
             )
+        elif name and not existing.get("name"):
+            await conn.execute(
+                "UPDATE trades SET name=?, updated_at=? WHERE id=?",
+                (name, now, int(existing["id"])),
+            )
+            await conn.commit()
         return int(existing["id"])
 
 

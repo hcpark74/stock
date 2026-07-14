@@ -42,6 +42,24 @@ async def test_open_trade_stores_fields(mem):
     assert row["entry_qty"] == 5
 
 
+async def test_open_trade_stores_name(mem):
+    trade_id = await db.open_trade("20260624", "035420", 180_000.0, 5, name="NAVER")
+    conn = db.get()
+    async with conn.execute("SELECT name FROM trades WHERE id=?", (trade_id,)) as cur:
+        row = await cur.fetchone()
+    assert row["name"] == "NAVER"
+
+
+async def test_open_trade_reuse_backfills_missing_name(mem):
+    first_id = await db.open_trade("20260623", "005930", 75_000.0, 10)
+    second_id = await db.open_trade("20260623", "005930", 75_000.0, 10, name="삼성전자")
+    conn = db.get()
+    async with conn.execute("SELECT name FROM trades WHERE id=?", (first_id,)) as cur:
+        row = await cur.fetchone()
+    assert second_id == first_id
+    assert row["name"] == "삼성전자"
+
+
 # ── record_order ──────────────────────────────────────────────────────
 
 

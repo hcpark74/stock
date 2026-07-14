@@ -22,6 +22,7 @@ def _reset_state() -> None:
     s = state.get()
     s.trading_date = "20260701"
     s.target_ticker = "006340"
+    s.target_name = None
     s.target_candidates = None
     s.entry_price = None
     s.entry_qty = None
@@ -462,6 +463,7 @@ async def test_existing_open_trade_blocks_new_entry_and_restores_holding(monkeyp
             "id": 77,
             "date": "20260708",
             "ticker": "005930",
+            "name": "삼성전자",
             "entry_price": 75000.0,
             "entry_qty": 10,
             "status": "OPEN",
@@ -474,10 +476,37 @@ async def test_existing_open_trade_blocks_new_entry_and_restores_holding(monkeyp
     send_buy.assert_not_awaited()
     assert state.get().position_status == "HOLDING"
     assert state.get().target_ticker == "005930"
+    assert state.get().target_name == "삼성전자"
     assert state.get().trade_id == 77
     blocked = [kwargs for event, kwargs in events if event == "F3_ENTRY_BLOCKED"][-1]
     assert blocked["reason"] == "TRADE_ALREADY_EXISTS"
     assert blocked["existing_status"] == "OPEN"
+
+@pytest.mark.asyncio
+async def test_existing_open_trade_clears_stale_target_name_when_db_has_no_name(monkeypatch):
+    _reset_state()
+    state.get().target_name = "다른후보"
+
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        f3.db,
+        "get_trade_by_date",
+        AsyncMock(return_value={
+            "id": 77,
+            "date": "20260708",
+            "ticker": "005930",
+            "entry_price": 75000.0,
+            "entry_qty": 10,
+            "status": "OPEN",
+        }),
+    )
+    monkeypatch.setattr(f3, "_send_buy", AsyncMock())
+
+    await f3.run(force=True)
+
+    assert state.get().target_ticker == "005930"
+    assert state.get().target_name is None
+
 
 @pytest.mark.asyncio
 async def test_existing_closed_trade_blocks_new_entry_and_sets_day_skip(monkeypatch):
@@ -537,6 +566,37 @@ async def test_full_cash_quantity_places_first_buy(monkeypatch):
 
     assert send_buy.await_args.args == ("006340", 9, "PAPER")
     assert state.get().position_status == "HOLDING"
+
+
+@pytest.mark.asyncio
+async def test_entry_records_trade_with_target_name(monkeypatch):
+    _reset_state()
+    state.get().target_name = "대원전선"
+    send_buy = AsyncMock(return_value={
+        "rt_cd": "0",
+        "msg_cd": "MCA00000",
+        "msg1": "OK",
+        "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
+    })
+    open_trade = AsyncMock(return_value=1)
+
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(1000.0, 970.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=10_000.0))
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(
+        f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1000, "fill_qty": 9}))
+    monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=1000))
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "open_trade", open_trade)
+    monkeypatch.setattr(f3.db, "record_order", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "update_order_fill", AsyncMock())
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+
+    await f3.run(force=True)
+
+    assert open_trade.await_args.kwargs.get("name") == "대원전선"
 
 
 @pytest.mark.asyncio

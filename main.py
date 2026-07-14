@@ -625,7 +625,7 @@ async def _recover_open_trade_from_db(today: str) -> None:
     restore_data = {
         "date": today,
         "ticker": trade.get("ticker"),
-        "name": None,
+        "name": trade.get("name"),
         "target_candidates": [],
         "entry_price": entry_price,
         "entry_at": trade.get("entry_at"),

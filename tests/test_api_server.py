@@ -355,7 +355,7 @@ async def test_api_history_returns_recent_trade_contract(tmp_path):
     await db.init(str(tmp_path / "history.db"))
     old_trade_id = await db.open_trade("20260701", "000660", 120_000.0, 1)
     await db.close_trade(old_trade_id, 121_000.0, "TIMEOUT", 0.83, 0.0)
-    trade_id = await db.open_trade("20260702", "005930", 75_000.0, 10)
+    trade_id = await db.open_trade("20260702", "005930", 75_000.0, 10, name="삼성전자")
     await db.mark_pyramided(trade_id)
     await db.close_trade(trade_id, 78_750.0, "TRAILING", 5.0, 0.05)
 
@@ -366,6 +366,7 @@ async def test_api_history_returns_recent_trade_contract(tmp_path):
     assert rows[0].items() >= {
         "date": "20260702",
         "ticker": "005930",
+        "name": "삼성전자",
         "entry_price": 75_000.0,
         "exit_price": 78_750.0,
         "pnl_pct": 5.0,

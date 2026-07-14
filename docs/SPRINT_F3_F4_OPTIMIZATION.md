@@ -1,7 +1,7 @@
 # F3/F4 속도 및 복구력 개선 스프린트
 
 > **작성일**: 2026-07-08  
-> **상태**: 구현 완료  
+> **상태**: 구현 및 검증 완료 (2026-07-14 전체 테스트 320건 통과)<br>
 > **기준 문서**: [SPRINT.md](SPRINT.md) 종료 후 후속 스프린트  
 > **목표**: 09:00 직후 F3 진입 경로 지연을 줄이고, HOLDING 중 재시작 시 F4 trailing 상태를 안정적으로 복구한다.
 > **후속 운영 안정화**: 2026-07-14 가격흐름/F5 변경은 [SPRINT.md](SPRINT.md)의 후속 작업 절을 참조한다.
@@ -135,5 +135,5 @@ F3에서 최종 후보를 고르는 시간을 줄이되, 주문 직전 갭 재�
 - [x] `tests/test_f4_step_trailing.py` high_price/highest_step 변경 시 state persist 테스트 추가
 - [x] `tests/test_f4_step_trailing.py` 청산 tick에서 persist가 매도 판단보다 앞서지 않는 테스트 추가
 - [x] `tests/test_db_crud.py` `update_trade_progress` 테스트 추가
-- [ ] Windows ACL 환경에서는 `--basetemp=.pytest_tmp_*` 옵션으로 전체 테스트 실행
+- [x] Windows ACL 환경에서는 `--basetemp=.pytest_tmp_*` 옵션으로 전체 테스트 실행 (2026-07-14, 320 passed)
 
