@@ -59,7 +59,13 @@ from src.modules.f3_entry import (
     GAP_MAX_ORDER,
     PYRAMID_MIN_UP,
 )
-from src.modules.f4_tracking import HARD_STOP_RATIO, STEP_SIZE, STEP_TRAIL
+from src.modules.f4_tracking import (
+    FORCE_TRAILING_HOUR,
+    FORCE_TRAILING_MINUTE,
+    HARD_STOP_RATIO,
+    STEP_SIZE,
+    STEP_TRAIL,
+)
 from src.utils.logger import log
 
 KST = ZoneInfo("Asia/Seoul")
@@ -816,6 +822,179 @@ async def api_stats() -> JSONResponse:
                              "avg_pnl": 0, "max_loss": 0, "max_gain": 0,
                              "by_reason": {}, "monthly": [], "by_pyramided": {},
                              "by_step": {}, "by_entry_hour": []})
+
+
+# ─── /api/improve ─────────────────────────────────────────────────────
+
+_BUY_PHASES = {"FIRST_BUY", "PYRAMID_BUY"}
+_F5_EXEC_TIME = "11:00"  # scheduler.F5_EXEC_H/M와 동기 유지 (직접 import 시 apscheduler가 테스트 경로에 끌려옴)
+_NEAR_MISS_MFE_PCT = 1.5  # 스텝1 근접 이탈로 보는 최소 고점 수익률(%)
+_FAST_STOP_MIN = 10  # 진입 후 이 분수 이내 손절이면 '빠른 손절'
+
+
+def _improve_params() -> dict:
+    return {
+        "step_size_pct": round(STEP_SIZE * 100, 2),
+        "step_trail_pct": round(STEP_TRAIL * 100, 2),
+        "hard_stop_pct": round(HARD_STOP_RATIO * 100, 2),
+        "gap_max_order_pct": round(GAP_MAX_ORDER * 100, 2),
+        "gap_max_fill_pct": round(GAP_MAX_FILL * 100, 2),
+        "f1_gap_min_pct": round(GAP_MIN * 100, 2),
+        "f1_gap_core_max_pct": round(GAP_MAX * 100, 2),
+        "timeout_time": _F5_EXEC_TIME,
+        "force_trailing_time": f"{FORCE_TRAILING_HOUR:02d}:{FORCE_TRAILING_MINUTE:02d}",
+    }
+
+
+def _avg(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def _minutes_between(start: str | None, end: str | None) -> float | None:
+    if not start or not end:
+        return None
+    try:
+        delta = datetime.fromisoformat(end) - datetime.fromisoformat(start)
+    except (TypeError, ValueError):
+        return None
+    return delta.total_seconds() / 60.0
+
+
+def _improve_from_rows(
+    trades: list[dict], orders: list[dict], skips: dict[str, int]
+) -> dict:
+    """개선 화면 집계. trades는 date 오름차순의 CLOSED 행."""
+    total = len(trades)
+    pnls = [(t.get("pnl_pct") or 0.0) for t in trades]
+    win_pnls = [p for p in pnls if p > 0]
+    loss_pnls = [p for p in pnls if p <= 0]
+    win_rate = len(win_pnls) / total if total else 0.0
+    avg_win = _avg(win_pnls)
+    avg_loss = _avg(loss_pnls)
+    payoff = abs(avg_win / avg_loss) if avg_loss < 0 else 0.0
+    expectancy = win_rate * avg_win + (1 - win_rate) * avg_loss
+
+    max_streak = run = 0
+    for p in pnls:
+        run = run + 1 if p <= 0 else 0
+        max_streak = max(max_streak, run)
+    cur_streak = run  # 마지막 연속 구간이 곧 현재 진행 중 스트릭
+
+    mfe_rows: list[dict] = []
+    near_miss_n = 0
+    step1_n = 0
+    hold_by_reason: dict[str, list[float]] = {}
+    trailing_gb: list[float] = []
+    trailing_pnl: list[float] = []
+    timeout_pnl: list[float] = []
+    timeout_mfe: list[float] = []
+    hs_pnl: list[float] = []
+    hs_minutes: list[float] = []
+    fast_stop_n = 0
+
+    for t in trades:
+        entry, high = t.get("entry_price"), t.get("high_price")
+        pnl = t.get("pnl_pct")
+        reason = t.get("close_reason") or ""
+        mfe = round((high / entry - 1) * 100, 2) if entry and high else None
+        giveback = (
+            round(mfe - pnl, 2) if mfe is not None and pnl is not None else None
+        )
+        mfe_rows.append({
+            "date": t.get("date"), "ticker": t.get("ticker"),
+            "name": t.get("name"), "mfe_pct": mfe, "pnl_pct": pnl,
+            "giveback_pp": giveback, "close_reason": reason,
+        })
+
+        if (t.get("highest_step") or 0.0) >= STEP_SIZE:
+            step1_n += 1
+        elif mfe is not None and mfe >= _NEAR_MISS_MFE_PCT and (pnl or 0.0) <= 0:
+            near_miss_n += 1
+
+        minutes = _minutes_between(t.get("entry_at"), t.get("exit_at"))
+        if minutes is not None and reason:
+            hold_by_reason.setdefault(reason, []).append(minutes)
+
+        if reason == "TRAILING":
+            if giveback is not None:
+                trailing_gb.append(giveback)
+            if pnl is not None:
+                trailing_pnl.append(pnl)
+        elif reason == "TIMEOUT":
+            if pnl is not None:
+                timeout_pnl.append(pnl)
+            if mfe is not None:
+                timeout_mfe.append(mfe)
+        elif reason == "HARD_STOP":
+            if pnl is not None:
+                hs_pnl.append(pnl)
+            if minutes is not None:
+                hs_minutes.append(minutes)
+                if minutes <= _FAST_STOP_MIN:
+                    fast_stop_n += 1
+
+    mfe_rows.reverse()  # 최신 거래 먼저
+
+    avg_fill_pnl = _avg(hs_pnl)
+    # 손절 체결 편차: 설정 레벨(-2.0%)보다 더 밀린 폭만 양수로
+    avg_slip_pp = (
+        max(0.0, -(avg_fill_pnl + HARD_STOP_RATIO * 100)) if hs_pnl else 0.0
+    )
+
+    empty_slip = {"n": 0, "avg_pp": 0.0, "max_pp": 0.0, "avg_latency_ms": 0}
+    return {
+        "params": _improve_params(),
+        "overall": {
+            "total": total,
+            "wins": len(win_pnls),
+            "win_rate": round(win_rate * 100, 1),
+            "avg_win": round(avg_win, 2),
+            "avg_loss": round(avg_loss, 2),
+            "payoff_ratio": round(payoff, 2),
+            "expectancy": round(expectancy, 2),
+            "cur_loss_streak": cur_streak,
+            "max_loss_streak": max_streak,
+        },
+        "hard_stop": {
+            "n": len(hs_pnl),
+            "share_pct": round(len(hs_pnl) / total * 100, 1) if total else 0.0,
+            "avg_fill_pnl": round(avg_fill_pnl, 2),
+            "avg_slip_pp": round(avg_slip_pp, 2),
+            "fast_stop_n": fast_stop_n,
+            "avg_min_to_stop": round(_avg(hs_minutes), 1) if hs_minutes else 0.0,
+        },
+        "step": {
+            "step1_n": step1_n,
+            "step1_rate": round(step1_n / total * 100, 1) if total else 0.0,
+            "near_miss_n": near_miss_n,
+        },
+        "trailing": {
+            "n": len(trailing_pnl),
+            "avg_giveback_pp": round(_avg(trailing_gb), 2),
+            "avg_pnl": round(_avg(trailing_pnl), 2),
+        },
+        "slippage": {  # Task 2에서 채움
+            "buy": dict(empty_slip),
+            "sell": dict(empty_slip),
+            "by_phase": {},
+            "guard_n": 0,
+        },
+        "timeout_exit": {
+            "n": len(timeout_pnl),
+            "avg_pnl": round(_avg(timeout_pnl), 2),
+            "avg_mfe": round(_avg(timeout_mfe), 2),
+        },
+        "candidates": {  # Task 2에서 채움
+            "skips": {},
+            "skip_days": 0,
+            "trade_days": total,
+        },
+        "mfe_rows": mfe_rows,
+        "hold_time": {
+            reason: {"n": len(mins), "avg_min": round(_avg(mins), 1)}
+            for reason, mins in hold_by_reason.items()
+        },
+    }
 
 
 # ─── /api/stream (SSE) ────────────────────────────────────────────────
