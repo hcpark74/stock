@@ -46,6 +46,7 @@ function go(id, btn) {
   if (id==='orders') loadOrders();
   if (id==='history') loadHistory();
   if (id==='stats')   loadStats();
+  if (id==='improve') loadImprove();
   if (id==='settings') loadSettings();
 }
 
@@ -1405,6 +1406,117 @@ async function loadStats() {
     if(!r.ok) return;
     renderStats(await r.json());
   } catch(e){}
+}
+
+// ── 개선(파라미터 진단) ──────────────────────────────────────────────────
+async function loadImprove() {
+  try {
+    const r = await fetch('/api/improve');
+    if(!r.ok) return;
+    renderImprove(await r.json());
+  } catch(e){}
+}
+
+const IMP_BADGE = {
+  ok:     {txt:'양호',      cls:'imp-ok'},
+  watch:  {txt:'관찰',      cls:'imp-watch'},
+  adjust: {txt:'조정 검토', cls:'imp-adjust'},
+  nodata: {txt:'표본 부족', cls:'imp-nodata'},
+};
+
+function impCard(title, cur, [level, evidence, guide]) {
+  const b = IMP_BADGE[level];
+  return `<div class="imp-card">
+    <div class="imp-head"><span class="imp-name">${esc(title)}</span>
+      <span class="imp-cur">현재 ${esc(cur)}</span>
+      <span class="imp-badge ${b.cls}">${b.txt}</span></div>
+    <div class="imp-ev">${esc(evidence)}</div>
+    <div class="imp-guide">${esc(guide)}</div>
+  </div>`;
+}
+
+function judgeOverall(d) {
+  const o = d.overall;
+  const ev = `기대값 ${fmtPct(o.expectancy)} · 손익비 ${(o.payoff_ratio||0).toFixed(2)} · 승률 ${o.win_rate}% · 연속손실 ${o.cur_loss_streak}건(최대 ${o.max_loss_streak})`;
+  if (o.total < 10) return ['nodata', ev, `판정까지 ${10 - o.total}건 더 필요합니다.`];
+  if (o.total >= 20 && o.expectancy < 0) return ['adjust', ev, '기대값이 음수입니다(20건 이상 누적). 파라미터 이전에 전략 자체를 재검토하세요.'];
+  if (o.cur_loss_streak >= 3) return ['adjust', ev, `연속 손실 ${o.cur_loss_streak}건입니다(기준 3건). 일시 중단을 검토하세요.`];
+  if (o.payoff_ratio < 1) return ['watch', ev, '손익비가 1 미만입니다(기준 1.0). 이긴 거래의 크기가 진 거래보다 작습니다.'];
+  return ['ok', ev, '기대값·손익비·스트릭 모두 경고 기준 이내입니다.'];
+}
+
+function judgeHardStop(d) {
+  const h = d.hard_stop;
+  const ev = `손절 ${h.n}건(${h.share_pct}%) · 체결 편차 ${h.avg_slip_pp}%p · 10분 내 손절 ${h.fast_stop_n}건 · 평균 ${h.avg_min_to_stop}분`;
+  if (h.n < 3) return ['nodata', ev, `판정까지 손절 표본 ${3 - h.n}건 더 필요합니다.`];
+  if (h.avg_slip_pp > 0.3) return ['adjust', ev, `손절 체결이 설정(-${d.params.hard_stop_pct}%)보다 평균 ${h.avg_slip_pp}%p 밀립니다(기준 0.3%p). 지정가 손절 전환 또는 폭 조정을 검토하세요.`];
+  if (d.overall.total >= 10 && h.share_pct > 50) return ['adjust', ev, `손절 비중이 ${h.share_pct}%로 절반을 넘습니다(기준 50%). 손절 폭보다 진입 품질을 우선 점검하세요.`];
+  if (h.fast_stop_n / h.n >= 0.5) return ['watch', ev, `손절의 ${Math.round(h.fast_stop_n / h.n * 100)}%가 진입 10분 내 발생 — 시초 변동성 구간입니다. 진입 지연을 검토하세요.`];
+  return ['ok', ev, '체결 편차·손절 비중 모두 기준 이내입니다.'];
+}
+
+function judgeStepSize(d) {
+  const s = d.step;
+  const ev = `스텝1 도달 ${s.step1_n}건(${s.step1_rate}%) · 근접 이탈 ${s.near_miss_n}건`;
+  if (d.overall.total < 5) return ['nodata', ev, `판정까지 ${5 - d.overall.total}건 더 필요합니다.`];
+  if (s.near_miss_n >= 3 && s.near_miss_n > s.step1_n) return ['adjust', ev, `고점 +1.5~${d.params.step_size_pct}%에서 손실로 끝난 거래(${s.near_miss_n}건)가 스텝1 도달(${s.step1_n}건)보다 많습니다. 간격 2.0% 축소를 검토하세요.`];
+  if (s.near_miss_n >= 2) return ['watch', ev, `근접 이탈이 ${s.near_miss_n}건 누적됐습니다(조정 기준 3건). 추이를 관찰하세요.`];
+  if (s.step1_rate >= 40) return ['ok', ev, `스텝1 도달률 ${s.step1_rate}%로 양호합니다(기준 40%).`];
+  return ['ok', ev, '근접 이탈이 없어 현재 간격에 무리가 없습니다.'];
+}
+
+function judgeStepTrail(d) {
+  const t = d.trailing;
+  const ev = `트레일링 청산 ${t.n}건 · 평균 반납 ${t.avg_giveback_pp}%p · 평균 손익 ${fmtPct(t.avg_pnl)}`;
+  if (t.n < 5) return ['nodata', ev, `판정까지 트레일링 청산 ${5 - t.n}건 더 필요합니다.`];
+  if (t.avg_giveback_pp > 2.0) return ['adjust', ev, `고점 대비 평균 ${t.avg_giveback_pp}%p 반납하고 청산됩니다(기준 2.0%p). 폭 축소를 검토하세요.`];
+  if (t.avg_giveback_pp > 1.5) return ['watch', ev, `반납폭이 설정(${d.params.step_trail_pct}%)을 넘고 있습니다(관찰 기준 1.5%p).`];
+  return ['ok', ev, '고점 반납이 설정 범위 이내입니다.'];
+}
+
+function judgeSlipBuffer(d) {
+  const sl = d.slippage;
+  const buf = (d.params.gap_max_fill_pct - d.params.gap_max_order_pct).toFixed(1);
+  const ev = `매수 슬리피지 평균 ${sl.buy.avg_pp}%p·최대 ${sl.buy.max_pp}%p (${sl.buy.n}건) · GUARD ${sl.guard_n}건`;
+  if (sl.buy.n < 3) return ['nodata', ev, `판정까지 매수 체결 ${3 - sl.buy.n}건 더 필요합니다.`];
+  if (sl.guard_n >= 2 || sl.buy.max_pp > 0.5) return ['adjust', ev, `슬리피지가 버퍼(${buf}%p)를 위협합니다(GUARD ${sl.guard_n}건, 최대 ${sl.buy.max_pp}%p). GAP_MAX_ORDER 하향 또는 버퍼 확대를 검토하세요.`];
+  if (sl.buy.avg_pp > 0.25) return ['watch', ev, '평균 매수 슬리피지가 0.25%p를 넘었습니다. 버퍼 소진 추이를 관찰하세요.'];
+  return ['ok', ev, `슬리피지가 버퍼(${buf}%p) 대비 여유 있습니다.`];
+}
+
+function judgeTimeout(d) {
+  const to = d.timeout_exit;
+  const ev = `시간 청산 ${to.n}건 · 평균 손익 ${fmtPct(to.avg_pnl)} · 평균 고점 +${to.avg_mfe}%`;
+  if (to.n < 5) return ['nodata', ev, `판정까지 시간 청산 ${5 - to.n}건 더 필요합니다.`];
+  if (to.avg_pnl < 0) return ['adjust', ev, `시간 청산 평균이 음수입니다 — 보유시간 내 회복에 실패하고 있습니다. 청산 시각(${d.params.timeout_time}) 단축을 검토하세요.`];
+  if (to.avg_mfe >= 1.5) return ['watch', ev, `시간 청산 전 고점이 평균 +${to.avg_mfe}%였습니다(기준 1.5%). 강제 트레일링(${d.params.force_trailing_time}) 앞당김을 검토하세요.`];
+  return ['ok', ev, '시간 청산 성과에 경고 신호가 없습니다.'];
+}
+
+function judgeGapRange(d) {
+  const c = d.candidates;
+  const days = c.skip_days + c.trade_days;
+  const skipList = Object.entries(c.skips || {}).map(([k, v]) => `${k} ${v}`).join(' · ') || '스킵 없음';
+  const ev = `거래일 ${c.trade_days} · 스킵일 ${c.skip_days} (${skipList})`;
+  const note = ' 진입 시점 갭이 저장되면 정밀 판정이 가능합니다.';
+  if (days < 10) return ['nodata', ev, `판정까지 실행일 ${10 - days}일 더 필요합니다.` + note];
+  if (c.skip_days > c.trade_days) return ['watch', ev, `스킵일이 거래일보다 많습니다. 후보 부족이면 갭 범위(${d.params.f1_gap_min_pct}~${d.params.f1_gap_core_max_pct}%) 확대를 검토하되 신중하게.` + note];
+  return ['ok', ev, '후보 공급에 문제가 없습니다.' + note];
+}
+
+function renderImprove(d) {
+  $('imp-sample-note').textContent = sampleNote(d.overall.total || 0);
+  const p = d.params;
+  const cards = [
+    ['전략 종합',     `${d.overall.total}건`,                          judgeOverall(d)],
+    ['HARD_STOP',    `-${p.hard_stop_pct}%`,                           judgeHardStop(d)],
+    ['STEP_SIZE',    `+${p.step_size_pct}%`,                           judgeStepSize(d)],
+    ['STEP_TRAIL',   `-${p.step_trail_pct}%`,                          judgeStepTrail(d)],
+    ['슬리피지 버퍼', `${p.gap_max_order_pct}→${p.gap_max_fill_pct}%`, judgeSlipBuffer(d)],
+    ['F5 타임아웃',  p.timeout_time,                                   judgeTimeout(d)],
+    ['F1 갭 범위',   `${p.f1_gap_min_pct}~${p.f1_gap_core_max_pct}%`,  judgeGapRange(d)],
+  ];
+  $('imp-cards').innerHTML = cards.map(([t, cur, j]) => impCard(t, cur, j)).join('');
 }
 
 // ── SSE 구독 ─────────────────────────────────────────────────────────────

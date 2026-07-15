@@ -41,6 +41,7 @@
     <div class="li-sep"></div>
     <button class="li menu-item" title="이력" onclick="go('history',this)"><span class="li-dot"></span><span>이력</span></button>
     <button class="li menu-item" title="통계" onclick="go('stats',this)"><span class="li-dot"></span><span>통계</span></button>
+    <button class="li menu-item" title="개선" onclick="go('improve',this)"><span class="li-dot"></span><span>개선</span></button>
     <button class="li menu-item" title="설정" onclick="go('settings',this)"><span class="li-dot"></span><span>설정</span></button>
     <div class="li-sep legacy"></div>
     <div class="li off" id="li-kis"><div class="li-dot"></div>KIS</div>
@@ -311,6 +312,39 @@
           <div class="factor-grid" id="stats-factor-grid">
             <div class="empty">통계 로딩 중...</div>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ IMPROVE ══ -->
+    <div id="sc-improve" class="sc sc-stats">
+      <div class="stats-inner">
+        <div class="scard full">
+          <div class="card-ttl">파라미터 진단</div>
+          <div class="stats-note" id="imp-sample-note">표본 대기</div>
+          <div class="imp-grid" id="imp-cards"><div class="empty">로딩 중...</div></div>
+        </div>
+        <div class="scard full">
+          <div class="card-ttl">거래별 고점 반납</div>
+          <div class="tbl-wrap">
+            <table>
+              <thead><tr><th>날짜</th><th>종목</th><th>고점(MFE)</th><th>최종 손익</th><th>반납</th><th>청산 사유</th></tr></thead>
+              <tbody id="imp-mfe-tbody"><tr><td colspan="6" class="empty">로딩 중...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="scard full">
+          <div class="card-ttl">슬리피지 상세</div>
+          <div class="tbl-wrap">
+            <table>
+              <thead><tr><th>구간</th><th>건수</th><th>평균 슬리피지</th><th>최대</th><th>평균 체결지연</th></tr></thead>
+              <tbody id="imp-slip-tbody"><tr><td colspan="5" class="empty">로딩 중...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="scard full">
+          <div class="card-ttl">스킵 · 보유시간</div>
+          <div class="factor-grid" id="imp-skip-hold"><div class="empty">로딩 중...</div></div>
         </div>
       </div>
     </div>

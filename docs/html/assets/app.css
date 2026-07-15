@@ -250,6 +250,18 @@ tr:hover td{background:var(--s2);}
 .factor-cell{border:1px solid var(--bd);background:rgba(255,255,255,.014);padding:9px;}
 .factor-name{font-size:11px;color:var(--mu);margin-bottom:4px;}
 .factor-row{display:flex;align-items:center;justify-content:space-between;gap:8px;font-family:var(--mn);font-size:12px;border-top:1px solid rgba(120,123,134,.16);padding-top:5px;margin-top:5px;}
+.imp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:8px;margin-top:8px;}
+.imp-card{border:1px solid var(--bd);background:rgba(255,255,255,.014);padding:10px 12px;display:flex;flex-direction:column;gap:6px;}
+.imp-head{display:flex;align-items:center;gap:8px;}
+.imp-name{font-size:12px;font-weight:700;letter-spacing:.02em;}
+.imp-cur{font-family:var(--mn);font-size:11px;color:var(--mu);}
+.imp-badge{margin-left:auto;font-size:10px;padding:2px 7px;border:1px solid;white-space:nowrap;}
+.imp-ok{color:#26a69a;border-color:#26a69a55;}
+.imp-watch{color:#f7a600;border-color:#f7a60055;}
+.imp-adjust{color:#ef5350;border-color:#ef535055;}
+.imp-nodata{color:#787b86;border-color:#787b8655;}
+.imp-ev{font-family:var(--mn);font-size:11px;color:var(--mu);line-height:1.5;}
+.imp-guide{font-size:12px;line-height:1.5;}
 .settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:4px;}
 .settings-box{border:1px solid var(--bd);background:var(--s);padding:12px 14px;}
 .settings-title{font-size:11px;color:var(--mu);letter-spacing:.07em;text-transform:uppercase;margin-bottom:8px;}
