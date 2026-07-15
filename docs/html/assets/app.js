@@ -1425,7 +1425,7 @@ function judgeOverall(d) {
   if (o.total < 10) return ['nodata', ev, `판정까지 ${10 - o.total}건 더 필요합니다.`];
   if (o.total >= 20 && o.expectancy < 0) return ['adjust', ev, '기대값이 음수입니다(20건 이상 누적). 파라미터 이전에 전략 자체를 재검토하세요.'];
   if (o.cur_loss_streak >= 3) return ['adjust', ev, `연속 손실 ${o.cur_loss_streak}건입니다(기준 3건). 일시 중단을 검토하세요.`];
-  if (o.payoff_ratio < 1) return ['watch', ev, '손익비가 1 미만입니다(기준 1.0). 이긴 거래의 크기가 진 거래보다 작습니다.'];
+  if (o.avg_loss < 0 && o.payoff_ratio < 1) return ['watch', ev, '손익비가 1 미만입니다(기준 1.0). 이긴 거래의 크기가 진 거래보다 작습니다.'];
   return ['ok', ev, '기대값·손익비·스트릭 모두 경고 기준 이내입니다.'];
 }
 
@@ -1470,7 +1470,7 @@ function judgeSlipBuffer(d) {
 
 function judgeTimeout(d) {
   const to = d.timeout_exit;
-  const ev = `시간 청산 ${to.n}건 · 평균 손익 ${fmtPct(to.avg_pnl)} · 평균 고점 +${to.avg_mfe}%`;
+  const ev = `시간 청산 ${to.n}건 · 평균 손익 ${fmtPct(to.avg_pnl)} · 평균 고점 ${fmtPct(to.avg_mfe)}`;
   if (to.n < 5) return ['nodata', ev, `판정까지 시간 청산 ${5 - to.n}건 더 필요합니다.`];
   if (to.avg_pnl < 0) return ['adjust', ev, `시간 청산 평균이 음수입니다 — 보유시간 내 회복에 실패하고 있습니다. 청산 시각(${d.params.timeout_time}) 단축을 검토하세요.`];
   if (to.avg_mfe >= 1.5) return ['watch', ev, `시간 청산 전 고점이 평균 +${to.avg_mfe}%였습니다(기준 1.5%). 강제 트레일링(${d.params.force_trailing_time}) 앞당김을 검토하세요.`];
@@ -1522,7 +1522,7 @@ function renderMfeTable(rows) {
 
 function renderSlipTable(sl) {
   const tb = $('imp-slip-tbody');
-  const phaseLabel = {FIRST_BUY:'1차 매수', PYRAMID_BUY:'피라미딩 매수', CLOSE_SELL:'청산 매도', TIMEOUT_SELL:'시간 청산 매도', SLIPPAGE_SELL:'슬리피지 청산'};
+  const phaseLabel = {FIRST_BUY:'1차 매수', PYRAMID_BUY:'피라미딩 매수', CLOSE_SELL:'청산 매도', PARTIAL_SELL:'부분 매도', TIMEOUT_SELL:'시간 청산 매도', SLIPPAGE_SELL:'슬리피지 청산'};
   const rows = Object.entries(sl.by_phase || {});
   if (!rows.length) {
     tb.innerHTML = '<tr><td colspan="5" class="empty">체결 데이터 없음</td></tr>';
