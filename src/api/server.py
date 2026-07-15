@@ -941,7 +941,35 @@ def _improve_from_rows(
         max(0.0, -(avg_fill_pnl + HARD_STOP_RATIO * 100)) if hs_pnl else 0.0
     )
 
-    empty_slip = {"n": 0, "avg_pp": 0.0, "max_pp": 0.0, "avg_latency_ms": 0}
+    slip_acc: dict[str, dict[str, list]] = {}
+    for o in orders:
+        phase = o.get("order_phase") or ""
+        order_price = o.get("order_price") or 0
+        fill_price = o.get("fill_price")
+        if not order_price or fill_price is None:
+            continue
+        pp = (fill_price - order_price) / order_price * 100
+        if phase not in _BUY_PHASES:
+            pp = -pp  # 매도는 싸게 체결될수록 불리 → 부호 반전해 '불리=양수' 통일
+        acc = slip_acc.setdefault(phase, {"pps": [], "lat": []})
+        acc["pps"].append(pp)
+        if o.get("fill_latency_ms") is not None:
+            acc["lat"].append(o["fill_latency_ms"])
+
+    def _slip_summary(pps: list[float], lat: list[float]) -> dict:
+        return {
+            "n": len(pps),
+            "avg_pp": round(_avg(pps), 3),
+            "max_pp": round(max(pps), 3) if pps else 0.0,
+            "avg_latency_ms": round(_avg(lat)) if lat else 0,
+        }
+
+    by_phase = {ph: _slip_summary(a["pps"], a["lat"]) for ph, a in slip_acc.items()}
+    buy_pps = [p for ph, a in slip_acc.items() if ph in _BUY_PHASES for p in a["pps"]]
+    buy_lat = [v for ph, a in slip_acc.items() if ph in _BUY_PHASES for v in a["lat"]]
+    sell_pps = [p for ph, a in slip_acc.items() if ph not in _BUY_PHASES for p in a["pps"]]
+    sell_lat = [v for ph, a in slip_acc.items() if ph not in _BUY_PHASES for v in a["lat"]]
+    guard_n = sum(1 for t in trades if t.get("close_reason") == "SLIPPAGE_GUARD")
     return {
         "params": _improve_params(),
         "overall": {
@@ -973,20 +1001,20 @@ def _improve_from_rows(
             "avg_giveback_pp": round(_avg(trailing_gb), 2),
             "avg_pnl": round(_avg(trailing_pnl), 2),
         },
-        "slippage": {  # Task 2에서 채움
-            "buy": dict(empty_slip),
-            "sell": dict(empty_slip),
-            "by_phase": {},
-            "guard_n": 0,
+        "slippage": {
+            "buy": _slip_summary(buy_pps, buy_lat),
+            "sell": _slip_summary(sell_pps, sell_lat),
+            "by_phase": by_phase,
+            "guard_n": guard_n,
         },
         "timeout_exit": {
             "n": len(timeout_pnl),
             "avg_pnl": round(_avg(timeout_pnl), 2),
             "avg_mfe": round(_avg(timeout_mfe), 2),
         },
-        "candidates": {  # Task 2에서 채움
-            "skips": {},
-            "skip_days": 0,
+        "candidates": {
+            "skips": skips,
+            "skip_days": sum(skips.values()),
             "trade_days": total,
         },
         "mfe_rows": mfe_rows,

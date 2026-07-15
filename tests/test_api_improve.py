@@ -17,6 +17,13 @@ def _trade(**over):
     return base
 
 
+def _order(phase, order_price, fill_price, latency=500):
+    return {
+        "order_phase": phase, "order_price": order_price,
+        "fill_price": fill_price, "fill_latency_ms": latency,
+    }
+
+
 def test_improve_empty_rows_returns_zero_structure():
     payload = server._improve_from_rows([], [], {})
 
@@ -170,3 +177,51 @@ def test_improve_hold_time_grouped_by_reason():
 
     assert ht["HARD_STOP"] == {"n": 1, "avg_min": 8.0}
     assert ht["TIMEOUT"] == {"n": 1, "avg_min": 108.0}
+
+
+def test_improve_slippage_adverse_is_positive_for_both_sides():
+    orders = [
+        # 매수: 비싸게 체결 = 불리 → +0.3
+        _order("FIRST_BUY", 10_000.0, 10_030.0, latency=400),
+        # 매도: 싸게 체결 = 불리 → +0.2
+        _order("CLOSE_SELL", 10_000.0, 9_980.0, latency=600),
+        # 매도: 비싸게 체결 = 유리 → -0.1
+        _order("TIMEOUT_SELL", 10_000.0, 10_010.0, latency=800),
+    ]
+
+    sl = server._improve_from_rows([], orders, {})["slippage"]
+
+    assert sl["buy"] == {"n": 1, "avg_pp": 0.3, "max_pp": 0.3, "avg_latency_ms": 400}
+    assert sl["sell"]["n"] == 2
+    assert sl["sell"]["avg_pp"] == 0.05
+    assert sl["sell"]["max_pp"] == 0.2
+    assert sl["sell"]["avg_latency_ms"] == 700
+    assert sl["by_phase"]["FIRST_BUY"]["n"] == 1
+    assert sl["by_phase"]["CLOSE_SELL"]["avg_pp"] == 0.2
+
+
+def test_improve_slippage_skips_rows_without_prices():
+    orders = [
+        _order("FIRST_BUY", None, 10_030.0),
+        _order("FIRST_BUY", 0, 10_030.0),
+        _order("FIRST_BUY", 10_000.0, None),
+    ]
+
+    sl = server._improve_from_rows([], orders, {})["slippage"]
+
+    assert sl["buy"]["n"] == 0
+    assert sl["by_phase"] == {}
+
+
+def test_improve_guard_count_and_skips():
+    trades = [_trade(date="20260701", close_reason="SLIPPAGE_GUARD", pnl_pct=-1.2)]
+    skips = {"NO_TARGET": 3, "GAP_CHANGED": 1}
+
+    payload = server._improve_from_rows(trades, [], skips)
+
+    assert payload["slippage"]["guard_n"] == 1
+    assert payload["candidates"] == {
+        "skips": {"NO_TARGET": 3, "GAP_CHANGED": 1},
+        "skip_days": 4,
+        "trade_days": 1,
+    }
