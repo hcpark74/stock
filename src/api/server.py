@@ -1025,6 +1025,31 @@ def _improve_from_rows(
     }
 
 
+@app.get("/api/improve")
+async def api_improve() -> JSONResponse:
+    try:
+        conn = db.get()
+        async with conn.execute(
+            """SELECT date, ticker, name, entry_price, high_price, highest_step,
+                      pnl_pct, close_reason, entry_at, exit_at
+               FROM trades WHERE status='CLOSED' ORDER BY date"""
+        ) as cur:
+            trades = [dict(r) for r in await cur.fetchall()]
+        async with conn.execute(
+            """SELECT order_phase, order_price, fill_price, fill_latency_ms
+               FROM orders WHERE status IN ('FILLED', 'PARTIAL_FILL')"""
+        ) as cur:
+            orders = [dict(r) for r in await cur.fetchall()]
+        async with conn.execute(
+            "SELECT reason, COUNT(*) as n FROM daily_skips GROUP BY reason"
+        ) as cur:
+            skips = {r["reason"]: r["n"] for r in await cur.fetchall()}
+        return JSONResponse(_improve_from_rows(trades, orders, skips))
+    except Exception as exc:
+        log("API_IMPROVE_FAILED", level="WARN", error=repr(exc))
+        return JSONResponse(_improve_from_rows([], [], {}))
+
+
 # ─── /api/stream (SSE) ────────────────────────────────────────────────
 
 @app.get("/api/stream")

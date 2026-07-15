@@ -1,8 +1,11 @@
+import json
+
 import pytest
 
 pytest.importorskip("fastapi")
 
 import src.api.server as server  # noqa: E402 — fastapi 미설치 시 모듈 스킵 이후 임포트
+from src import db  # noqa: E402
 
 
 def _trade(**over):
@@ -225,3 +228,66 @@ def test_improve_guard_count_and_skips():
         "skip_days": 4,
         "trade_days": 1,
     }
+
+
+@pytest.mark.asyncio
+async def test_api_improve_empty_db_returns_default_structure(tmp_path):
+    await db.init(str(tmp_path / "improve.db"))
+
+    resp = await server.api_improve()
+    payload = json.loads(resp.body.decode("utf-8"))
+
+    assert payload["overall"]["total"] == 0
+    assert payload["mfe_rows"] == []
+    assert payload["slippage"]["buy"]["n"] == 0
+    assert payload["candidates"]["skips"] == {}
+    assert payload["params"]["hard_stop_pct"] == 2.0
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_api_improve_aggregates_seeded_trades_orders_skips(tmp_path):
+    await db.init(str(tmp_path / "improve.db"))
+    conn = db.get()
+
+    # 거래 1: 손절 (MFE 2.1%, 8분 보유 → 근접 이탈 + 빠른 손절)
+    t1 = await db.open_trade("20260701", "005930", 10_000.0, 10, name="삼성전자")
+    await db.update_trade_progress(t1, 10_210.0, 0.0)
+    await db.close_trade(t1, 9_787.0, "HARD_STOP", -2.13, 0.0)
+    # 거래 2: 트레일링 (스텝1 도달, MFE 4.0%)
+    t2 = await db.open_trade("20260702", "000660", 10_000.0, 10, name="SK하이닉스")
+    await db.update_trade_progress(t2, 10_400.0, 0.025)
+    await db.close_trade(t2, 10_100.0, "TRAILING", 1.0, 0.025)
+    # 진입·청산 시각을 결정적으로 고정 (close_trade는 now를 기록)
+    await conn.execute(
+        "UPDATE trades SET entry_at=?, exit_at=? WHERE id=?",
+        ("2026-07-01T09:12:00+09:00", "2026-07-01T09:20:00+09:00", t1))
+    await conn.execute(
+        "UPDATE trades SET entry_at=?, exit_at=? WHERE id=?",
+        ("2026-07-02T09:12:00+09:00", "2026-07-02T10:30:00+09:00", t2))
+    await conn.commit()
+
+    # 주문: 매수 불리 +0.3%p 체결
+    o1 = await db.record_order(t1, "KIS001", "BUY", 10, 10_000.0,
+                               "FIRST_BUY", "005930", name="삼성전자")
+    await db.update_order_fill(o1, 10_030.0, 10, 400)
+    # 미체결(PENDING) 주문은 집계에서 제외되어야 함
+    await db.record_order(t1, "KIS002", "SELL", 10, 10_000.0,
+                          "CLOSE_SELL", "005930")
+
+    await db.record_skip("20260703", "NO_TARGET", "후보 없음")
+
+    resp = await server.api_improve()
+    payload = json.loads(resp.body.decode("utf-8"))
+
+    assert payload["overall"]["total"] == 2
+    assert payload["step"]["step1_n"] == 1
+    assert payload["step"]["near_miss_n"] == 1
+    assert payload["hard_stop"]["n"] == 1
+    assert payload["hard_stop"]["fast_stop_n"] == 1
+    assert payload["mfe_rows"][0]["date"] == "20260702"  # 최신 먼저
+    assert payload["slippage"]["buy"]["n"] == 1
+    assert payload["slippage"]["buy"]["avg_pp"] == 0.3
+    assert payload["candidates"]["skips"] == {"NO_TARGET": 1}
+    assert payload["candidates"]["trade_days"] == 2
+    await db.close()
