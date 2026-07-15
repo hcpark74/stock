@@ -1517,6 +1517,50 @@ function renderImprove(d) {
     ['F1 갭 범위',   `${p.f1_gap_min_pct}~${p.f1_gap_core_max_pct}%`,  judgeGapRange(d)],
   ];
   $('imp-cards').innerHTML = cards.map(([t, cur, j]) => impCard(t, cur, j)).join('');
+  renderMfeTable(d.mfe_rows);
+  renderSlipTable(d.slippage);
+  renderSkipHold(d);
+}
+
+function renderMfeTable(rows) {
+  const tb = $('imp-mfe-tbody');
+  if (!rows || !rows.length) {
+    tb.innerHTML = '<tr><td colspan="6" class="empty">폐쇄 거래 없음</td></tr>';
+    return;
+  }
+  tb.innerHTML = rows.map(r => {
+    const mfe = r.mfe_pct == null ? '—' : fmtPct(r.mfe_pct);
+    const gb = r.giveback_pp == null ? '—' : r.giveback_pp.toFixed(2) + '%p';
+    const pc = (r.pnl_pct || 0) >= 0 ? 'pup' : 'pdn';
+    return `<tr><td>${esc(r.date)}</td><td>${esc(r.name || r.ticker)}</td><td>${mfe}</td><td class="${pc}">${fmtPct(r.pnl_pct)}</td><td>${gb}</td><td>${esc(reasonName(r.close_reason))}</td></tr>`;
+  }).join('');
+}
+
+function renderSlipTable(sl) {
+  const tb = $('imp-slip-tbody');
+  const phaseLabel = {FIRST_BUY:'1차 매수', PYRAMID_BUY:'피라미딩 매수', CLOSE_SELL:'청산 매도', TIMEOUT_SELL:'시간 청산 매도', SLIPPAGE_SELL:'슬리피지 청산'};
+  const rows = Object.entries(sl.by_phase || {});
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="5" class="empty">체결 데이터 없음</td></tr>';
+    return;
+  }
+  tb.innerHTML = rows.map(([ph, v]) =>
+    `<tr><td>${esc(phaseLabel[ph] || ph)}</td><td>${fmt(v.n)}건</td><td>${v.avg_pp}%p</td><td>${v.max_pp}%p</td><td>${fmt(v.avg_latency_ms)}ms</td></tr>`
+  ).join('');
+}
+
+function renderSkipHold(d) {
+  const el = $('imp-skip-hold');
+  const skipLabel = {NO_TARGET:'후보 없음', GAP_CHANGED:'갭 이탈', ENTRY_FAIL:'진입 실패', SLIPPAGE_GUARD:'슬리피지', MANUAL:'수동'};
+  const skipRows = Object.entries(d.candidates.skips || {})
+    .map(([k, v]) => `<div class="factor-row"><span>${esc(skipLabel[k] || k)}</span><span>${fmt(v)}건</span></div>`)
+    .join('') || '<div class="empty">스킵 없음</div>';
+  const holdRows = Object.entries(d.hold_time || {})
+    .map(([k, v]) => `<div class="factor-row"><span>${esc(reasonName(k))}</span><span>${v.avg_min}분 · ${fmt(v.n)}건</span></div>`)
+    .join('') || '<div class="empty">데이터 없음</div>';
+  el.innerHTML =
+    `<div class="factor-cell"><div class="factor-name">스킵 사유</div>${skipRows}</div>` +
+    `<div class="factor-cell"><div class="factor-name">청산사유별 평균 보유시간</div>${holdRows}</div>`;
 }
 
 // ── SSE 구독 ─────────────────────────────────────────────────────────────
