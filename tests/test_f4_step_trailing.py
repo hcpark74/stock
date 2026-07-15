@@ -578,6 +578,38 @@ async def test_execute_close_sends_critical_alert_on_sell_error(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_execute_close_records_trigger_price_as_order_price(monkeypatch):
+    """orders.order_price에는 체결가가 아닌 매도 트리거 시점 가격을 기록한다.
+
+    두 값이 같으면 매도 슬리피지 집계가 항상 0이 된다.
+    """
+    _state_mod.get().trade_id = 123
+    record_order = AsyncMock(return_value=9)
+    update_order_fill = AsyncMock()
+
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setattr(
+        "src.modules.f4_tracking._send_sell",
+        AsyncMock(return_value={"rt_cd": "0", "output": {"ODNO": "SELL001"}}),
+    )
+    monkeypatch.setattr(
+        "src.modules.f4_tracking._poll_fill",
+        AsyncMock(return_value={"fill_price": 9_750.0, "fill_qty": 100}),
+    )
+    monkeypatch.setattr("src.modules.f4_tracking.db.record_order", record_order)
+    monkeypatch.setattr("src.modules.f4_tracking.db.update_order_fill", update_order_fill)
+    monkeypatch.setattr("src.modules.f4_tracking.db.close_trade", AsyncMock())
+    monkeypatch.setattr("src.modules.f4_tracking.state.persist", AsyncMock())
+    monkeypatch.setattr("src.modules.f4_tracking.notifier.send", AsyncMock())
+
+    result = await _execute_close(ENTRY * 0.98, "HARD_STOP")
+
+    assert result is True
+    assert record_order.await_args.args[4] == ENTRY * 0.98      # 트리거 가격
+    assert update_order_fill.await_args.args[1] == 9_750.0      # 체결가
+
+
+@pytest.mark.asyncio
 async def test_execute_close_treats_rejected_sell_response_as_failure(monkeypatch):
     from src.modules.f4_tracking import _execute_close
 

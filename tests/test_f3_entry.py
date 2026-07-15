@@ -569,6 +569,94 @@ async def test_full_cash_quantity_places_first_buy(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_entry_records_expected_price_as_order_price(monkeypatch):
+    """orders.order_price에는 체결가가 아닌 주문 시점 예상가를 기록한다.
+
+    두 값이 같으면 슬리피지 집계가 항상 0이 된다 — 체결가는 update_order_fill로만.
+    """
+    _reset_state()
+    record_order = AsyncMock(return_value=1)
+    update_fill = AsyncMock()
+
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(1000.0, 970.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=10_000.0))
+    monkeypatch.setattr(f3, "_send_buy", AsyncMock(return_value={
+        "rt_cd": "0",
+        "msg_cd": "MCA00000",
+        "msg1": "OK",
+        "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
+    }))
+    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1010, "fill_qty": 9}))
+    monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=1010))
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "record_order", record_order)
+    monkeypatch.setattr(f3.db, "update_order_fill", update_fill)
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+
+    await f3.run(force=True)
+
+    assert record_order.await_args.args[4] == 1000.0  # 주문 시점 예상가
+    assert update_fill.await_args.args[1] == 1010     # 체결가
+
+
+@pytest.mark.asyncio
+async def test_pyramid_records_current_price_as_order_price(monkeypatch):
+    """피라미딩 주문도 order_price에는 주문 시점 현재가를 기록한다."""
+    _reset_state()
+    record_order = AsyncMock(return_value=1)
+    update_fill = AsyncMock()
+
+    monkeypatch.setattr(f3, "FIRST_RATIO", 0.7)
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(1000.0, 970.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=10_000.0))
+    monkeypatch.setattr(
+        f3,
+        "_send_buy",
+        AsyncMock(side_effect=[
+            {
+                "rt_cd": "0",
+                "msg_cd": "MCA00000",
+                "msg1": "OK",
+                "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
+            },
+            {
+                "rt_cd": "0",
+                "msg_cd": "MCA00000",
+                "msg1": "OK",
+                "output": {"ODNO": "0000000938", "KRX_FWDG_ORD_ORGNO": "001"},
+            },
+        ]),
+    )
+    monkeypatch.setattr(
+        f3,
+        "_poll_fill",
+        AsyncMock(side_effect=[
+            {"fill_price": 1000, "fill_qty": 7},
+            {"fill_price": 1008, "fill_qty": 3},
+        ]),
+    )
+    monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=1006))
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "record_order", record_order)
+    monkeypatch.setattr(f3.db, "update_order_fill", update_fill)
+    monkeypatch.setattr(f3.db, "mark_pyramided", AsyncMock())
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+
+    await f3.run(force=True)
+
+    assert record_order.await_args_list[0].args[4] == 1000.0  # 1차: 예상가
+    assert record_order.await_args_list[1].args[4] == 1006    # 2차: 주문 시점 현재가
+    assert update_fill.await_args_list[1].args[1] == 1008     # 2차 체결가
+
+
+@pytest.mark.asyncio
 async def test_entry_records_trade_with_target_name(monkeypatch):
     _reset_state()
     state.get().target_name = "대원전선"

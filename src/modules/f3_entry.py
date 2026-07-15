@@ -573,8 +573,9 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
         _today(), ticker, fill_price, fill_qty, name=state.get().target_name,
     )
     state.get().trade_id = trade_id
+    # order_price에는 주문 시점 예상가를 기록한다 — 체결가와 같으면 슬리피지 집계가 0이 된다.
     order_db_id = await db.record_order(
-        trade_id, order_id, "BUY", fill_qty, fill_price, "FIRST_BUY", ticker, state.get().target_name,
+        trade_id, order_id, "BUY", fill_qty, expected_price, "FIRST_BUY", ticker, state.get().target_name,
     )
     await db.update_order_fill(order_db_id, fill_price, fill_qty, 0)
     await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
@@ -619,7 +620,7 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
             s.remaining_qty = (s.remaining_qty or 0) + py_fill["fill_qty"]
             py_order_db_id = await db.record_order(
                 trade_id, py_id, "BUY", py_fill["fill_qty"],
-                py_fill["fill_price"], "PYRAMID_BUY", ticker, s.target_name,
+                current_price, "PYRAMID_BUY", ticker, s.target_name,
             )
             await db.update_order_fill(
                 py_order_db_id, py_fill["fill_price"], py_fill["fill_qty"], 0,

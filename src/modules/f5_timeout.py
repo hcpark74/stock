@@ -56,6 +56,17 @@ async def _fetch_holding_qty(ticker: str, mode: str) -> int | None:
     return 0
 
 
+async def _fetch_current_price(ticker: str) -> float:
+    """주문 시점 기준가(현재 체결가) 조회 — 슬리피지 집계용."""
+    resp = await kis_rest.get(
+        "/uapi/domestic-stock/v1/quotations/inquire-price",
+        tr_id="FHKST01010100",
+        params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker},
+    )
+    out = resp.get("output", {}) if isinstance(resp.get("output"), dict) else {}
+    return float(out.get("stck_prpr") or out.get("antc_cnpr") or 0)
+
+
 async def precheck() -> None:
     """10:59:50 — 잔고 조회로 실제 보유 수량 확인."""
     global _prefetch_qty, _prefetch_date
@@ -181,6 +192,17 @@ async def execute() -> None:
         if remaining <= 0:
             break
 
+        # order_price 기준가는 주문 발송 전에 조회한다 — 발송 후 조회하면
+        # 시장가 체결 이후 가격이 기준이 되어 슬리피지가 왜곡된다.
+        # 조회 실패 시 0.0 (슬리피지 집계에서 제외될 뿐, 청산 자체는 막지 않는다).
+        ref_price = 0.0
+        if s.trade_id:
+            try:
+                ref_price = await _fetch_current_price(ticker)
+            except Exception as e:
+                log("F5_PRICE_QUERY_FAIL", level="WARN",
+                    ticker=ticker, error=str(e))
+
         try:
             resp = await _send_sell(ticker, remaining, mode)
             output = resp.get("output", {})
@@ -201,7 +223,7 @@ async def execute() -> None:
             # 주문 실패 경로와 분리해 로그만 남긴다.
             try:
                 order_db_id = await db.record_order(
-                    s.trade_id, last_sell_id, "SELL", remaining, 0.0,
+                    s.trade_id, last_sell_id, "SELL", remaining, ref_price,
                     "TIMEOUT_SELL", ticker, s.target_name,
                 )
             except Exception as e:

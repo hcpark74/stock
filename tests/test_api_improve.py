@@ -217,15 +217,17 @@ def test_improve_slippage_skips_rows_without_prices():
 
 
 def test_improve_guard_count_and_skips():
-    trades = [_trade(date="20260701", close_reason="SLIPPAGE_GUARD", pnl_pct=-1.2)]
-    skips = {"NO_TARGET": 3, "GAP_CHANGED": 1}
+    # SLIPPAGE_GUARD는 거래를 열기 전에 daily_skips에 기록되고 반환된다 —
+    # 종료 거래(close_reason)에는 존재할 수 없으므로 skips에서 집계해야 한다.
+    trades = [_trade(date="20260701", close_reason="TIMEOUT", pnl_pct=-1.2)]
+    skips = {"NO_TARGET": 3, "GAP_CHANGED": 1, "SLIPPAGE_GUARD": 1}
 
     payload = server._improve_from_rows(trades, [], skips)
 
     assert payload["slippage"]["guard_n"] == 1
     assert payload["candidates"] == {
-        "skips": {"NO_TARGET": 3, "GAP_CHANGED": 1},
-        "skip_days": 4,
+        "skips": {"NO_TARGET": 3, "GAP_CHANGED": 1, "SLIPPAGE_GUARD": 1},
+        "skip_days": 5,
         "trade_days": 1,
     }
 
@@ -276,6 +278,7 @@ async def test_api_improve_aggregates_seeded_trades_orders_skips(tmp_path):
                           "CLOSE_SELL", "005930")
 
     await db.record_skip("20260703", "NO_TARGET", "후보 없음")
+    await db.record_skip("20260704", "SLIPPAGE_GUARD", "expected=10000,fill=10800")
 
     resp = await server.api_improve()
     payload = json.loads(resp.body.decode("utf-8"))
@@ -288,6 +291,7 @@ async def test_api_improve_aggregates_seeded_trades_orders_skips(tmp_path):
     assert payload["mfe_rows"][0]["date"] == "20260702"  # 최신 먼저
     assert payload["slippage"]["buy"]["n"] == 1
     assert payload["slippage"]["buy"]["avg_pp"] == 0.3
-    assert payload["candidates"]["skips"] == {"NO_TARGET": 1}
+    assert payload["slippage"]["guard_n"] == 1
+    assert payload["candidates"]["skips"] == {"NO_TARGET": 1, "SLIPPAGE_GUARD": 1}
     assert payload["candidates"]["trade_days"] == 2
     await db.close()

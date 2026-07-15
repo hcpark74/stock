@@ -362,8 +362,9 @@ async def _execute_close_impl(price: float, reason: str) -> bool:
 
     if s.trade_id:
         try:
+            # order_price에는 매도 트리거 시점 가격을 기록한다 (체결가는 update_order_fill).
             order_db_id = await db.record_order(
-                s.trade_id, sell_id, "SELL", qty, exit_price, "CLOSE_SELL", s.target_ticker, s.target_name,
+                s.trade_id, sell_id, "SELL", qty, price, "CLOSE_SELL", s.target_ticker, s.target_name,
             )
             await db.update_order_fill(order_db_id, exit_price, qty, 0)
             await db.close_trade(s.trade_id, exit_price, reason, pnl_pct, s.highest_step)

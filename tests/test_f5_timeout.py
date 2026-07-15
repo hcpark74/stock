@@ -27,6 +27,10 @@ def holding_state(monkeypatch):
         f5_timeout, "_prefetch_date",
         f5_timeout.datetime.now(f5_timeout.KST).strftime("%Y%m%d"))
     monkeypatch.setattr(f5_timeout.state, "persist", AsyncMock())
+    # 주문 시점 기준가 조회 — 테스트에서 실제 KIS 호출 금지
+    monkeypatch.setattr(
+        f5_timeout, "_fetch_current_price",
+        AsyncMock(return_value=10_000.0), raising=False)
     yield
     s.position_status = "IDLE"
     s.close_reason = None
@@ -347,6 +351,50 @@ async def test_partial_fills_close_at_weighted_average_price(monkeypatch):
     close_trade.assert_awaited_once_with(7, 10_080, "TIMEOUT", 0.8, 0.0)  # 평균 청산가
     codes = [c.args[0] for c in send.await_args_list]
     assert "TIMEOUT_ORDER_FAILED" not in codes
+
+
+async def test_timeout_sell_records_order_time_price(monkeypatch):
+    """TIMEOUT_SELL의 order_price에는 주문 발송 전 현재가를 기록한다 (0 고정 금지).
+
+    order_price=0이면 슬리피지 집계에서 타임아웃 매도가 전부 제외되고,
+    발송 후에 조회하면 체결 이후 가격이 기준이 되어 슬리피지가 왜곡된다.
+    """
+    calls = []
+    send_sell = AsyncMock(
+        side_effect=lambda *a, **k: calls.append("sell") or {"output": {"ODNO": "S1"}})
+    monkeypatch.setattr(f5_timeout, "_send_sell", send_sell)
+    monkeypatch.setattr(f5_timeout, "_poll_fill", AsyncMock(
+        return_value={"fill_price": 10_100, "fill_qty": 10, "fill_amt": 101_000.0}))
+    monkeypatch.setattr(
+        f5_timeout, "_fetch_current_price",
+        AsyncMock(side_effect=lambda *a, **k: calls.append("price") or 10_050.0),
+        raising=False)
+    record_order, update_fill, close_trade = _wire_db(monkeypatch)
+    monkeypatch.setattr(f5_timeout.notifier, "send", AsyncMock())
+
+    await f5_timeout.execute()
+
+    assert record_order.await_args.args[4] == 10_050.0
+    assert calls == ["price", "sell"]  # 기준가 조회는 주문 발송보다 먼저
+    close_trade.assert_awaited_once()
+
+
+async def test_timeout_sell_price_fetch_failure_still_records_and_sells(monkeypatch):
+    """현재가 조회 실패는 청산을 막지 않는다 — order_price 0.0으로 기록하고 진행."""
+    send_sell = AsyncMock(return_value={"output": {"ODNO": "S1"}})
+    monkeypatch.setattr(f5_timeout, "_send_sell", send_sell)
+    monkeypatch.setattr(f5_timeout, "_poll_fill", AsyncMock(
+        return_value={"fill_price": 10_100, "fill_qty": 10, "fill_amt": 101_000.0}))
+    monkeypatch.setattr(
+        f5_timeout, "_fetch_current_price",
+        AsyncMock(side_effect=RuntimeError("quote down")), raising=False)
+    record_order, update_fill, close_trade = _wire_db(monkeypatch)
+    monkeypatch.setattr(f5_timeout.notifier, "send", AsyncMock())
+
+    await f5_timeout.execute()
+
+    assert record_order.await_args.args[4] == 0.0
+    close_trade.assert_awaited_once()
 
 
 async def test_confirmed_fill_closes_trade_once(monkeypatch):

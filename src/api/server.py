@@ -969,7 +969,8 @@ def _improve_from_rows(
     buy_lat = [v for ph, a in slip_acc.items() if ph in _BUY_PHASES for v in a["lat"]]
     sell_pps = [p for ph, a in slip_acc.items() if ph not in _BUY_PHASES for p in a["pps"]]
     sell_lat = [v for ph, a in slip_acc.items() if ph not in _BUY_PHASES for v in a["lat"]]
-    guard_n = sum(1 for t in trades if t.get("close_reason") == "SLIPPAGE_GUARD")
+    # SLIPPAGE_GUARD는 거래를 열기 전에 daily_skips로 기록된다 — 종료 거래에는 없다.
+    guard_n = skips.get("SLIPPAGE_GUARD", 0)
     return {
         "params": _improve_params(),
         "overall": {
