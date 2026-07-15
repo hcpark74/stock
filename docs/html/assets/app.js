@@ -1094,7 +1094,6 @@ function renderStats(s) {
 
   drawDonut(s.wins, s.losses);
   drawBar(s.by_reason);
-  renderStatsHints(s);
   renderFactorGrid(s);
 }
 
@@ -1166,21 +1165,6 @@ function drawBar(byReason) {
     ctx.beginPath(); ctx.moveTo(pad.l,yp); ctx.lineTo(pad.l+cW,yp);
     ctx.strokeStyle='#363a4540'; ctx.lineWidth=1; ctx.stroke();
   });
-}
-
-function renderStatsHints(s) {
-  const el = $('stats-hints'); if(!el) return;
-  const hints = [];
-  const total = s.total || 0;
-  if(total < 20) hints.push(['표본', sampleNote(total)]);
-  if(total && s.max_loss <= -2) hints.push(['손실', `최대 손실 ${fmtPct(s.max_loss)}입니다. 손절 폭과 진입 직후 변동성을 우선 점검하세요.`]);
-  const reasons = Object.entries(s.by_reason || {});
-  const worst = reasons.slice().sort((a,b)=>(a[1].avg_pnl||0)-(b[1].avg_pnl||0))[0];
-  if(worst) hints.push(['청산', `${reasonName(worst[0])} 평균 손익이 ${fmtPct(worst[1].avg_pnl)}로 가장 낮습니다.`]);
-  const stepWin = s.by_step || {};
-  if(stepWin['스텝 없음'] && stepWin['스텝 없음'].avg_pnl < 0) hints.push(['스텝', `스텝 미도달 거래 평균이 ${fmtPct(stepWin['스텝 없음'].avg_pnl)}입니다. 진입 후보 품질이나 초기 손절 조건을 확인하세요.`]);
-  if(!hints.length) hints.push(['상태', '현재 통계에서 뚜렷한 경고 신호는 없습니다. 표본을 계속 누적하세요.']);
-  el.innerHTML = hints.map(([k,v])=>`<div class="hint-item"><div class="hint-k">${esc(k)}</div><div class="hint-v">${esc(v)}</div></div>`).join('');
 }
 
 function renderFactorGrid(s) {

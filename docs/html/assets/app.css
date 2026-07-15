@@ -242,7 +242,6 @@ tr:hover td{background:var(--s2);}
 .dleg-i{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--mu);}
 .dleg-dot{width:7px;height:7px;}
 .stats-note{margin-top:10px;border-top:1px solid var(--bd);padding-top:8px;font-size:11px;color:var(--mu);}
-.hint-list{display:grid;gap:6px;}
 .hint-item{display:grid;grid-template-columns:86px 1fr;gap:8px;align-items:start;border:1px solid var(--bd);background:rgba(255,255,255,.014);padding:8px 10px;}
 .hint-k{font-size:10px;color:var(--mu);letter-spacing:.04em;text-transform:uppercase;white-space:nowrap;}
 .hint-v{font-size:12px;color:var(--tx);line-height:1.45;}
