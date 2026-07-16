@@ -60,11 +60,18 @@ from src.modules.f3_entry import (
     PYRAMID_MIN_UP,
 )
 from src.modules.f4_tracking import (
+    F4_REST_BACKUP_ENABLED,
+    F4_REST_ONLY_WHEN_WS_STALE,
+    F4_REST_POLL_INTERVAL_SEC,
+    F4_WS_STALE_SEC,
     FORCE_TRAILING_HOUR,
     FORCE_TRAILING_MINUTE,
     HARD_STOP_RATIO,
     STEP_SIZE,
     STEP_TRAIL,
+    VI_CHECK_COOLDOWN_SEC,
+    VI_FREEZE_SUSPECT_SEC,
+    VI_WATCH_ENABLED,
 )
 from src.utils.logger import log
 
@@ -74,6 +81,9 @@ _LOG_DIR = Path(os.getenv("LOG_DIR", "data/logs"))
 _F1_SNAPSHOT_DIR = Path(F1_SNAPSHOT_DIR)
 _HTML_DIR = Path(__file__).parent.parent.parent / "docs" / "html"
 _STATUS_LOG_LIMIT = 50
+# scheduler.F5_PRECHECK_*/F5_EXEC_*와 동기 유지 (직접 import 시 apscheduler가 테스트 경로에 끌려옴)
+_F5_PRECHECK_TIME = "10:59:50"
+_F5_EXEC_TIME = "11:00"
 _ASSET_CACHE_TTL_SEC = float(os.getenv("ASSET_CACHE_TTL_SEC", "60"))
 _ASSET_CACHE: dict | None = None
 _ASSET_CACHE_AT: float = 0.0
@@ -602,6 +612,24 @@ async def api_settings() -> JSONResponse:
                 "hard_stop_pct": round(HARD_STOP_RATIO * 100, 2),
                 "step_size_pct": round(STEP_SIZE * 100, 2),
                 "step_trail_pct": round(STEP_TRAIL * 100, 2),
+                "force_trailing_time": (
+                    f"{FORCE_TRAILING_HOUR:02d}:{FORCE_TRAILING_MINUTE:02d}"
+                ),
+                "rest_backup": {
+                    "enabled": F4_REST_BACKUP_ENABLED,
+                    "only_when_ws_stale": F4_REST_ONLY_WHEN_WS_STALE,
+                    "ws_stale_sec": F4_WS_STALE_SEC,
+                    "poll_interval_sec": F4_REST_POLL_INTERVAL_SEC,
+                },
+            },
+            "f5": {
+                "timeout_time": _F5_EXEC_TIME,
+                "precheck_time": _F5_PRECHECK_TIME,
+            },
+            "vi": {
+                "watch_enabled": VI_WATCH_ENABLED,
+                "freeze_suspect_sec": VI_FREEZE_SUSPECT_SEC,
+                "check_cooldown_sec": VI_CHECK_COOLDOWN_SEC,
             },
             "safety": {
                 "real_mode_warning": mode == "REAL",
@@ -624,6 +652,8 @@ async def api_settings() -> JSONResponse:
             "f2": {"retry_f1_on_fail_supported": False},
             "f3": {},
             "f4": {},
+            "f5": {},
+            "vi": {},
             "safety": {},
         })
 
@@ -831,7 +861,6 @@ async def api_stats() -> JSONResponse:
 # ─── /api/improve ─────────────────────────────────────────────────────
 
 _BUY_PHASES = {"FIRST_BUY", "PYRAMID_BUY"}
-_F5_EXEC_TIME = "11:00"  # scheduler.F5_EXEC_H/M와 동기 유지 (직접 import 시 apscheduler가 테스트 경로에 끌려옴)
 _NEAR_MISS_MFE_PCT = 1.5  # 스텝1 근접 이탈로 보는 최소 고점 수익률(%)
 _FAST_STOP_MIN = 10  # 진입 후 이 분수 이내 손절이면 '빠른 손절'
 

@@ -1225,6 +1225,12 @@ function pctRange(v) {
   return Array.isArray(v) ? `${fmt(v[0], 1)}~${fmt(v[1], 1)}%` : '—';
 }
 
+function restBackupLabel(rb) {
+  if (!rb || !rb.enabled) return '비활성';
+  const poll = `${fmt(rb.poll_interval_sec, 1)}초 간격`;
+  return rb.only_when_ws_stale ? `WS ${fmt(rb.ws_stale_sec, 1)}초 정지 시 · ${poll}` : `상시 · ${poll}`;
+}
+
 function settingBox(title, rows) {
   return `<div class="settings-box">
     <div class="settings-title">${esc(title)}</div>
@@ -1261,10 +1267,18 @@ function renderSettings(s) {
         ['주문 전 갭 상한', `${fmt(s.f3?.order_gap_max_pct, 2)}%`],
         ['체결가 갭 상한', `${fmt(s.f3?.fill_gap_max_pct, 2)}%`],
       ]),
-      settingBox('F4 청산', [
+      settingBox('F4/F5 청산', [
         ['Hard Stop', `-${fmt(s.f4?.hard_stop_pct, 1)}%`],
         ['Step 간격', `+${fmt(s.f4?.step_size_pct, 1)}%`],
         ['Trail 폭', `-${fmt(s.f4?.step_trail_pct, 1)}%`],
+        ['강제 트레일링', s.f4?.force_trailing_time || '—'],
+        ['F5 타임아웃', s.f5?.timeout_time ? `${s.f5.timeout_time} · 점검 ${s.f5.precheck_time || '—'}` : '—'],
+      ]),
+      settingBox('시세 감시', [
+        ['VI 감시', s.vi?.watch_enabled ? '활성' : '비활성', s.vi?.watch_enabled ? 'pup' : 'pdn'],
+        ['VI 동결 의심', `무시세 ${fmt(s.vi?.freeze_suspect_sec, 0)}초`],
+        ['VI 조회 쿨다운', `${fmt(s.vi?.check_cooldown_sec, 0)}초`],
+        ['REST 백업', restBackupLabel(s.f4?.rest_backup), s.f4?.rest_backup?.enabled ? 'pup' : 'pdn'],
       ]),
       settingBox('경로/계정', [
         ['로그', s.paths?.logs || '—'],

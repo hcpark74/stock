@@ -9,6 +9,7 @@ pytest.importorskip("fastapi")
 
 import src.api.server as server  # noqa: E402 — fastapi 미설치 시 모듈 스킵 이후 임포트
 import src.modules.f1_filter as f1_filter  # noqa: E402
+import src.modules.f4_tracking as f4_tracking  # noqa: E402
 from src import db  # noqa: E402
 
 
@@ -299,6 +300,29 @@ async def test_api_settings_does_not_expose_unwired_f2_retry_flag(monkeypatch):
     assert "retry_f1_on_fail" not in payload["f2"]
     assert payload["f2"]["retry_f1_on_fail_supported"] is False
     assert not any("F2_RETRY_F1_ON_FAIL" in warning for warning in payload["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_api_settings_exposes_f4_timing_vi_and_rest_backup():
+    resp = await server.api_settings()
+    payload = json.loads(resp.body.decode("utf-8"))
+
+    assert payload["f4"]["force_trailing_time"] == "10:50"
+    assert payload["f4"]["rest_backup"] == {
+        "enabled": f4_tracking.F4_REST_BACKUP_ENABLED,
+        "only_when_ws_stale": f4_tracking.F4_REST_ONLY_WHEN_WS_STALE,
+        "ws_stale_sec": f4_tracking.F4_WS_STALE_SEC,
+        "poll_interval_sec": f4_tracking.F4_REST_POLL_INTERVAL_SEC,
+    }
+    assert payload["f5"] == {
+        "timeout_time": "11:00",
+        "precheck_time": "10:59:50",
+    }
+    assert payload["vi"] == {
+        "watch_enabled": f4_tracking.VI_WATCH_ENABLED,
+        "freeze_suspect_sec": f4_tracking.VI_FREEZE_SUSPECT_SEC,
+        "check_cooldown_sec": f4_tracking.VI_CHECK_COOLDOWN_SEC,
+    }
 
 
 @pytest.mark.asyncio
