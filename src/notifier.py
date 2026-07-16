@@ -22,6 +22,8 @@ _ACTIONABLE_ALERT_EVENTS = {
     "GAP_CHANGED",
     "F2_RETRY_EXHAUSTED",
     "MARKET_CLOSED",
+    "VI_DETECTED",
+    "VI_RELEASED",
 }
 _CRITICAL_ALERT_LEVELS = {"error"}
 _LEVEL_LABELS = {
@@ -49,6 +51,8 @@ _ALERT_TITLES = {
     "WS_KEY_REFRESH_FAIL": "실시간 접속키 갱신 실패",
     "STALE_POSITION_DETECTED": "이전 포지션 상태 확인 필요",
     "PROCESS_RESTART_DETECTED": "프로세스 재시작 감지",
+    "VI_DETECTED": "VI 발동",
+    "VI_RELEASED": "VI 해제",
 }
 
 

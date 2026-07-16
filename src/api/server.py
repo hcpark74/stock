@@ -508,6 +508,10 @@ async def api_status() -> JSONResponse:
             await _today_trade_marks()
             if s.position_status in ("HOLDING", "CLOSED") else []
         ),
+        "vi_events": (
+            live.vi_events
+            if s.position_status in ("HOLDING", "CLOSED") else []
+        ),
         **_pipeline_from_logs(logs, s.position_status),
     })
 

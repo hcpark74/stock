@@ -22,6 +22,9 @@ _minute_history: deque[dict] = deque(maxlen=_MINUTE_HISTORY_MAX)
 # WebSocket 연결 상태
 ws_connected: bool = False
 
+# 당일 VI(변동성완화장치) 이벤트 — UI 차트 구간 표시·사후 분석용
+vi_events: list[dict] = []
+
 # NTP 마지막 측정값
 ntp_offset_ms: float = -1.0
 ntp_level: str = "OK"  # OK | WARN | CRIT | ERROR
@@ -115,6 +118,33 @@ def minute_price_history(
 def clear_tick_history() -> None:
     _tick_history.clear()
     _minute_history.clear()
+    vi_events.clear()
+
+
+def record_vi_detected(event: dict) -> None:
+    """VI 발동 기록. UI가 즉시 갱신하도록 상태 신호를 보낸다."""
+    vi_events.append({
+        "ts": event.get("ts"),
+        "released_ts": None,
+        "vi_kind_code": event.get("vi_kind_code"),
+        "cntg_vi_hour": event.get("cntg_vi_hour"),
+        "vi_prc": event.get("vi_prc"),
+        "vi_stnd_prc": event.get("vi_stnd_prc"),
+        "vi_dprt": event.get("vi_dprt"),
+        "frozen_price": event.get("frozen_price"),
+    })
+    push_status()
+
+
+def record_vi_released(event: dict) -> None:
+    """가장 최근의 미해제 VI 기록에 해제 정보를 채운다."""
+    for row in reversed(vi_events):
+        if row.get("released_ts") is None:
+            row["released_ts"] = event.get("ts")
+            row["release_price"] = event.get("release_price")
+            row["duration_sec"] = event.get("duration_sec")
+            break
+    push_status()
 
 
 def push_status() -> None:

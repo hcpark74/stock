@@ -96,6 +96,20 @@ check('다운샘플: 시간순 유지', ds.every((p, i) => i === 0 || p.ts >= ds
 const small = big.slice(0, 100);
 check('다운샘플: 소량은 원본 그대로', downsampleFlowPoints(small, 700) === small);
 
+// 7) VI 이벤트 파싱 — 발동~해제 밴드, 진행 중(미해제)은 end=0
+eval(extract('parseViEvents'));
+const viParsed = parseViEvents({vi_events: [
+  {ts: '2026-07-16T09:13:45+09:00', released_ts: '2026-07-16T09:15:50+09:00', vi_prc: '7700'},
+  {ts: '2026-07-16T09:40:00+09:00', released_ts: null, vi_prc: '8400'},
+]});
+check('VI 파싱: 2건', viParsed.length === 2);
+check('VI 파싱: 발동 ts', viParsed[0].start === Date.parse('2026-07-16T09:13:45+09:00'));
+check('VI 파싱: 해제 ts', viParsed[0].end === Date.parse('2026-07-16T09:15:50+09:00'));
+check('VI 파싱: 미해제는 end=0', viParsed[1].end === 0);
+check('VI 파싱: vi_events 없음 → []', parseViEvents({}).length === 0);
+check('VI 파싱: ts 불량 행 제거',
+  parseViEvents({vi_events: [{ts: null, vi_prc: '1'}]}).length === 0);
+
 Date.now = realNow;
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures ? 1 : 0);

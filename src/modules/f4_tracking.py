@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from src import db, live, notifier, state
 from src.api import kis_rest, kis_ws
+from src.modules.vi_watch import ViWatch
 from src.utils.logger import log
 from src.utils.spike_filter import SpikeFilter
 
@@ -25,6 +26,9 @@ F4_WS_STALE_SEC = float(os.getenv("F4_WS_STALE_SEC", "2.0"))
 F4_REST_POLL_INTERVAL_SEC = float(os.getenv("F4_REST_POLL_INTERVAL_SEC", "1.0"))
 F4_FILL_POLL_INTERVAL_SEC = float(os.getenv("F4_FILL_POLL_INTERVAL_SEC", "0.5"))
 F4_STATE_PERSIST_INTERVAL_SEC = float(os.getenv("F4_STATE_PERSIST_INTERVAL_SEC", "1.0"))
+VI_WATCH_ENABLED = os.getenv("VI_WATCH_ENABLED", "1") == "1"
+VI_FREEZE_SUSPECT_SEC = float(os.getenv("VI_FREEZE_SUSPECT_SEC", "10"))
+VI_CHECK_COOLDOWN_SEC = float(os.getenv("VI_CHECK_COOLDOWN_SEC", "60"))
 
 _SELL_TR = {"REAL": "TTTC0011U", "PAPER": "VTTC0011U"}
 _CCLD_TR = {"REAL": "TTTC0081R", "PAPER": "VTTC0081R"}
@@ -105,12 +109,21 @@ async def run() -> None:
             return True
         return (time.monotonic() - last_ws_tick_at) >= F4_WS_STALE_SEC
 
+    vi_watch = _make_vi_watch(ticker)
+
     async def on_tick(tick: dict) -> None:
         nonlocal last_ws_tick_at
         live.ws_connected = True
         last_ws_tick_at = time.monotonic()
         live.push_tick(tick["price"], ticker=ticker)
         await _process_tick(tick["price"], spike_filter)
+        if vi_watch is not None:
+            try:
+                await _handle_vi_events(
+                    await vi_watch.on_price(tick["price"], "ws"), ticker)
+            except Exception as e:
+                # 관측 전용 — VI 감시 오류가 스탑 추적을 깨선 안 된다
+                log("VI_WATCH_ERROR", level="WARN", ticker=ticker, error=repr(e))
 
     ws_task = asyncio.create_task(kis_ws.subscribe(
         ticker, on_tick,
@@ -118,7 +131,8 @@ async def run() -> None:
     ))
     tasks = [ws_task]
     if F4_REST_BACKUP_ENABLED:
-        tasks.append(asyncio.create_task(_run_rest_price_backup(ticker, spike_filter, is_ws_stale)))
+        tasks.append(asyncio.create_task(
+            _run_rest_price_backup(ticker, spike_filter, is_ws_stale, vi_watch=vi_watch)))
     try:
         # 모니터 태스크 하나가 예외로 죽어도 나머지 태스크는 유지한다.
         # 정상 종료(HOLDING 해제)만 감시 종료로 취급.
@@ -159,7 +173,9 @@ async def run() -> None:
         live.ws_connected = False
 
 
-async def _run_rest_price_backup(ticker: str, spike_filter: SpikeFilter, is_ws_stale=None) -> None:
+async def _run_rest_price_backup(
+    ticker: str, spike_filter: SpikeFilter, is_ws_stale=None, vi_watch: ViWatch | None = None,
+) -> None:
     """REST backup price monitor while HOLDING. Poll only when WS is stale by default."""
     log(
         "F4_REST_BACKUP_START",
@@ -178,12 +194,88 @@ async def _run_rest_price_backup(ticker: str, spike_filter: SpikeFilter, is_ws_s
             if price > 0:
                 live.push_tick(price, ticker=ticker)
                 await _process_tick(price, spike_filter)
+                if vi_watch is not None:
+                    await _handle_vi_events(
+                        await vi_watch.on_price(price, "rest"), ticker)
         except asyncio.CancelledError:
             raise
         except Exception as e:
             # 백업 폴러가 죽으면 WS까지 함께 취소되므로 절대 전파하지 않는다
             log("F4_REST_BACKUP_ERROR", level="WARN", ticker=ticker, error=repr(e))
         await asyncio.sleep(F4_REST_POLL_INTERVAL_SEC)
+
+
+# ── VI 감지 (관측 전용 — PRD 외 가시성 기능) ─────────────────────────
+
+def _make_vi_watch(ticker: str) -> ViWatch | None:
+    if not VI_WATCH_ENABLED:
+        return None
+    return ViWatch(
+        ticker,
+        lambda: _fetch_vi_status(ticker),
+        freeze_sec=VI_FREEZE_SUSPECT_SEC,
+        cooldown_sec=VI_CHECK_COOLDOWN_SEC,
+    )
+
+
+async def _fetch_vi_status(ticker: str) -> dict:
+    """변동성완화장치(VI) 현황 조회 (FHPST01390000)."""
+    resp = await kis_rest.get(
+        "/uapi/domestic-stock/v1/quotations/inquire-vi-status",
+        tr_id="FHPST01390000",
+        params={
+            "FID_DIV_CLS_CODE": "0",
+            "FID_COND_SCR_DIV_CODE": "20139",
+            "FID_MRKT_CLS_CODE": "0",
+            "FID_INPUT_ISCD": ticker,
+            "FID_RANK_SORT_CLS_CODE": "0",
+            "FID_INPUT_DATE_1": datetime.now(KST).strftime("%Y%m%d"),
+            "FID_TRGT_CLS_CODE": "",
+            "FID_TRGT_EXLS_CLS_CODE": "",
+        },
+    )
+    if str(resp.get("rt_cd", "")) != "0":
+        raise RuntimeError(
+            f"VI status query failed: {resp.get('msg_cd')} {resp.get('msg1')}")
+    return resp
+
+
+async def _handle_vi_events(events: list[dict], ticker: str) -> None:
+    """ViWatch 이벤트를 로그·텔레그램·live(UI)로 전파한다."""
+    for ev in events:
+        etype = ev.get("type")
+        fields = {k: v for k, v in ev.items() if k not in ("type", "ts")}
+        if etype == "VI_DETECTED":
+            log("VI_DETECTED", level="WARN", ticker=ticker, **fields)
+            live.record_vi_detected(ev)
+            await notifier.send(
+                "VI_DETECTED",
+                level="WARN",
+                message=(
+                    f"VI 발동 — 발동가 {ev.get('vi_prc')}원, "
+                    f"기준가 {ev.get('vi_stnd_prc')}원({ev.get('vi_dprt')}%). "
+                    f"2분 단일가 정지, 해제 시 재알림."
+                ),
+                ticker=ticker,
+            )
+        elif etype == "VI_RELEASED":
+            log("VI_RELEASED", level="INFO", ticker=ticker, **fields)
+            live.record_vi_released(ev)
+            duration = ev.get("duration_sec") or 0
+            await notifier.send(
+                "VI_RELEASED",
+                level="INFO",
+                message=(
+                    f"VI 해제 — 재개가 {ev.get('release_price')}원, "
+                    f"정지 {duration:.0f}초. 스탑 감시 계속."
+                ),
+                ticker=ticker,
+            )
+        elif etype == "VI_CHECK_FAILED":
+            log("VI_CHECK_FAILED", level="WARN", ticker=ticker, **fields)
+        elif etype == "VI_CHECK_NEGATIVE":
+            # 가격 동결인데 VI 아님 — 한산 or 실제 WS 장애 후보. 로그만 남긴다.
+            log("VI_CHECK_NEGATIVE", level="INFO", ticker=ticker, **fields)
 
 
 async def _process_tick(price: float, spike_filter: SpikeFilter) -> None:

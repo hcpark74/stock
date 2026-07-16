@@ -184,6 +184,35 @@ async def test_status_includes_tick_history_while_holding_and_closed(monkeypatch
     server.live.clear_tick_history()
 
 
+async def test_status_includes_vi_events_while_holding_and_closed(monkeypatch):
+    s = server.state.get()
+    server.live.clear_tick_history()
+    server.live.record_vi_detected({
+        "ts": "2026-07-16T09:13:45+09:00", "frozen_price": 7690.0,
+        "vi_kind_code": "1", "cntg_vi_hour": "091333",
+        "vi_prc": "7700", "vi_stnd_prc": "7000", "vi_dprt": "10.00",
+    })
+    monkeypatch.setattr(server, "_read_today_logs", lambda limit=None: [])
+    monkeypatch.setattr(s, "position_status", "HOLDING")
+    monkeypatch.setattr(s, "target_ticker", "004310")
+    monkeypatch.setattr(s, "entry_price", 6841.0)
+    monkeypatch.setattr(s, "entry_at", "2026-07-16T09:01:16+09:00")
+
+    body = (await server.api_status()).body.decode("utf-8")
+    assert '"vi_events"' in body
+    assert '"vi_prc":"7700"' in body
+
+    monkeypatch.setattr(s, "position_status", "CLOSED")
+    body = (await server.api_status()).body.decode("utf-8")
+    assert '"vi_prc":"7700"' in body
+
+    monkeypatch.setattr(s, "position_status", "IDLE")
+    body = (await server.api_status()).body.decode("utf-8")
+    assert '"vi_events":[]' in body
+
+    server.live.clear_tick_history()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("kis_mode", "expected_fallback"),

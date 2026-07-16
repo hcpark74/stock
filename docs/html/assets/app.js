@@ -462,6 +462,18 @@ function parseTradeMarks(d) {
       && (!d?.ticker || String(m.ticker) === String(d.ticker)));
 }
 
+function parseViEvents(d) {
+  // /api/status vi_events(당일 VI 발동/해제) → 차트 음영 밴드.
+  // released_ts가 없으면 진행 중(end=0) — 그리기 쪽에서 창 끝까지 칠한다.
+  return (Array.isArray(d?.vi_events) ? d.vi_events : [])
+    .map(v => ({
+      start: Date.parse(v.ts) || 0,
+      end: v.released_ts ? (Date.parse(v.released_ts) || 0) : 0,
+      prc: Number(v.vi_prc || 0),
+    }))
+    .filter(v => v.start > 0);
+}
+
 function priceFlowViewWindow(d, marks) {
   // 보유 중: 증권사 차트처럼 "지금"이 오른쪽 끝인 최근 20분 슬라이딩 창.
   // 청산 후: 진입~마지막 체결/tick 전체 구간을 고정해 매수/매도를 함께 리뷰.
@@ -561,6 +573,24 @@ function drawPriceFlow(d) {
   };
 
   drawGrid();
+
+  // VI(변동성완화장치) 구간 — 발동~해제 음영 밴드 (가격선 아래 레이어)
+  for(const vi of parseViEvents(d)) {
+    const viEnd = vi.end || (holding ? Date.now() : endTs);
+    if(viEnd < startTs || vi.start > endTs) continue;
+    const x1 = xAtTs(Math.max(vi.start, startTs));
+    const x2 = xAtTs(Math.min(viEnd, endTs));
+    ctx.fillStyle = themeVal('rgba(239,83,80,.10)', 'rgba(239,83,80,.16)');
+    ctx.fillRect(x1, pad.t, Math.max(2, x2 - x1), chartH);
+    if(x2 - x1 >= 18) {
+      ctx.fillStyle = themeVal('rgba(239,83,80,.85)', 'rgba(239,83,80,.9)');
+      ctx.font = '10px Noto Sans KR,sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillText('VI', (x1 + x2) / 2, pad.t + 2);
+      ctx.textBaseline = 'alphabetic';
+    }
+  }
 
   // tick 버퍼(5,000건)가 20분을 못 담는 활발한 종목 대비:
   // 첫 tick 이전 구간은 분 단위 이력으로 채우고, 그 뒤는 원시 tick으로 그린다.
