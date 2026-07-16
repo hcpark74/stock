@@ -204,6 +204,68 @@ async def test_ws_tick_during_pending_check_discards_stale_result():
     assert w.vi_active is False
 
 
+async def test_ws_gap_then_same_price_refreeze_does_not_reuse_stale_check():
+    """[P2 회귀] 진행 중 조회가 WS 재개로 무효화된 뒤, WS가 다시 stale해지고
+    같은 가격으로 재동결돼도 낡은 결과로 VI_DETECTED를 내면 안 된다."""
+    clock = FakeClock()
+    gate = asyncio.Event()
+    calls = 0
+
+    async def slow_check():
+        nonlocal calls
+        calls += 1
+        await gate.wait()
+        return ACTIVE_PAYLOAD
+
+    w = _watch(slow_check, clock)
+    await w.on_price(7690.0, source="rest")
+    clock.advance(10)
+    await w.on_price(7690.0, source="rest")  # 조회 #1 스폰 (pending)
+
+    await w.on_price(7690.0, source="ws")    # 체결 재개 → 조회 #1 무효
+    gate.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)                   # 조회 #1 종료(무효 상태)
+
+    # WS 다시 stale → REST가 같은 가격으로 재동결
+    events = await w.on_price(7690.0, source="rest")
+    assert events == []                      # 낡은 결과 소비 금지
+    assert w.vi_active is False
+
+    # 쿨다운 경과 후 새 동결 에피소드에서는 새 조회로 정상 감지
+    clock.advance(61)
+    await w.on_price(7690.0, source="rest")  # 새 조회 스폰
+    events = await _settle(w, 7690.0)
+    assert [e["type"] for e in events] == ["VI_DETECTED"]
+    # 조회 #1은 실행 전에 취소됐으므로(스폰 직후 무효화) 실제 실행은 새 조회 1회뿐
+    assert calls == 1
+
+
+async def test_rest_price_move_during_pending_check_invalidates_it():
+    """진행 중 조회 도중 REST 가격이 움직였다가 같은 가격으로 재동결돼도
+    낡은 결과를 쓰지 않는다."""
+    clock = FakeClock()
+    gate = asyncio.Event()
+
+    async def slow_check():
+        await gate.wait()
+        return ACTIVE_PAYLOAD
+
+    w = _watch(slow_check, clock)
+    await w.on_price(7690.0, source="rest")
+    clock.advance(10)
+    await w.on_price(7690.0, source="rest")  # 스폰 (pending)
+
+    await w.on_price(7700.0, source="rest")  # 가격 변동 → 동결 깨짐, 조회 무효
+    gate.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    events = await w.on_price(7690.0, source="rest")  # 같은 가격 재동결
+    assert events == []
+    assert w.vi_active is False
+
+
 # ── 해제 감지 ────────────────────────────────────────────────────────
 
 async def _activate(w: ViWatch, clock: FakeClock, price: float = 7690.0):

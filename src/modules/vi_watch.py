@@ -102,14 +102,15 @@ class ViWatch:
             return []
 
         if source == "ws":
-            # WS 틱이 흐르는 동안은 동결 아님. 떠 있는 조회 결과도 낡은 것이므로 폐기.
+            # WS 틱이 흐르는 동안은 동결 아님. 진행 중이든 완료든 조회는 그 동결
+            # 에피소드에 속한 것이므로 즉시 무효화한다 — 나중에 같은 가격으로
+            # 재동결돼도 낡은 결과가 되살아나면 안 된다.
             self._reset_freeze()
-            if self._check_task is not None and self._check_task.done():
-                self._check_task = None
-                self._pending_frozen_price = None
+            self._invalidate_pending_check()
             return []
 
         if self._frozen_price is None or price != self._frozen_price:
+            self._invalidate_pending_check()  # 동결 깨짐 — 진행 중 조회 무효
             self._frozen_price = price
             self._frozen_since = now
 
@@ -190,6 +191,16 @@ class ViWatch:
         self._active_price = None
         self._reset_freeze()
         return event
+
+    def _invalidate_pending_check(self) -> None:
+        """동결 에피소드가 끝났을 때 그에 속한 조회를 취소·폐기한다.
+
+        취소된 태스크는 참조를 지우므로 어떤 경로에서도 소비되지 않는다.
+        """
+        if self._check_task is not None:
+            self._check_task.cancel()
+            self._check_task = None
+            self._pending_frozen_price = None
 
     def _reset_freeze(self) -> None:
         self._frozen_price = None
