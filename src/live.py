@@ -122,9 +122,13 @@ def clear_tick_history() -> None:
 
 
 def record_vi_detected(event: dict) -> None:
-    """VI 발동 기록. UI가 즉시 갱신하도록 상태 신호를 보낸다."""
+    """VI 발동 기록. UI가 즉시 갱신하도록 상태 신호를 보낸다.
+
+    ts는 API 기록 기준 실제 발동 시각, detected_ts는 시스템 감지 시각.
+    """
     vi_events.append({
         "ts": event.get("ts"),
+        "detected_ts": event.get("detected_ts"),
         "released_ts": None,
         "vi_kind_code": event.get("vi_kind_code"),
         "cntg_vi_hour": event.get("cntg_vi_hour"),

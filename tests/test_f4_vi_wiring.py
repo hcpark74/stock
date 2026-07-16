@@ -37,13 +37,16 @@ def _spike_pass() -> MagicMock:
 
 
 DETECTED_EVENT = {
-    "type": "VI_DETECTED", "ts": "2026-07-16T09:13:45+09:00",
+    "type": "VI_DETECTED",
+    "ts": "2026-07-16T09:13:33+09:00",           # API 기록 기준 실제 발동 시각
+    "detected_ts": "2026-07-16T09:13:45+09:00",  # 시스템이 알아챈 시각
     "frozen_price": 7690.0, "vi_kind_code": "1", "cntg_vi_hour": "091333",
+    "bsop_date": "20260716",
     "vi_prc": "7700", "vi_stnd_prc": "7000", "vi_dprt": "10.00", "vi_count": "1",
 }
 RELEASED_EVENT = {
     "type": "VI_RELEASED", "ts": "2026-07-16T09:15:50+09:00",
-    "release_price": 7630.0, "source": "rest", "duration_sec": 125.0,
+    "release_price": 7630.0, "source": "rest", "duration_sec": 137.0,
     "vi_prc": "7700", "vi_stnd_prc": "7000",
 }
 
@@ -78,6 +81,7 @@ def test_live_records_vi_detected_and_released():
     assert len(live.vi_events) == 1
     row = live.vi_events[0]
     assert row["ts"] == DETECTED_EVENT["ts"]
+    assert row["detected_ts"] == DETECTED_EVENT["detected_ts"]
     assert row["vi_prc"] == "7700"
     assert row.get("released_ts") is None
 
@@ -85,7 +89,7 @@ def test_live_records_vi_detected_and_released():
     row = live.vi_events[0]
     assert row["released_ts"] == RELEASED_EVENT["ts"]
     assert row["release_price"] == 7630.0
-    assert row["duration_sec"] == 125.0
+    assert row["duration_sec"] == 137.0
 
 
 def test_clear_tick_history_clears_vi_events():
@@ -167,6 +171,39 @@ async def test_rest_backup_feeds_vi_watch(monkeypatch):
 
     assert calls == [(7690.0, "rest"), (7690.0, "rest")]
     assert len(live.vi_events) == 1  # DETECTED가 live에 반영됨
+
+
+async def test_rest_backup_keeps_polling_while_vi_check_hangs(monkeypatch):
+    """[P1 회귀] VI 조회가 무기한 지연돼도 REST 손절 감시는 멈추지 않는다."""
+    from src.modules.vi_watch import ViWatch
+
+    fetch_count = 0
+    gate = asyncio.Event()  # 절대 열리지 않는 VI 조회
+
+    async def hanging_check():
+        await gate.wait()
+        return {}
+
+    async def fake_fetch(_ticker):
+        nonlocal fetch_count
+        fetch_count += 1
+        if fetch_count >= 5:
+            _state_mod.get().position_status = "CLOSED"
+        return 7690.0  # 동결 가격 — 즉시 VI 의심 상태 진입
+
+    vi_watch = ViWatch(TICKER, hanging_check, freeze_sec=0.0, cooldown_sec=60.0)
+    monkeypatch.setattr(f4, "F4_REST_POLL_INTERVAL_SEC", 0.01)
+    monkeypatch.setattr(f4, "_fetch_current_price", fake_fetch)
+    monkeypatch.setattr(f4, "_process_tick", AsyncMock())
+    monkeypatch.setattr(f4, "log", lambda *a, **kw: None)
+
+    # 조회가 영원히 안 끝나도 폴링 루프는 5회 이상 돌고 정상 종료해야 한다
+    await asyncio.wait_for(
+        f4._run_rest_price_backup(TICKER, _spike_pass(), None, vi_watch=vi_watch), 2)
+
+    assert fetch_count >= 5
+    assert vi_watch.vi_active is False
+    gate.set()  # 테스트 종료 전 태스크 정리
 
 
 # ── run() → WS 틱 배선 ───────────────────────────────────────────────

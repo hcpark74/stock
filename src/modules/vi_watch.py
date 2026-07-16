@@ -3,11 +3,17 @@
 동작 원리 (2026-07-16 현대약품 VI 인시던트 기반):
 VI 발동 중에는 체결이 없어 WS 틱이 끊기고, F4 REST 백업이 마지막 체결가를
 반복 조회한다. "REST 가격이 freeze_sec 이상 동결"을 의심 신호로 보고
-VI 현황 API(FHPST01390000)를 1회 조회해 공식 발동 기록을 확인한다.
+VI 현황 API(FHPST01390000)로 공식 발동 기록을 확인한다.
+
+핵심 제약 — on_price는 절대 API 응답을 기다리지 않는다. WS stale 상황에서
+REST 폴링 루프가 유일한 손절 감시 경로이므로, VI 조회(타임아웃 15초·재시도)를
+동기로 기다리면 그동안 스탑 처리가 멈춘다. 조회는 백그라운드 태스크로 띄우고
+결과는 다음 폴에서 소비한다.
 
 이벤트는 dict 리스트로 반환만 하고 로그·알림·UI 반영은 호출자(F4)가 한다.
 """
 
+import asyncio
 import time
 from datetime import datetime
 from typing import Any, Awaitable, Callable
@@ -15,7 +21,10 @@ from zoneinfo import ZoneInfo
 
 KST = ZoneInfo("Asia/Seoul")
 
-_INFO_KEYS = ("vi_kind_code", "cntg_vi_hour", "vi_prc", "vi_stnd_prc", "vi_dprt", "vi_count")
+_INFO_KEYS = (
+    "vi_kind_code", "cntg_vi_hour", "bsop_date",
+    "vi_prc", "vi_stnd_prc", "vi_dprt", "vi_count",
+)
 
 
 def parse_vi_payload(resp: dict, ticker: str) -> dict | None:
@@ -38,6 +47,18 @@ def parse_vi_payload(resp: dict, ticker: str) -> dict | None:
     return None
 
 
+def _vi_start_from_api(info: dict, fallback: datetime) -> datetime:
+    """API의 영업일+발동시각(bsop_date+cntg_vi_hour) → 실제 발동 시각.
+
+    파싱 불가 시 감지 시각으로 대체한다 — 차트가 비는 것보다는 늦은 시작이 낫다.
+    """
+    raw = f"{info.get('bsop_date') or ''}{info.get('cntg_vi_hour') or ''}"
+    try:
+        return datetime.strptime(raw, "%Y%m%d%H%M%S").replace(tzinfo=KST)
+    except ValueError:
+        return fallback
+
+
 class ViWatch:
     """단일 종목 VI 감시. F4가 관측한 가격을 on_price로 전달받는다."""
 
@@ -49,6 +70,7 @@ class ViWatch:
         freeze_sec: float = 10.0,
         cooldown_sec: float = 60.0,
         monotonic: Callable[[], float] = time.monotonic,
+        now_fn: Callable[[], datetime] | None = None,
     ):
         self.ticker = ticker
         self.vi_active = False
@@ -56,73 +78,115 @@ class ViWatch:
         self._freeze_sec = freeze_sec
         self._cooldown_sec = cooldown_sec
         self._monotonic = monotonic
+        self._now_fn = now_fn or (lambda: datetime.now(KST))
         self._frozen_price: float | None = None
         self._frozen_since: float | None = None
         self._cooldown_until = 0.0
+        self._check_task: asyncio.Task | None = None
+        self._pending_frozen_price: float | None = None
         self._active_info: dict = {}
-        self._active_since = 0.0
+        self._active_start: datetime | None = None
         self._active_price: float | None = None
 
     async def on_price(self, price: float, source: str) -> list[dict]:
-        """가격 관측(source: 'ws' | 'rest'). 발생한 VI 이벤트 목록을 반환."""
+        """가격 관측(source: 'ws' | 'rest'). 발생한 VI 이벤트 목록을 반환.
+
+        API를 기다리지 않으므로 항상 즉시 반환한다.
+        """
         now = self._monotonic()
 
         if self.vi_active:
             # WS 틱 도착 = 체결 재개, REST 가격 변동 = 단일가 해제 체결
             if source == "ws" or price != self._active_price:
-                return [self._release(price, source, now)]
+                return [self._release(price, source)]
             return []
 
         if source == "ws":
-            # WS 틱이 흐르는 동안은 동결 아님
+            # WS 틱이 흐르는 동안은 동결 아님. 떠 있는 조회 결과도 낡은 것이므로 폐기.
             self._reset_freeze()
+            if self._check_task is not None and self._check_task.done():
+                self._check_task = None
+                self._pending_frozen_price = None
             return []
 
         if self._frozen_price is None or price != self._frozen_price:
             self._frozen_price = price
             self._frozen_since = now
-            return []
+
+        if self._check_task is not None:
+            if not self._check_task.done():
+                return []  # 조회 진행 중 — 감시 루프는 계속 돈다
+            return self._consume_check()
 
         assert self._frozen_since is not None
         if now - self._frozen_since < self._freeze_sec or now < self._cooldown_until:
             return []
 
+        # 의심 확정 — 백그라운드 조회 스폰 (여기서 기다리지 않는다)
         self._cooldown_until = now + self._cooldown_sec
-        try:
-            resp = await self._check_vi()
-        except Exception as e:
-            return [{"type": "VI_CHECK_FAILED", "error": repr(e)}]
+        self._pending_frozen_price = price
+        self._check_task = asyncio.create_task(self._run_check())
+        return []
 
-        info = parse_vi_payload(resp, self.ticker)
+    async def _run_check(self) -> dict:
+        """VI 조회 실행. 예외를 값으로 캡처해 태스크가 절대 예외로 끝나지 않는다."""
+        try:
+            return {"ok": True, "resp": await self._check_vi()}
+        except Exception as e:
+            return {"ok": False, "error": repr(e)}
+
+    def _consume_check(self) -> list[dict]:
+        assert self._check_task is not None
+        result = self._check_task.result()
+        self._check_task = None
+        pending_price, self._pending_frozen_price = self._pending_frozen_price, None
+
+        if pending_price != self._frozen_price:
+            return []  # 조회 중 동결이 깨짐 — 낡은 결과 폐기
+
+        if not result["ok"]:
+            return [{"type": "VI_CHECK_FAILED", "error": result["error"]}]
+
+        info = parse_vi_payload(result["resp"], self.ticker)
+        detected_at = self._now_fn()
         if info is None:
+            frozen_sec = (
+                round(self._monotonic() - self._frozen_since, 1)
+                if self._frozen_since is not None else None
+            )
             return [{
                 "type": "VI_CHECK_NEGATIVE",
-                "frozen_price": price,
-                "frozen_sec": round(now - self._frozen_since, 1),
+                "frozen_price": pending_price,
+                "frozen_sec": frozen_sec,
             }]
 
+        start = _vi_start_from_api(info, detected_at)
         self.vi_active = True
         self._active_info = info
-        self._active_since = now
-        self._active_price = price
+        self._active_start = start
+        self._active_price = pending_price
         return [{
             "type": "VI_DETECTED",
-            "ts": datetime.now(KST).isoformat(),
-            "frozen_price": price,
+            "ts": start.isoformat(),               # 실제 발동 시각 (API 기록)
+            "detected_ts": detected_at.isoformat(),  # 시스템이 알아챈 시각
+            "frozen_price": pending_price,
             **info,
         }]
 
-    def _release(self, price: float, source: str, now: float) -> dict:
+    def _release(self, price: float, source: str) -> dict:
+        released_at = self._now_fn()
+        start = self._active_start or released_at
         event = {
             "type": "VI_RELEASED",
-            "ts": datetime.now(KST).isoformat(),
+            "ts": released_at.isoformat(),
             "release_price": price,
             "source": source,
-            "duration_sec": round(now - self._active_since, 1),
+            "duration_sec": round((released_at - start).total_seconds(), 1),
             **self._active_info,
         }
         self.vi_active = False
         self._active_info = {}
+        self._active_start = None
         self._active_price = None
         self._reset_freeze()
         return event
