@@ -35,6 +35,7 @@ _closing_task: asyncio.Task | None = None
 
 _REARM_INTERVAL_SEC = 0.5
 _REARM_HOLDING_INTERVAL_SEC = 5.0
+_REARM_ERROR_INTERVAL_SEC = 5.0
 
 
 async def run_forever() -> None:
@@ -44,9 +45,29 @@ async def run_forever() -> None:
     거래일을 넘겨 살아 있는 프로세스에서는 이 루프가 다음 거래일의
     HOLDING을 다시 기다린다. HOLDING인 채로 사이클이 끝나는 경우는
     모니터 전원 비정상 종료뿐이므로, 재구독 폭주를 막는 백오프를 둔다.
+
+    run()이 예외로 죽어도 루프는 유지한다 — main()은 이 태스크를 감시하지
+    않으므로 여기서 전파되면 손절 감시가 영구히 사라진다. CancelledError는
+    Exception이 아니므로 잡히지 않고 그대로 전파된다(종료 경로).
     """
     while True:
-        await run()
+        try:
+            await run()
+        except Exception as e:
+            log("F4_RUN_FOREVER_ERROR", level="CRIT", error=repr(e))
+            try:
+                await notifier.send(
+                    "F4_RUN_FOREVER_ERROR",
+                    level="CRIT",
+                    message=(
+                        f"F4 사이클 비정상 종료 — "
+                        f"{_REARM_ERROR_INTERVAL_SEC:.0f}초 후 재시작: {e!r}"
+                    ),
+                )
+            except Exception:
+                pass  # 알림 실패가 상주 루프를 죽여선 안 된다
+            await asyncio.sleep(_REARM_ERROR_INTERVAL_SEC)
+            continue
         if state.get().position_status == "HOLDING":
             await asyncio.sleep(_REARM_HOLDING_INTERVAL_SEC)
         else:

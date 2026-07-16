@@ -100,6 +100,7 @@ EVENT_LABELS = {
     "F4_CLOSE_TASK_CANCELLED": "F4 청산 태스크 취소(F4 Close Task Cancelled)",
     "F4_CLOSE_RECORD_ERROR": "F4 청산 기록 오류(F4 Close Record Error)",
     "F4_MONITOR_TASK_ERROR": "F4 모니터 태스크 오류(F4 Monitor Task Error)",
+    "F4_RUN_FOREVER_ERROR": "F4 상주 루프 오류(F4 Resident Loop Error)",
     "F4_STATE_PERSISTED": "F4 추적 상태 저장(F4 State Persisted)",
     "F4_STATE_PERSIST_ERROR": "F4 추적 상태 저장 오류(F4 State Persist Error)",
     "F4_DB_PROGRESS_ERROR": "F4 DB 진행 상태 저장 오류(F4 DB Progress Error)",

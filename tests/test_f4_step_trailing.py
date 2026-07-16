@@ -802,6 +802,83 @@ async def test_run_forever_rearms_for_next_trading_day_after_close(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_forever_restarts_with_alert_after_run_exception(monkeypatch):
+    """[P1 회귀] run()이 예외로 죽어도 상주 루프는 CRIT 로그·알림 후 재시작한다."""
+    import asyncio as real_asyncio
+    import contextlib
+
+    import src.modules.f4_tracking as f4
+
+    calls = 0
+    recovered = real_asyncio.Event()
+    events = []
+    notify = AsyncMock()
+
+    async def flaky_run():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("ws boom")
+        recovered.set()
+
+    monkeypatch.setattr(f4, "run", flaky_run)
+    monkeypatch.setattr(f4, "_REARM_INTERVAL_SEC", 0.01, raising=False)
+    monkeypatch.setattr(f4, "_REARM_HOLDING_INTERVAL_SEC", 0.01, raising=False)
+    monkeypatch.setattr(f4, "_REARM_ERROR_INTERVAL_SEC", 0.01, raising=False)
+    monkeypatch.setattr(f4.notifier, "send", notify)
+    monkeypatch.setattr(f4, "log", lambda event, **kw: events.append((event, kw)))
+
+    task = real_asyncio.create_task(f4.run_forever())
+    try:
+        await real_asyncio.wait_for(recovered.wait(), 1)
+    finally:
+        task.cancel()
+        with contextlib.suppress(real_asyncio.CancelledError):
+            await task
+
+    assert calls >= 2
+    assert "F4_RUN_FOREVER_ERROR" in [event for event, _ in events]
+    notify.assert_awaited()
+    assert notify.await_args.args[0] == "F4_RUN_FOREVER_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_run_forever_survives_notifier_failure_on_run_exception(monkeypatch):
+    """예외 알림 전송 자체가 실패해도 상주 루프는 죽지 않는다."""
+    import asyncio as real_asyncio
+    import contextlib
+
+    import src.modules.f4_tracking as f4
+
+    calls = 0
+    recovered = real_asyncio.Event()
+
+    async def flaky_run():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("ws boom")
+        recovered.set()
+
+    monkeypatch.setattr(f4, "run", flaky_run)
+    monkeypatch.setattr(f4, "_REARM_INTERVAL_SEC", 0.01, raising=False)
+    monkeypatch.setattr(f4, "_REARM_HOLDING_INTERVAL_SEC", 0.01, raising=False)
+    monkeypatch.setattr(f4, "_REARM_ERROR_INTERVAL_SEC", 0.01, raising=False)
+    monkeypatch.setattr(f4.notifier, "send", AsyncMock(side_effect=RuntimeError("telegram down")))
+    monkeypatch.setattr(f4, "log", lambda *args, **kwargs: None)
+
+    task = real_asyncio.create_task(f4.run_forever())
+    try:
+        await real_asyncio.wait_for(recovered.wait(), 1)
+    finally:
+        task.cancel()
+        with contextlib.suppress(real_asyncio.CancelledError):
+            await task
+
+    assert calls >= 2
+
+
+@pytest.mark.asyncio
 async def test_run_forever_rearms_when_cycle_exits_while_holding(monkeypatch):
     """모니터 전원이 HOLDING 중 비정상 종료해도 루프가 사이클을 재시작한다."""
     import asyncio as real_asyncio
