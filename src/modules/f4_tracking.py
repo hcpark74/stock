@@ -33,11 +33,30 @@ _close_in_progress = False
 _close_in_progress_warned = False
 _closing_task: asyncio.Task | None = None
 
+_REARM_INTERVAL_SEC = 0.5
+_REARM_HOLDING_INTERVAL_SEC = 5.0
+
+
+async def run_forever() -> None:
+    """F4 상주 진입점 — main.py에서 asyncio.create_task로 구동.
+
+    run()은 한 사이클(HOLDING 대기 → 추적 → 청산)만 수행하고 반환하므로,
+    거래일을 넘겨 살아 있는 프로세스에서는 이 루프가 다음 거래일의
+    HOLDING을 다시 기다린다. HOLDING인 채로 사이클이 끝나는 경우는
+    모니터 전원 비정상 종료뿐이므로, 재구독 폭주를 막는 백오프를 둔다.
+    """
+    while True:
+        await run()
+        if state.get().position_status == "HOLDING":
+            await asyncio.sleep(_REARM_HOLDING_INTERVAL_SEC)
+        else:
+            await asyncio.sleep(_REARM_INTERVAL_SEC)
+
 
 async def run() -> None:
     """
-    F4 진입점 — WebSocket 구독 → 실패 시 REST 폴링 fallback.
-    main.py에서 asyncio.create_task(f4_tracking.run()) 로 구동.
+    F4 단일 사이클 — WebSocket 구독 → 실패 시 REST 폴링 fallback.
+    시작 시점 상태가 CLOSED면(당일 거래 종료) 즉시 반환한다.
     """
     s = state.get()
     # HOLDING 상태가 될 때까지 대기

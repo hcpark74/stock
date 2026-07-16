@@ -780,8 +780,10 @@ async def main() -> None:
         await _check_market_holiday()
     await _recover_state()
 
-    # F4: WebSocket 기반 장기 실행 (HOLDING 전까지 내부에서 대기)
-    f4_task = asyncio.create_task(f4_tracking.run(), name="f4_tracking")
+    # F4: 상주 루프 — 거래일마다 HOLDING을 기다렸다가 추적한다.
+    # 일회성 run()을 직접 띄우면 CLOSED 상태로 복원된 뒤 영구 종료되어
+    # 다음 거래일 포지션을 아무도 추적하지 않는다 (2026-07-16 인시던트).
+    f4_task = asyncio.create_task(f4_tracking.run_forever(), name="f4_tracking")
 
     # Telegram 알림 워커
     notifier_task = None

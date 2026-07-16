@@ -703,3 +703,129 @@ async def test_trigger_close_warns_only_once_while_close_is_in_progress(monkeypa
 
     assert [event for event, _ in events] == ["F4_CLOSE_ALREADY_IN_PROGRESS"]
     assert f4._close_in_progress_warned is True
+
+
+# ── run_forever: 거래일을 넘겨 사는 프로세스의 F4 재무장 ─────────────
+
+
+@pytest.mark.asyncio
+async def test_run_forever_tracks_new_day_after_restart_with_closed_state(monkeypatch):
+    """[2026-07-16 인시던트 재발 방지] 전일 CLOSED 상태로 복원된 장기 실행
+    프로세스에서도, 다음 거래일의 새 HOLDING에 F4가 다시 붙어야 한다."""
+    import asyncio as real_asyncio
+    import contextlib
+
+    import src.modules.f4_tracking as f4
+
+    s = _state_mod.get()
+    s.trading_date = "20260715"
+    s.position_status = "CLOSED"  # 전일 청산 상태로 프로세스 재시작
+
+    subscribed = real_asyncio.Event()
+
+    async def fake_subscribe(_ticker, on_tick, *, stop_if=None):
+        subscribed.set()
+        while not (stop_if and stop_if()):
+            await real_asyncio.sleep(0.01)
+
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setattr(f4, "_close_in_progress", False)
+    monkeypatch.setattr(f4, "_closing_task", None)
+    monkeypatch.setattr(f4, "F4_REST_BACKUP_ENABLED", False)
+    monkeypatch.setattr(f4, "_REARM_INTERVAL_SEC", 0.01, raising=False)
+    monkeypatch.setattr(f4.kis_ws, "subscribe", fake_subscribe)
+    monkeypatch.setattr(f4, "log", lambda *args, **kwargs: None)
+
+    task = real_asyncio.create_task(f4.run_forever())
+    try:
+        await real_asyncio.sleep(0.1)
+        assert not subscribed.is_set()  # CLOSED 동안은 구독하지 않는다
+
+        await _state_mod.ensure_trading_day("20260716")  # 새 거래일 리셋(IDLE)
+        s.position_status = "HOLDING"  # 새 진입
+        s.target_ticker = "004310"
+        await real_asyncio.wait_for(subscribed.wait(), 1)
+    finally:
+        s.position_status = "CLOSED"
+        task.cancel()
+        with contextlib.suppress(real_asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_run_forever_rearms_for_next_trading_day_after_close(monkeypatch):
+    """당일 추적이 청산으로 끝난 뒤에도 다음 거래일 HOLDING을 다시 추적한다."""
+    import asyncio as real_asyncio
+    import contextlib
+
+    import src.modules.f4_tracking as f4
+
+    s = _state_mod.get()
+    s.trading_date = "20260716"
+
+    subscribe_count = 0
+    subscribed = real_asyncio.Event()
+
+    async def fake_subscribe(_ticker, on_tick, *, stop_if=None):
+        nonlocal subscribe_count
+        subscribe_count += 1
+        subscribed.set()
+        while not (stop_if and stop_if()):
+            await real_asyncio.sleep(0.01)
+
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setattr(f4, "_close_in_progress", False)
+    monkeypatch.setattr(f4, "_closing_task", None)
+    monkeypatch.setattr(f4, "F4_REST_BACKUP_ENABLED", False)
+    monkeypatch.setattr(f4, "_REARM_INTERVAL_SEC", 0.01, raising=False)
+    monkeypatch.setattr(f4.kis_ws, "subscribe", fake_subscribe)
+    monkeypatch.setattr(f4, "log", lambda *args, **kwargs: None)
+
+    task = real_asyncio.create_task(f4.run_forever())
+    try:
+        await real_asyncio.wait_for(subscribed.wait(), 1)  # 1일차 추적 시작
+        subscribed.clear()
+
+        s.position_status = "CLOSED"  # 1일차 청산
+        await real_asyncio.sleep(0.05)
+
+        await _state_mod.ensure_trading_day("20260717")  # 새 거래일 리셋(IDLE)
+        s.position_status = "HOLDING"
+        s.target_ticker = "005930"
+        await real_asyncio.wait_for(subscribed.wait(), 1)  # 2일차 추적 시작
+        assert subscribe_count == 2
+    finally:
+        s.position_status = "CLOSED"
+        task.cancel()
+        with contextlib.suppress(real_asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_run_forever_rearms_when_cycle_exits_while_holding(monkeypatch):
+    """모니터 전원이 HOLDING 중 비정상 종료해도 루프가 사이클을 재시작한다."""
+    import asyncio as real_asyncio
+    import contextlib
+
+    import src.modules.f4_tracking as f4
+
+    calls = 0
+    ran_twice = real_asyncio.Event()
+
+    async def fake_run():
+        nonlocal calls
+        calls += 1
+        if calls >= 2:
+            ran_twice.set()
+
+    monkeypatch.setattr(f4, "run", fake_run)
+    monkeypatch.setattr(f4, "_REARM_INTERVAL_SEC", 0.01, raising=False)
+    monkeypatch.setattr(f4, "_REARM_HOLDING_INTERVAL_SEC", 0.01, raising=False)
+
+    task = real_asyncio.create_task(f4.run_forever())
+    try:
+        await real_asyncio.wait_for(ran_twice.wait(), 1)
+    finally:
+        task.cancel()
+        with contextlib.suppress(real_asyncio.CancelledError):
+            await task

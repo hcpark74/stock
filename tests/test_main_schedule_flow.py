@@ -1045,3 +1045,48 @@ async def test_job_f1_skips_when_today_trade_exists(monkeypatch):
     f1_run.assert_not_awaited()
     assert main._f2_done is True
     assert main._f3_started is True
+
+
+async def test_main_spawns_resident_f4_loop(monkeypatch):
+    """[2026-07-16 인시던트 재발 방지] main()은 일회성 run()이 아니라
+    상주 루프 run_forever()로 F4 태스크를 띄워야 한다."""
+    import asyncio
+    import contextlib
+
+    started = asyncio.Event()
+
+    async def fake_run_forever():
+        started.set()
+        await asyncio.Event().wait()
+
+    class FakeUviServer:
+        def __init__(self, _config):
+            self.should_exit = False
+
+        async def serve(self):
+            while not self.should_exit:
+                await asyncio.sleep(0.01)
+
+    run_once = AsyncMock()
+    monkeypatch.setenv("DRY_RUN", "1")
+    monkeypatch.setattr(main.logger, "setup", lambda *a, **k: None)
+    monkeypatch.setattr(main.logger, "log", lambda *a, **k: None)
+    monkeypatch.setattr(main, "_write_pid", lambda: True)
+    monkeypatch.setattr(main, "_clear_pid", lambda: None)
+    monkeypatch.setattr(main.db, "init", AsyncMock())
+    monkeypatch.setattr(main.db, "close", AsyncMock())
+    monkeypatch.setattr(main, "_recover_state", AsyncMock())
+    monkeypatch.setattr(main, "_run_catchup", AsyncMock())
+    monkeypatch.setattr(main.f4_tracking, "run", run_once)
+    monkeypatch.setattr(main.f4_tracking, "run_forever", fake_run_forever, raising=False)
+    monkeypatch.setattr(main.uvicorn, "Config", lambda *a, **k: None)
+    monkeypatch.setattr(main.uvicorn, "Server", FakeUviServer)
+
+    task = asyncio.create_task(main.main())
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        run_once.assert_not_called()
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+            await asyncio.wait_for(task, 5)
