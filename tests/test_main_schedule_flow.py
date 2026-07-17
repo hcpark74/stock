@@ -33,6 +33,38 @@ def reset_main_flow(monkeypatch):
     main._market_closed_date = None
 
 
+async def test_restore_market_closed_from_db_sets_flag_and_day_skip(tmp_path):
+    from src import db
+
+    await db.init(str(tmp_path / "restore.db"))
+    try:
+        today = main._today()
+        await db.record_skip(today, "MARKET_CLOSED", "msg_cd=40100000")
+
+        await main._restore_market_closed_from_db()
+
+        assert main._is_market_closed_today() is True
+        assert state_mod.get().day_skip is True
+        assert state_mod.get().close_reason == "MARKET_CLOSED"
+    finally:
+        await db.close()
+
+
+async def test_restore_market_closed_ignores_other_skip_reasons(tmp_path):
+    from src import db
+
+    await db.init(str(tmp_path / "restore2.db"))
+    try:
+        await db.record_skip(main._today(), "ENTRY_FAIL", "reason=NO_REMAINING_CANDIDATE")
+
+        await main._restore_market_closed_from_db()
+
+        assert main._is_market_closed_today() is False
+        assert state_mod.get().day_skip is False
+    finally:
+        await db.close()
+
+
 async def test_job_f1_runs_f3_without_force_before_f3_schedule(monkeypatch):
     async def fake_f2_run(candidates):
         assert candidates == [{"ticker": "005930"}]

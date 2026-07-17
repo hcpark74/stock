@@ -7,6 +7,24 @@ import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from src.schedule_times import (  # noqa: F401 — main.py가 이 모듈 경유로 재사용
+    F1_H,
+    F1_M,
+    F2_H,
+    F2_M,
+    F3_FILL_DEADLINE_H,
+    F3_FILL_DEADLINE_M,
+    F3_H,
+    F3_M,
+    F3_S,
+    F5_EXEC_H,
+    F5_EXEC_M,
+    F5_EXEC_S,
+    F5_PRECHECK_H,
+    F5_PRECHECK_M,
+    F5_PRECHECK_S,
+)
+
 KST = pytz.timezone("Asia/Seoul")
 
 Job = Callable[[], Coroutine[Any, Any, None]]
@@ -14,14 +32,6 @@ MISFIRE_GRACE_TIME_SEC = 60
 
 # KRX 개장 요일 — 시장 고정 특성이므로 env로 노출하지 않는다 (임시 공휴일은 별도)
 TRADING_DAYS_OF_WEEK = "mon-fri"
-
-# 스케줄 시각 — catchup 로직과 단일 출처 공유
-F1_H, F1_M = 9, 0
-F2_H, F2_M = 9, 10
-F3_H, F3_M, F3_S = 9, 10, 10
-F3_FILL_DEADLINE_H, F3_FILL_DEADLINE_M = 9, 11
-F5_PRECHECK_H, F5_PRECHECK_M, F5_PRECHECK_S = 10, 59, 50
-F5_EXEC_H, F5_EXEC_M, F5_EXEC_S = 11, 0, 0
 
 
 def build(

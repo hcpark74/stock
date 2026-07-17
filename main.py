@@ -177,6 +177,30 @@ async def _check_market_holiday() -> None:
     )
 
 
+async def _restore_market_closed_from_db() -> None:
+    """
+    재시작 복구: 당일 daily_skips에 MARKET_CLOSED가 있으면 휴장 상태 복원.
+
+    F3의 휴장 주문 거부 감지는 인메모리(day_skip)만 세우고 상태 파일에도
+    남지 않으므로, 같은 날 재시작하면 catchup이 F1~F3를 다시 돌려 주문·알림이
+    반복된다. DB 기록이 유일한 재시작 생존 흔적이라 시작 시 1회 복원한다.
+    """
+    global _market_closed_date
+    today = _today()
+    try:
+        skip = await db.get_skip_by_date(today)
+    except Exception as exc:
+        logger.log("MARKET_CLOSED_RESTORE_FAILED", level="WARN", error=repr(exc))
+        return
+    if not skip or skip.get("reason") != "MARKET_CLOSED":
+        return
+    _market_closed_date = today
+    s = state.get()
+    s.day_skip = True
+    s.close_reason = s.close_reason or "MARKET_CLOSED"
+    logger.log("MARKET_CLOSED_RESTORED", level="INFO", date=today, source="DAILY_SKIPS")
+
+
 # ── 스케줄 작업 래퍼 ─────────────────────────────────────────────────
 
 async def job_token_refresh() -> None:
@@ -769,6 +793,8 @@ async def main() -> None:
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     await db.init(DB_PATH)
     await _ensure_trading_day()
+    # 휴장일 감지(F3 주문 거부)는 인메모리라 같은 날 재시작 시 DB에서 복원
+    await _restore_market_closed_from_db()
 
     if dry_run:
         logger.log("DRY_RUN_START", level="WARN",

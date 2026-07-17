@@ -382,6 +382,16 @@ async def close_trade(
     await conn.commit()
 
 
+async def get_skip_by_date(date: str) -> dict | None:
+    """해당 날짜의 daily_skips 행 반환. 없으면 None."""
+    conn = get()
+    async with conn.execute(
+        "SELECT * FROM daily_skips WHERE date=?", (date,)
+    ) as cur:
+        row = await cur.fetchone()
+    return dict(row) if row else None
+
+
 async def record_skip(date: str, reason: str, detail: str = "") -> None:
     """daily_skips INSERT. 같은 날짜 중복 시 무시 (OR IGNORE)."""
     now = _now()

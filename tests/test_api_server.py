@@ -302,6 +302,16 @@ async def test_api_settings_does_not_expose_unwired_f2_retry_flag(monkeypatch):
     assert not any("F2_RETRY_F1_ON_FAIL" in warning for warning in payload["warnings"])
 
 
+def test_f5_times_come_from_shared_schedule_module():
+    """F5 시각이 스케줄과 별도 문자열로 복제되면 안 된다 — 단일 출처 검증."""
+    from src import schedule_times as st
+
+    assert server._F5_EXEC_TIME == f"{st.F5_EXEC_H:02d}:{st.F5_EXEC_M:02d}"
+    assert server._F5_PRECHECK_TIME == (
+        f"{st.F5_PRECHECK_H:02d}:{st.F5_PRECHECK_M:02d}:{st.F5_PRECHECK_S:02d}"
+    )
+
+
 @pytest.mark.asyncio
 async def test_api_settings_exposes_f4_timing_vi_and_rest_backup():
     resp = await server.api_settings()

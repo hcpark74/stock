@@ -73,6 +73,13 @@ from src.modules.f4_tracking import (
     VI_FREEZE_SUSPECT_SEC,
     VI_WATCH_ENABLED,
 )
+from src.schedule_times import (
+    F5_EXEC_H,
+    F5_EXEC_M,
+    F5_PRECHECK_H,
+    F5_PRECHECK_M,
+    F5_PRECHECK_S,
+)
 from src.utils.logger import log
 
 KST = ZoneInfo("Asia/Seoul")
@@ -81,9 +88,8 @@ _LOG_DIR = Path(os.getenv("LOG_DIR", "data/logs"))
 _F1_SNAPSHOT_DIR = Path(F1_SNAPSHOT_DIR)
 _HTML_DIR = Path(__file__).parent.parent.parent / "docs" / "html"
 _STATUS_LOG_LIMIT = 50
-# scheduler.F5_PRECHECK_*/F5_EXEC_*와 동기 유지 (직접 import 시 apscheduler가 테스트 경로에 끌려옴)
-_F5_PRECHECK_TIME = "10:59:50"
-_F5_EXEC_TIME = "11:00"
+_F5_PRECHECK_TIME = f"{F5_PRECHECK_H:02d}:{F5_PRECHECK_M:02d}:{F5_PRECHECK_S:02d}"
+_F5_EXEC_TIME = f"{F5_EXEC_H:02d}:{F5_EXEC_M:02d}"
 _ASSET_CACHE_TTL_SEC = float(os.getenv("ASSET_CACHE_TTL_SEC", "60"))
 _ASSET_CACHE: dict | None = None
 _ASSET_CACHE_AT: float = 0.0

@@ -1,8 +1,21 @@
+import src.scheduler as scheduler_mod
+from src import schedule_times
 from src.scheduler import MISFIRE_GRACE_TIME_SEC, build
 
 
 async def _noop() -> None:
     pass
+
+
+def test_scheduler_times_are_single_sourced_from_schedule_times():
+    """스케줄 시각 상수는 schedule_times가 단일 출처 — 복제 시 UI 표시가 어긋난다."""
+    for name in (
+        "F1_H", "F1_M", "F2_H", "F2_M", "F3_H", "F3_M", "F3_S",
+        "F3_FILL_DEADLINE_H", "F3_FILL_DEADLINE_M",
+        "F5_PRECHECK_H", "F5_PRECHECK_M", "F5_PRECHECK_S",
+        "F5_EXEC_H", "F5_EXEC_M", "F5_EXEC_S",
+    ):
+        assert getattr(scheduler_mod, name) == getattr(schedule_times, name)
 
 
 async def test_scheduler_jobs_allow_short_startup_misfires():
