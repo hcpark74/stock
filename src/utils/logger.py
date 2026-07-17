@@ -86,6 +86,7 @@ EVENT_LABELS = {
     "F3_RECHECK_QUOTE_RETRY": "F3 재검증 시세 재시도(F3 Recheck Quote Retry)",
     "F3_RECHECK_QUOTE_RECOVERED": "F3 재검증 시세 복구(F3 Recheck Quote Recovered)",
     "ENTRY_FAIL": "진입 실패(Entry Failed)",
+    "MARKET_CLOSED": "휴장일 감지(Market Closed)",
     "SLIPPAGE_GUARD": "슬리피지 가드 발동(Slippage Guard)",
     "ENTRY_EXECUTED": "진입 체결(Entry Executed)",
     "PYRAMID_TIMEOUT": "피라미딩 체결 시간 초과(Pyramid Timeout)",

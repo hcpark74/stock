@@ -55,6 +55,14 @@ _BUY_PSBL_TR = {"REAL": "TTTC8908R", "PAPER": "VTTC8908R"}
 _last_fill_poll_summary: dict = {}
 _pending_buy_org_no: str = ""  # 매수 주문 후 저장, 취소 시 사용
 _CANDIDATE_RETRY_REASONS = {"ORDER_REJECTED", "BUYABLE_QTY_ZERO", "QTY_ZERO"}
+_MARKET_CLOSED_MSG_CD = "40100000"  # KIS "모의투자 영업일이 아닙니다" — CTCA0903R이 모의투자 미지원이라 주문 거부가 유일한 휴장 신호
+
+
+def _is_market_closed_rejection(resp: dict) -> bool:
+    """휴장일 주문 거부 여부 — 다른 후보로 재시도해도 동일하므로 당일 전체 스킵 신호."""
+    if str(resp.get("msg_cd") or "") == _MARKET_CLOSED_MSG_CD:
+        return True
+    return "영업일이 아닙" in str(resp.get("msg1") or "")
 
 
 async def run(force: bool = False) -> None:
@@ -452,6 +460,28 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
             msg1=order_resp.get("msg1"),
         )
         if order_id == "UNKNOWN" or str(order_resp.get("rt_cd", "0")) != "0":
+            if _is_market_closed_rejection(order_resp):
+                await state.reset_to_idle("MARKET_CLOSED")
+                state.get().day_skip = True
+                log(
+                    "MARKET_CLOSED",
+                    level="INFO",
+                    ticker=ticker,
+                    msg_cd=order_resp.get("msg_cd"),
+                    msg1=order_resp.get("msg1"),
+                )
+                await notifier.send(
+                    "MARKET_CLOSED",
+                    level="INFO",
+                    message=f"휴장일 감지(주문 거부 {order_resp.get('msg_cd')}). 당일 거래 없음.",
+                    ticker=None,
+                )
+                await db.record_skip(
+                    _today(),
+                    "MARKET_CLOSED",
+                    f"msg_cd={order_resp.get('msg_cd')},source=ORDER_REJECTION",
+                )
+                return "MARKET_CLOSED"
             await state.reset_to_idle("ENTRY_FAIL")
             if not allow_candidate_retry:
                 state.get().day_skip = True

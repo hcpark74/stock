@@ -1214,7 +1214,7 @@ function renderFactorGrid(s) {
 }
 
 function reasonName(reason) {
-  return {TRAILING:'트레일링 청산',TIMEOUT:'시간 청산',HARD_STOP:'손절 청산',SLIPPAGE_GUARD:'슬리피지 차단',ENTRY_FAIL:'진입 실패',MANUAL:'수동 청산'}[reason] || reason;
+  return {TRAILING:'트레일링 청산',TIMEOUT:'시간 청산',HARD_STOP:'손절 청산',SLIPPAGE_GUARD:'슬리피지 차단',ENTRY_FAIL:'진입 실패',MANUAL:'수동 청산',MARKET_CLOSED:'휴장일'}[reason] || reason;
 }
 
 function yn(v) {
@@ -1579,7 +1579,7 @@ function renderSlipTable(sl) {
 
 function renderSkipHold(d) {
   const el = $('imp-skip-hold');
-  const skipLabel = {NO_TARGET:'후보 없음', GAP_CHANGED:'갭 이탈', ENTRY_FAIL:'진입 실패', SLIPPAGE_GUARD:'슬리피지', MANUAL:'수동'};
+  const skipLabel = {NO_TARGET:'후보 없음', GAP_CHANGED:'갭 이탈', ENTRY_FAIL:'진입 실패', SLIPPAGE_GUARD:'슬리피지', MANUAL:'수동', MARKET_CLOSED:'휴장일'};
   const skipRows = Object.entries(d.candidates.skips || {})
     .map(([k, v]) => `<div class="factor-row"><span>${esc(skipLabel[k] || k)}</span><span>${fmt(v)}건</span></div>`)
     .join('') || '<div class="empty">스킵 없음</div>';

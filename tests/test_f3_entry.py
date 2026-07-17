@@ -429,6 +429,87 @@ async def test_order_rejected_sets_day_skip(monkeypatch):
     assert "rejected" in notify.await_args.kwargs["message"]
 
 @pytest.mark.asyncio
+async def test_market_closed_rejection_records_market_closed_skip(monkeypatch):
+    events = []
+    notify = AsyncMock()
+    _reset_state()
+
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10310.0, 10000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(
+        f3,
+        "_send_buy",
+        AsyncMock(return_value={
+            "rt_cd": "1",
+            "msg_cd": "40100000",
+            "msg1": "모의투자 영업일이 아닙니다.",
+            "output": {},
+        }),
+    )
+    monkeypatch.setattr(f3.notifier, "send", notify)
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3.run(force=True)
+
+    assert "MARKET_CLOSED" in [event for event, _ in events]
+    assert state.get().position_status == "IDLE"
+    assert state.get().day_skip is True
+    assert state.get().close_reason == "MARKET_CLOSED"
+    f3.db.record_skip.assert_awaited_once()
+    assert f3.db.record_skip.await_args.args[1] == "MARKET_CLOSED"
+    notify.assert_awaited_once()
+    assert notify.await_args.args[0] == "MARKET_CLOSED"
+    assert "휴장일" in notify.await_args.kwargs["message"]
+
+
+@pytest.mark.asyncio
+async def test_market_closed_rejection_stops_candidate_retry(monkeypatch):
+    events = []
+    _reset_state()
+    state.get().target_ticker = "BAD001"
+    state.get().target_candidates = [
+        {"ticker": "BAD001", "name": "Bad", "expected_amount": 2_000_000.0},
+        {"ticker": "GOOD02", "name": "Good", "expected_amount": 1_000_000.0},
+    ]
+    send_buy = AsyncMock(return_value={
+        "rt_cd": "1",
+        "msg_cd": "40100000",
+        "msg1": "모의투자 영업일이 아닙니다.",
+        "output": {},
+    })
+
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(
+        f3,
+        "_fetch_expected_price",
+        AsyncMock(side_effect=[
+            (10310.0, 10000.0),
+            (10400.0, 10000.0),
+            (10400.0, 10000.0),
+        ]),
+    )
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3.run(force=True)
+
+    # 휴장 거부는 다른 후보로 재시도해도 같은 결과 — 즉시 당일 중단해야 한다
+    send_buy.assert_awaited_once()
+    assert "ENTRY_CANDIDATE_RETRY" not in [event for event, _ in events]
+    assert state.get().day_skip is True
+    assert state.get().close_reason == "MARKET_CLOSED"
+    f3.db.record_skip.assert_awaited_once()
+    assert f3.db.record_skip.await_args.args[1] == "MARKET_CLOSED"
+    f3.notifier.send.assert_awaited_once()
+    assert f3.notifier.send.await_args.args[0] == "MARKET_CLOSED"
+
+
+@pytest.mark.asyncio
 async def test_state_collision_blocks_entry_with_reason(monkeypatch):
     events = []
     send_buy = AsyncMock()
