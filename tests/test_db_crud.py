@@ -201,6 +201,57 @@ async def test_record_skip_duplicate_ignored(mem):
     assert row[0] == 1
 
 
+async def test_record_skip_market_closed_persists(mem):
+    """MARKET_CLOSED가 CHECK에 막혀 OR IGNORE로 조용히 누락되면 안 된다."""
+    await db.record_skip("20260717", "MARKET_CLOSED", "msg_cd=40100000")
+    conn = db.get()
+    async with conn.execute(
+        "SELECT reason FROM daily_skips WHERE date='20260717'"
+    ) as cur:
+        row = await cur.fetchone()
+    assert row is not None
+    assert row["reason"] == "MARKET_CLOSED"
+
+
+async def test_init_migrates_legacy_daily_skips_check(tmp_path):
+    """구 CHECK 제약(MARKET_CLOSED 없음) DB는 init()에서 재구축돼야 한다."""
+    import aiosqlite
+
+    path = str(tmp_path / "legacy.db")
+    async with aiosqlite.connect(path) as conn:
+        await conn.execute("""
+            CREATE TABLE daily_skips (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                date       TEXT NOT NULL UNIQUE,
+                reason     TEXT NOT NULL CHECK (reason IN (
+                               'NO_TARGET','GAP_CHANGED','ENTRY_FAIL',
+                               'SLIPPAGE_GUARD','MANUAL'
+                           )),
+                detail     TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+        await conn.execute(
+            "INSERT INTO daily_skips (date, reason, detail, created_at) "
+            "VALUES ('20260701', 'NO_TARGET', 'legacy', '2026-07-01T09:00:00+09:00')"
+        )
+        await conn.commit()
+
+    await db.init(path)
+    await db.record_skip("20260717", "MARKET_CLOSED", "msg_cd=40100000")
+    conn = db.get()
+    async with conn.execute(
+        "SELECT date, reason FROM daily_skips ORDER BY date"
+    ) as cur:
+        rows = await cur.fetchall()
+    await db.close()
+
+    assert [(r["date"], r["reason"]) for r in rows] == [
+        ("20260701", "NO_TARGET"),
+        ("20260717", "MARKET_CLOSED"),
+    ]
+
+
 # ── 전체 거래 생명주기 ────────────────────────────────────────────────
 
 async def test_full_lifecycle_open_buy_close(mem):

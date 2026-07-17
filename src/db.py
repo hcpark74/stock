@@ -101,7 +101,7 @@ async def init(db_path: str) -> None:
             date       TEXT NOT NULL UNIQUE,
             reason     TEXT NOT NULL CHECK (reason IN (
                            'NO_TARGET','GAP_CHANGED','ENTRY_FAIL',
-                           'SLIPPAGE_GUARD','MANUAL'
+                           'SLIPPAGE_GUARD','MANUAL','MARKET_CLOSED'
                        )),
             detail     TEXT,
             created_at TEXT NOT NULL
@@ -137,6 +137,32 @@ async def init(db_path: str) -> None:
         await _conn.execute("ALTER TABLE orders ADD COLUMN name TEXT")
     except Exception:
         pass  # 이미 존재하면 무시
+    # 기존 DB 마이그레이션: daily_skips.reason CHECK 확장 — SQLite는 CHECK 변경이
+    # 불가하므로 재구축. record_skip이 INSERT OR IGNORE라 구 제약에 걸리면
+    # 에러 없이 기록만 누락되기 때문에 반드시 맞춰야 한다.
+    async with _conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='daily_skips'"
+    ) as cur:
+        row = await cur.fetchone()
+    if row and "MARKET_CLOSED" not in (row["sql"] or ""):
+        await _conn.executescript("""
+            BEGIN;
+            CREATE TABLE daily_skips_migrated (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                date       TEXT NOT NULL UNIQUE,
+                reason     TEXT NOT NULL CHECK (reason IN (
+                               'NO_TARGET','GAP_CHANGED','ENTRY_FAIL',
+                               'SLIPPAGE_GUARD','MANUAL','MARKET_CLOSED'
+                           )),
+                detail     TEXT,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO daily_skips_migrated
+                SELECT id, date, reason, detail, created_at FROM daily_skips;
+            DROP TABLE daily_skips;
+            ALTER TABLE daily_skips_migrated RENAME TO daily_skips;
+            COMMIT;
+        """)
     await _conn.commit()
 
 
