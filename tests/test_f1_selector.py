@@ -5,7 +5,7 @@ def test_default_policy_thresholds_are_intentional():
     assert f1_selector.GAP_MIN == 0.030
     assert f1_selector.GAP_CORE_MAX == 0.080
     assert f1_selector.GAP_HARD_MAX == 0.100
-    assert f1_selector.MIN_EXPECTED_AMOUNT == 0.0
+    assert f1_selector.MIN_EXPECTED_AMOUNT == 100_000_000
     assert f1_selector.HIGH_GAP_MIN_EXPECTED_AMOUNT == 5_000_000_000
     assert f1_selector.MIN_VI_GAP == 0.010
     assert f1_selector.SAFE_VI_GAP == 0.030
@@ -57,6 +57,18 @@ def test_high_gap_requires_amount_and_vi_distance():
 
 def test_empty_input_returns_empty_selection():
     assert f1_selector.select_candidates([]) == []
+
+
+def test_illiquid_candidates_rejected_by_default_floor():
+    """2026-07-20 인시던트: 예상 체결대금 수백만원짜리 후보(멤레이비티 3.2M,
+    스타코링크 1.9M)가 통과해 미체결·유동성 제로 진입 시도로 이어졌다.
+    저유동성 후보는 기본 하한(1억원)으로 걸러져야 한다."""
+    ranked = f1_selector.select_candidates([
+        _candidate("ILLIQUID", expected_amount=38_700_000, avg_amount_5d=10_000_000),
+        _candidate("LIQUID", expected_amount=150_000_000, avg_amount_5d=100_000_000),
+    ])
+
+    assert [c["ticker"] for c in ranked] == ["LIQUID"]
 
 
 def test_invalid_gap_and_vi_floor_are_rejected():

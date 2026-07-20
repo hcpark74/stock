@@ -172,8 +172,8 @@ KIS_TRANSIENT_RETRY_MAX_SEC=8.0
 F1_GAP_MIN=0.030
 F1_GAP_CORE_MAX=0.080
 F1_GAP_HARD_MAX=0.100
-# 예상 거래대금 최소 기준(원). 0이면 제한 없음
-F1_MIN_EXPECTED_AMOUNT=0.0
+# 예상 거래대금 최소 기준(원). 기본 1억 — 저유동성 미체결 방지(2026-07-20). 0이면 제한 없음
+F1_MIN_EXPECTED_AMOUNT=100000000
 # 갭이 큰(선호 구간 초과) 종목은 예상 거래대금 50억 원 이상일 때만 허용
 F1_HIGH_GAP_MIN_EXPECTED_AMOUNT=5000000000
 # VI(변동성완화장치) 발동 가격까지의 여유: 1% 미만이면 위험으로 배점 제외,
@@ -195,6 +195,8 @@ F2_RETRY_F1_INTERVAL_SEC=5
 F2_RETRY_F1_MIN_REMAINING_SEC=2
 
 # ── F3: 매수 주문 실행 ─────────────────────────
+# 진입 직전 VI 발동 확인 — 발동 중이면 해당 후보 차단(1=활성, 2026-07-20 미체결 인시던트)
+F3_VI_CHECK_ENABLED=1
 # 매수 주문 최대 시도 횟수와 재시도 전 대기(초)
 F3_ENTRY_MAX_ATTEMPTS=2
 F3_ENTRY_RETRY_DELAY_SEC=0.5

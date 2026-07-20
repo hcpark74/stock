@@ -14,6 +14,7 @@ def reset_main_flow(monkeypatch):
     s = state_mod.get()
     s.trading_date = "20260702"
     s.day_skip = False
+    s.close_reason = None
     s.target_ticker = None
     s.target_candidates = None
     s.position_status = "IDLE"
@@ -24,6 +25,7 @@ def reset_main_flow(monkeypatch):
     monkeypatch.setattr(main, "_ensure_trading_day", AsyncMock())
     yield
     s.day_skip = False
+    s.close_reason = None
     s.target_ticker = None
     s.target_candidates = None
     s.position_status = "IDLE"
@@ -46,6 +48,24 @@ async def test_restore_market_closed_from_db_sets_flag_and_day_skip(tmp_path):
         assert main._is_market_closed_today() is True
         assert state_mod.get().day_skip is True
         assert state_mod.get().close_reason == "MARKET_CLOSED"
+    finally:
+        await db.close()
+
+
+async def test_restore_vi_active_day_skip_without_market_closed_flag(tmp_path):
+    """VI_ACTIVE 스킵도 재시작 복원 대상 — 아니면 catchup이 F1~F3를 다시 돌려
+    VI 해제가(추격 진입)로 들어간다. 휴장 플래그는 세우면 안 된다."""
+    from src import db
+
+    await db.init(str(tmp_path / "restore_vi.db"))
+    try:
+        await db.record_skip(main._today(), "VI_ACTIVE", "cntg_vi_hour=090032,vi_kind=2")
+
+        await main._restore_market_closed_from_db()
+
+        assert state_mod.get().day_skip is True
+        assert state_mod.get().close_reason == "VI_ACTIVE"
+        assert main._is_market_closed_today() is False
     finally:
         await db.close()
 

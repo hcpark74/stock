@@ -360,3 +360,40 @@ async def test_check_failure_emits_event_and_cools_down():
     clock.advance(30)
     assert await w.on_price(7690.0, source="rest") == []
     assert check.await_count == 1
+
+
+# ── fetch_vi_status — VI 현황 API 조회 (F3 진입 전 체크·F4 감시 공용) ──
+
+async def test_fetch_vi_status_queries_vi_ranking_api(monkeypatch):
+    from src.modules import vi_watch
+
+    calls = {}
+
+    async def fake_get(path, tr_id="", params=None, **kwargs):
+        calls["path"] = path
+        calls["tr_id"] = tr_id
+        calls["params"] = params
+        return {"rt_cd": "0", "output": []}
+
+    monkeypatch.setattr(vi_watch.kis_rest, "get", fake_get)
+
+    resp = await vi_watch.fetch_vi_status("072770")
+
+    assert calls["path"] == "/uapi/domestic-stock/v1/quotations/inquire-vi-status"
+    assert calls["tr_id"] == "FHPST01390000"
+    assert calls["params"]["FID_INPUT_ISCD"] == "072770"
+    assert resp["rt_cd"] == "0"
+
+
+async def test_fetch_vi_status_raises_on_api_error(monkeypatch):
+    import pytest
+
+    from src.modules import vi_watch
+
+    async def fake_get(path, tr_id="", params=None, **kwargs):
+        return {"rt_cd": "1", "msg_cd": "EGW00123", "msg1": "오류"}
+
+    monkeypatch.setattr(vi_watch.kis_rest, "get", fake_get)
+
+    with pytest.raises(RuntimeError):
+        await vi_watch.fetch_vi_status("072770")

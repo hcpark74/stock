@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from src import db, live, notifier, state
 from src.api import kis_rest, kis_ws
+from src.modules import vi_watch as vi_watch_mod
 from src.modules.vi_watch import ViWatch
 from src.utils.logger import log
 from src.utils.spike_filter import SpikeFilter
@@ -219,25 +220,8 @@ def _make_vi_watch(ticker: str) -> ViWatch | None:
 
 
 async def _fetch_vi_status(ticker: str) -> dict:
-    """변동성완화장치(VI) 현황 조회 (FHPST01390000)."""
-    resp = await kis_rest.get(
-        "/uapi/domestic-stock/v1/quotations/inquire-vi-status",
-        tr_id="FHPST01390000",
-        params={
-            "FID_DIV_CLS_CODE": "0",
-            "FID_COND_SCR_DIV_CODE": "20139",
-            "FID_MRKT_CLS_CODE": "0",
-            "FID_INPUT_ISCD": ticker,
-            "FID_RANK_SORT_CLS_CODE": "0",
-            "FID_INPUT_DATE_1": datetime.now(KST).strftime("%Y%m%d"),
-            "FID_TRGT_CLS_CODE": "",
-            "FID_TRGT_EXLS_CLS_CODE": "",
-        },
-    )
-    if str(resp.get("rt_cd", "")) != "0":
-        raise RuntimeError(
-            f"VI status query failed: {resp.get('msg_cd')} {resp.get('msg1')}")
-    return resp
+    """변동성완화장치(VI) 현황 조회 — vi_watch 공용 구현 위임."""
+    return await vi_watch_mod.fetch_vi_status(ticker)
 
 
 async def _handle_vi_events(events: list[dict], ticker: str) -> None:

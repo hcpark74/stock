@@ -27,7 +27,9 @@ def _env_int(name: str, default: int) -> int:
 GAP_MIN = _env_float("F1_GAP_MIN", 0.030)
 GAP_CORE_MAX = _env_float("F1_GAP_CORE_MAX", 0.080)
 GAP_HARD_MAX = _env_float("F1_GAP_HARD_MAX", 0.100)
-MIN_EXPECTED_AMOUNT = _env_float("F1_MIN_EXPECTED_AMOUNT", 0.0)
+# 2026-07-20: 예상 체결대금 수백만원짜리 후보가 통과해 미체결(VI)·유동성 제로
+# 진입 시도로 이어졌다. 주문금액(약 900만원)이 예상 체결대금을 넘지 않도록 1억 하한.
+MIN_EXPECTED_AMOUNT = _env_float("F1_MIN_EXPECTED_AMOUNT", 100_000_000)
 HIGH_GAP_MIN_EXPECTED_AMOUNT = _env_float(
     "F1_HIGH_GAP_MIN_EXPECTED_AMOUNT",
     5_000_000_000,

@@ -408,3 +408,53 @@ async def test_record_order_stores_name(tmp_path):
 
     assert dict(row) == {"ticker": "005930", "name": "삼성전자"}
     await db.close()
+
+async def test_record_skip_vi_active_persists(mem):
+    """VI_ACTIVE가 CHECK에 막혀 OR IGNORE로 조용히 누락되면 안 된다."""
+    await db.record_skip("20260720", "VI_ACTIVE", "cntg_vi_hour=090032,vi_kind=2")
+    conn = db.get()
+    async with conn.execute(
+        "SELECT reason FROM daily_skips WHERE date='20260720'"
+    ) as cur:
+        row = await cur.fetchone()
+    assert row is not None
+    assert row["reason"] == "VI_ACTIVE"
+
+
+async def test_init_migrates_market_closed_era_daily_skips_check(tmp_path):
+    """MARKET_CLOSED까지만 있는 CHECK 제약 DB도 init()에서 재구축돼야 한다."""
+    import aiosqlite
+
+    path = str(tmp_path / "market_closed_era.db")
+    async with aiosqlite.connect(path) as conn:
+        await conn.execute("""
+            CREATE TABLE daily_skips (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                date       TEXT NOT NULL UNIQUE,
+                reason     TEXT NOT NULL CHECK (reason IN (
+                               'NO_TARGET','GAP_CHANGED','ENTRY_FAIL',
+                               'SLIPPAGE_GUARD','MANUAL','MARKET_CLOSED'
+                           )),
+                detail     TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+        await conn.execute(
+            "INSERT INTO daily_skips (date, reason, detail, created_at) "
+            "VALUES ('20260717', 'MARKET_CLOSED', 'legacy', '2026-07-17T09:00:00+09:00')"
+        )
+        await conn.commit()
+
+    await db.init(path)
+    await db.record_skip("20260720", "VI_ACTIVE", "cntg_vi_hour=090032")
+    conn = db.get()
+    async with conn.execute(
+        "SELECT date, reason FROM daily_skips ORDER BY date"
+    ) as cur:
+        rows = await cur.fetchall()
+    await db.close()
+
+    assert [(r["date"], r["reason"]) for r in rows] == [
+        ("20260717", "MARKET_CLOSED"),
+        ("20260720", "VI_ACTIVE"),
+    ]

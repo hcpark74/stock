@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from src import db, notifier, state
 from src.api import kis_rest
+from src.modules import vi_watch
 from src.utils.logger import log
 from src.utils.number import to_float
 
@@ -22,6 +23,8 @@ PYRAMID_MIN_UP = 0.005     # 피라미딩 조건 +0.5% 이상 유지
 F3_ENTRY_MAX_ATTEMPTS = max(1, int(os.getenv("F3_ENTRY_MAX_ATTEMPTS", "2")))
 F3_ENTRY_RETRY_DELAY_SEC = float(os.getenv("F3_ENTRY_RETRY_DELAY_SEC", "0.5"))
 F3_ENTRY_CANCEL_RELEASE_WAIT_SEC = float(os.getenv("F3_ENTRY_CANCEL_RELEASE_WAIT_SEC", "1.5"))
+# 취소 거부 시 기체결 여부를 재확인하는 폴링 창 — 취소 거부의 흔한 원인이 기체결이다.
+F3_ENTRY_CANCEL_CONFIRM_FILL_SEC = float(os.getenv("F3_ENTRY_CANCEL_CONFIRM_FILL_SEC", "2.0"))
 # First order gets a wider polling window to absorb KIS/order fill latency after the open.
 F3_ENTRY_FIRST_FILL_SEC = float(os.getenv("F3_ENTRY_FIRST_FILL_SEC", "12.0"))
 F3_ENTRY_RETRY_FILL_SEC = float(os.getenv("F3_ENTRY_RETRY_FILL_SEC", "8.0"))
@@ -33,6 +36,9 @@ F3_RECHECK_BATCH_TIMEOUT_SEC = float(os.getenv("F3_RECHECK_BATCH_TIMEOUT_SEC", "
 F3_FIRST_ORDER_AT = "IMMEDIATE"
 F3_PYRAMID_AT = os.getenv("F3_PYRAMID_AT", "09:10:40")
 F3_PYRAMID_FILL_SEC = float(os.getenv("F3_PYRAMID_FILL_SEC", "10.0"))
+# 2026-07-20: VI 정지 중 시장가 진입 → 폴링 창(12s)이 VI(2분)보다 짧아 전량 미체결.
+# VI는 대기가 아니라 필터 — 발동 중이면 후보를 차단하고 다음 후보로 넘어간다.
+F3_VI_CHECK_ENABLED = os.getenv("F3_VI_CHECK_ENABLED", "1") == "1"
 
 def _gap_in_order_range(gap: float) -> bool:
     """주문 전 재검증 갭 허용 구간: 하한 포함, 상한 미포함."""
@@ -54,7 +60,7 @@ _BUY_PSBL_TR = {"REAL": "TTTC8908R", "PAPER": "VTTC8908R"}
 
 _last_fill_poll_summary: dict = {}
 _pending_buy_org_no: str = ""  # 매수 주문 후 저장, 취소 시 사용
-_CANDIDATE_RETRY_REASONS = {"ORDER_REJECTED", "BUYABLE_QTY_ZERO", "QTY_ZERO"}
+_CANDIDATE_RETRY_REASONS = {"ORDER_REJECTED", "BUYABLE_QTY_ZERO", "QTY_ZERO", "VI_ACTIVE"}
 # KIS "모의투자 영업일이 아닙니다" — CTCA0903R이 모의투자 미지원이라 주문 거부가 유일한 휴장 신호
 _MARKET_CLOSED_MSG_CD = "40100000"
 
@@ -64,6 +70,29 @@ def _is_market_closed_rejection(resp: dict) -> bool:
     if str(resp.get("msg_cd") or "") == _MARKET_CLOSED_MSG_CD:
         return True
     return "영업일이 아닙" in str(resp.get("msg1") or "")
+
+
+async def _fetch_vi_active(ticker: str) -> dict | None:
+    """현재 VI 발동 중이면 발동 정보, 아니면 None. 조회 실패는 예외로 전파."""
+    resp = await vi_watch.fetch_vi_status(ticker)
+    return vi_watch.parse_vi_payload(resp, ticker)
+
+
+async def _vi_active_or_none(ticker: str, entry_attempt: int) -> dict | None:
+    """VI 발동 정보 조회. 관측 실패로 기회를 버리지 않는다 (fail-open)."""
+    if not F3_VI_CHECK_ENABLED:
+        return None
+    try:
+        return await _fetch_vi_active(ticker)
+    except Exception as e:
+        log(
+            "F3_VI_CHECK_ERROR",
+            level="WARN",
+            ticker=ticker,
+            error=repr(e),
+            entry_attempt=entry_attempt,
+        )
+        return None
 
 
 async def run(force: bool = False) -> None:
@@ -77,6 +106,7 @@ async def run(force: bool = False) -> None:
     original_name = s.target_name
     original_candidates = list(s.target_candidates or [])
     rejected_tickers: set[str] = set()
+    rejection_reasons: set[str] = set()
 
     s = state.get()
     s.target_ticker = original_ticker
@@ -93,6 +123,7 @@ async def run(force: bool = False) -> None:
             refreshed = await _refresh_entry_candidate(picked)
             if refreshed is None:
                 rejected_tickers.add(picked["ticker"])
+                rejection_reasons.add("RECHECK_FAILED")
                 continue
             picked = refreshed
 
@@ -104,6 +135,7 @@ async def run(force: bool = False) -> None:
         if result not in _CANDIDATE_RETRY_REASONS:
             return
         rejected_tickers.add(picked["ticker"])
+        rejection_reasons.add(result)
         log(
             "ENTRY_CANDIDATE_RETRY",
             level="WARN",
@@ -138,8 +170,13 @@ async def run(force: bool = False) -> None:
             return
 
     s = state.get()
+    # 소진 사유가 전부 VI면 최종 사유도 VI_ACTIVE — 시작 복원(main)은
+    # VI_ACTIVE만 복원하므로 ENTRY_FAIL로 남기면 재시작 catch-up이
+    # VI 해제가에 추격 진입할 수 있다.
+    all_vi = bool(rejection_reasons) and rejection_reasons == {"VI_ACTIVE"}
+    final_reason = "VI_ACTIVE" if all_vi else "ENTRY_FAIL"
     s.day_skip = True
-    s.close_reason = "ENTRY_FAIL"
+    s.close_reason = final_reason
     s.target_ticker = None
     s.target_name = None
     log(
@@ -147,16 +184,21 @@ async def run(force: bool = False) -> None:
         level="WARN",
         rejected_count=len(rejected_tickers),
         reason="NO_REMAINING_CANDIDATE",
+        final_reason=final_reason,
     )
     await notifier.send(
         "ENTRY_FAIL",
         level="WARN",
-        message="진입 가능한 후보를 모두 소진해 거래를 중단합니다.",
+        message=(
+            "후보 전원이 VI 발동으로 차단되어 거래를 중단합니다."
+            if all_vi
+            else "진입 가능한 후보를 모두 소진해 거래를 중단합니다."
+        ),
         ticker=None,
     )
     await db.record_skip(
         _today(),
-        "ENTRY_FAIL",
+        final_reason,
         f"reason=NO_REMAINING_CANDIDATE,rejected={','.join(sorted(rejected_tickers))}",
     )
 
@@ -263,6 +305,43 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
                             ticker=ticker)
         await db.record_skip(_today(), "GAP_CHANGED", f"gap={gap*100:.2f}%")
         return
+
+    # ── 진입 직전 VI 확인 — 정지 중 시장가는 체결 불가, 해제가는 추격 진입 ──
+    # 시점 조회라 체크~주문 사이 신규 VI 발동은 못 막는다(그 경우 기존
+    # ENTRY_FAIL 경로로 수렴). 재시도(attempt>1) 직전에도 루프 안에서 재확인한다.
+    vi_info = await _vi_active_or_none(ticker, entry_attempt=1)
+    if vi_info:
+        log(
+            "VI_ENTRY_BLOCKED", level="WARN", ticker=ticker,
+            candidate_retry=allow_candidate_retry, **vi_info,
+        )
+        _log_entry_blocked(
+            ticker,
+            "VI_ACTIVE",
+            vi_kind_code=vi_info.get("vi_kind_code"),
+            cntg_vi_hour=vi_info.get("cntg_vi_hour"),
+            vi_prc=vi_info.get("vi_prc"),
+            candidate_retry=allow_candidate_retry,
+        )
+        if allow_candidate_retry:
+            return "VI_ACTIVE"
+        s.day_skip = True
+        s.close_reason = "VI_ACTIVE"
+        await notifier.send(
+            "VI_ENTRY_BLOCKED", level="WARN",
+            message=(
+                f"진입 직전 VI 발동 중(발동시각 {vi_info.get('cntg_vi_hour')}). "
+                "거래 스킵."
+            ),
+            ticker=ticker,
+        )
+        await db.record_skip(
+            _today(),
+            "VI_ACTIVE",
+            f"cntg_vi_hour={vi_info.get('cntg_vi_hour')},vi_kind={vi_info.get('vi_kind_code')}",
+        )
+        return
+
     # ── 잔고 조회 및 수량 산정 ────────────────────────────────────────
     if picked and picked.get("ticker") == ticker:
         cash = float(picked["cash"])
@@ -441,6 +520,50 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
             first_qty = order_qty
             second_qty = 0
 
+        if attempt > 1:
+            # 1차 폴링(최대 12초)·취소·대기 사이 VI가 발동했을 수 있다.
+            # 재확인은 주문 직전에 수행 — quiet wait·수량 조회 뒤로 두어
+            # 체크~주문 사이 무방비 창을 최소화한다.
+            vi_info = await _vi_active_or_none(ticker, entry_attempt=attempt)
+            if vi_info:
+                # 여기 도달했다는 것은 직전 취소가 확인됐다는 뜻 —
+                # 살아 있는 주문 없이 IDLE 전환·후보 이동이 안전하다.
+                await state.reset_to_idle("VI_ACTIVE")
+                log(
+                    "VI_ENTRY_BLOCKED", level="WARN", ticker=ticker,
+                    entry_attempt=attempt, candidate_retry=allow_candidate_retry,
+                    **vi_info,
+                )
+                _log_entry_blocked(
+                    ticker,
+                    "VI_ACTIVE",
+                    vi_kind_code=vi_info.get("vi_kind_code"),
+                    cntg_vi_hour=vi_info.get("cntg_vi_hour"),
+                    vi_prc=vi_info.get("vi_prc"),
+                    entry_attempt=attempt,
+                    candidate_retry=allow_candidate_retry,
+                )
+                if allow_candidate_retry:
+                    return "VI_ACTIVE"
+                state.get().day_skip = True
+                await notifier.send(
+                    "VI_ENTRY_BLOCKED", level="WARN",
+                    message=(
+                        f"재시도 직전 VI 발동 중(발동시각 {vi_info.get('cntg_vi_hour')}). "
+                        "거래 스킵."
+                    ),
+                    ticker=ticker,
+                )
+                await db.record_skip(
+                    _today(),
+                    "VI_ACTIVE",
+                    (
+                        f"cntg_vi_hour={vi_info.get('cntg_vi_hour')},"
+                        f"vi_kind={vi_info.get('vi_kind_code')},entry_attempt={attempt}"
+                    ),
+                )
+                return
+
         order_resp = await _send_buy(ticker, first_qty, mode)
         order_id = order_resp.get("output", {}).get("ODNO", "UNKNOWN")
         _pending_buy_org_no = order_resp.get("output", {}).get("KRX_FWDG_ORD_ORGNO", "")
@@ -524,19 +647,40 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
         if fill:
             break
 
-        cancel_resp = await _cancel_order(order_id, _pending_buy_org_no, mode)
-        log(
-            "ENTRY_CANCEL_SENT",
-            level="WARN",
-            ticker=ticker,
-            order_id=order_id,
-            org_no=_pending_buy_org_no,
-            entry_attempt=attempt,
-            max_attempts=max_attempts,
-            rt_cd=cancel_resp.get("rt_cd"),
-            msg_cd=cancel_resp.get("msg_cd"),
-            msg1=cancel_resp.get("msg1"),
+        cancel_outcome, late_fill = await _cancel_entry_order_confirmed(
+            order_id, _pending_buy_org_no, mode, ticker, attempt, max_attempts,
         )
+        if late_fill:
+            # 취소 거부 원인이 기체결 — 재주문 없이 체결 처리로 넘어간다.
+            fill = late_fill
+            break
+        if cancel_outcome != "CANCELLED":
+            # 취소 확인 실패 — 미체결 주문이 살아 있을 수 있다. 재주문·후보
+            # 전환·IDLE 전환 모두 금지하고(중복 포지션 위험) ENTERING을 유지한
+            # 채 운영자 수동 확인으로 넘긴다.
+            state.get().day_skip = True
+            _log_entry_blocked(
+                ticker,
+                "CANCEL_UNCONFIRMED",
+                order_id=order_id,
+                entry_attempt=attempt,
+                max_attempts=max_attempts,
+            )
+            await notifier.send(
+                "ENTRY_CANCEL_UNCONFIRMED",
+                level="ERROR",
+                message=(
+                    f"진입 주문 취소 확인 실패 — 미체결 주문이 살아 있을 수 "
+                    f"있습니다. 수동 확인 필요: {ticker} 주문 {order_id}"
+                ),
+                ticker=ticker,
+            )
+            await db.record_skip(
+                _today(),
+                "ENTRY_FAIL",
+                f"reason=CANCEL_UNCONFIRMED,order_id={order_id},entry_attempt={attempt}",
+            )
+            return
         if attempt < max_attempts and F3_ENTRY_CANCEL_RELEASE_WAIT_SEC > 0:
             log(
                 "ENTRY_CANCEL_RELEASE_WAIT",
@@ -676,6 +820,82 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
 
 
 # ── 헬퍼 ─────────────────────────────────────────────────────────────
+
+async def _cancel_entry_order_confirmed(
+    order_id: str,
+    org_no: str,
+    mode: str,
+    ticker: str,
+    attempt: int,
+    max_attempts: int,
+) -> tuple[str, dict | None]:
+    """진입 주문 취소를 '확인'까지 수행한다.
+
+    반환: ("CANCELLED", None) | ("FILLED", fill) | ("UNCERTAIN", None).
+    취소 거부의 흔한 원인은 기체결이므로 거부 시 체결부터 재확인하고,
+    아니면 취소를 1회 재시도한다. 끝까지 확인되지 않으면 UNCERTAIN —
+    호출부는 재주문·후보 전환·IDLE 전환을 해서는 안 된다.
+    """
+    cancel_resp = await _cancel_order(order_id, org_no, mode)
+    log(
+        "ENTRY_CANCEL_SENT",
+        level="WARN",
+        ticker=ticker,
+        order_id=order_id,
+        org_no=org_no,
+        entry_attempt=attempt,
+        max_attempts=max_attempts,
+        rt_cd=cancel_resp.get("rt_cd"),
+        msg_cd=cancel_resp.get("msg_cd"),
+        msg1=cancel_resp.get("msg1"),
+    )
+    if str(cancel_resp.get("rt_cd", "0")) == "0":
+        return "CANCELLED", None
+
+    fill = await _poll_fill(
+        order_id,
+        deadline=_deadline_after_seconds(F3_ENTRY_CANCEL_CONFIRM_FILL_SEC),
+        ticker=ticker,
+    )
+    if fill:
+        log(
+            "ENTRY_CANCEL_REJECTED_FILLED",
+            level="WARN",
+            ticker=ticker,
+            order_id=order_id,
+            entry_attempt=attempt,
+            fill_price=fill["fill_price"],
+            fill_qty=fill["fill_qty"],
+        )
+        return "FILLED", fill
+
+    retry_resp = await _cancel_order(order_id, org_no, mode)
+    log(
+        "ENTRY_CANCEL_RETRY",
+        level="WARN",
+        ticker=ticker,
+        order_id=order_id,
+        org_no=org_no,
+        entry_attempt=attempt,
+        rt_cd=retry_resp.get("rt_cd"),
+        msg_cd=retry_resp.get("msg_cd"),
+        msg1=retry_resp.get("msg1"),
+    )
+    if str(retry_resp.get("rt_cd", "0")) == "0":
+        return "CANCELLED", None
+
+    log(
+        "ENTRY_CANCEL_UNCONFIRMED",
+        level="ERROR",
+        ticker=ticker,
+        order_id=order_id,
+        entry_attempt=attempt,
+        rt_cd=retry_resp.get("rt_cd"),
+        msg_cd=retry_resp.get("msg_cd"),
+        msg1=retry_resp.get("msg1"),
+    )
+    return "UNCERTAIN", None
+
 
 def _candidate_for_ticker(s: state.State, ticker: str) -> dict | None:
     for candidate in s.target_candidates or []:

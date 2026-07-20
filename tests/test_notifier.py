@@ -123,3 +123,12 @@ def test_format_stock_infers_current_target_name():
     finally:
         state.get().target_ticker = None
         state.get().target_name = None
+
+
+@pytest.mark.asyncio
+async def test_send_allows_vi_entry_blocked_alert():
+    notifier._queue = asyncio.Queue()
+
+    await notifier.send("VI_ENTRY_BLOCKED", level="WARN", message="vi active", ticker="072770")
+
+    assert notifier._queue.qsize() == 1

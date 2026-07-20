@@ -42,6 +42,7 @@ def reset_fill_poll_summary(monkeypatch):
     f3._last_fill_poll_summary = {}
     monkeypatch.setattr(f3, "F3_PRE_ORDER_QUIET_SEC", 0)
     monkeypatch.setattr(f3, "_fetch_buyable_qty", AsyncMock(return_value=_buyable()))
+    monkeypatch.setattr(f3, "_fetch_vi_active", AsyncMock(return_value=None))
     yield
     f3._last_fill_poll_summary = {}
 
@@ -1939,3 +1940,510 @@ async def test_slippage_guard_allows_fill_in_order_fill_buffer_zone(monkeypatch)
     assert state.get().position_status == "HOLDING"
     assert state.get().day_skip is False
     assert state.get().close_reason is None
+
+# ── 진입 전 VI 체크 ───────────────────────────────────────────────────
+
+_VI_ACTIVE_INFO = {
+    "vi_kind_code": "2", "cntg_vi_hour": "090032", "bsop_date": "20260720",
+    "vi_prc": "1140", "vi_stnd_prc": "0", "vi_dprt": "0.00", "vi_count": "1",
+}
+
+
+@pytest.mark.asyncio
+async def test_entry_blocked_when_vi_active_single_candidate(monkeypatch):
+    """2026-07-20 멤레이비티: VI 정지 중 시장가 진입 → 전량 미체결·당일 종료.
+
+    진입 직전 VI 발동 중이면 주문을 내지 않고 차단해야 한다.
+    단일 후보 경로에서는 당일 스킵으로 기록한다."""
+    events = []
+    _reset_state()
+    send_buy = AsyncMock()
+    notify = AsyncMock()
+
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10310.0, 10000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3.notifier, "send", notify)
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    monkeypatch.setattr(
+        f3, "_fetch_vi_active", AsyncMock(return_value=dict(_VI_ACTIVE_INFO)))
+
+    await f3.run(force=True)
+
+    send_buy.assert_not_awaited()
+    assert state.get().day_skip is True
+    assert state.get().close_reason == "VI_ACTIVE"
+    f3.db.record_skip.assert_awaited_once()
+    assert f3.db.record_skip.await_args.args[1] == "VI_ACTIVE"
+    notify.assert_awaited_once()
+    assert notify.await_args.args[0] == "VI_ENTRY_BLOCKED"
+    blocked = [kwargs for event, kwargs in events if event == "F3_ENTRY_BLOCKED"]
+    assert blocked and blocked[-1]["reason"] == "VI_ACTIVE"
+
+
+@pytest.mark.asyncio
+async def test_entry_retries_next_candidate_when_vi_active(monkeypatch):
+    """1순위가 VI 정지 중이면 취소·재주문으로 시간을 허비하지 않고
+    즉시 다음 후보로 넘어가야 한다."""
+    events = []
+    _reset_state()
+    state.get().target_ticker = "BAD001"
+    state.get().target_candidates = [
+        {"ticker": "BAD001", "name": "Bad", "expected_amount": 2_000_000.0},
+        {"ticker": "GOOD02", "name": "Good", "expected_amount": 1_000_000.0},
+    ]
+    send_buy = AsyncMock(return_value={
+        "rt_cd": "0",
+        "msg_cd": "MCA00000",
+        "msg1": "OK",
+        "output": {"ODNO": "0000000938", "KRX_FWDG_ORD_ORGNO": "001"},
+    })
+
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(
+        f3,
+        "_fetch_expected_price",
+        AsyncMock(side_effect=[
+            (10310.0, 10000.0),
+            (10400.0, 10000.0),
+            (10400.0, 10000.0),
+        ]),
+    )
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_fetch_buyable_qty", AsyncMock(return_value=_buyable(qty=91)))
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(
+        f3, "_poll_fill", AsyncMock(return_value={"fill_price": 10400, "fill_qty": 91}))
+    monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=10400))
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "record_order", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "update_order_fill", AsyncMock())
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+    monkeypatch.setattr(
+        f3, "_fetch_vi_active",
+        AsyncMock(side_effect=[dict(_VI_ACTIVE_INFO), None]))
+
+    await f3.run(force=True)
+
+    send_buy.assert_awaited_once_with("GOOD02", 91, "PAPER")
+    assert state.get().target_ticker == "GOOD02"
+    assert state.get().position_status == "HOLDING"
+    retry_events = [kwargs for event, kwargs in events if event == "ENTRY_CANDIDATE_RETRY"]
+    assert retry_events[-1]["ticker"] == "BAD001"
+    assert retry_events[-1]["reason"] == "VI_ACTIVE"
+    f3.db.record_skip.assert_not_awaited()
+    assert f3.notifier.send.await_args.args[0] == "ENTRY_EXECUTED"
+
+
+@pytest.mark.asyncio
+async def test_entry_proceeds_when_vi_check_fails(monkeypatch):
+    """VI 조회 실패는 진입을 막지 않는다(fail-open) — 관측 실패로 기회를 버리지 않는다."""
+    events = []
+    _reset_state()
+    send_buy = AsyncMock(return_value={
+        "rt_cd": "0",
+        "msg_cd": "MCA00000",
+        "msg1": "OK",
+        "output": {"ODNO": "0000000938", "KRX_FWDG_ORD_ORGNO": "001"},
+    })
+
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10310.0, 10000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_fetch_buyable_qty", AsyncMock(return_value=_buyable(qty=92)))
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(
+        f3, "_poll_fill", AsyncMock(return_value={"fill_price": 10310, "fill_qty": 92}))
+    monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=10310))
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "record_order", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "update_order_fill", AsyncMock())
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+    monkeypatch.setattr(
+        f3, "_fetch_vi_active",
+        AsyncMock(side_effect=RuntimeError("VI status query failed")))
+
+    await f3.run(force=True)
+
+    send_buy.assert_awaited_once()
+    assert state.get().position_status == "HOLDING"
+    errors = [kwargs for event, kwargs in events if event == "F3_VI_CHECK_ERROR"]
+    assert errors and "VI status query failed" in errors[-1]["error"]
+    f3.db.record_skip.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_all_candidates_vi_active_records_vi_active(monkeypatch):
+    """모든 후보가 VI로만 소진되면 최종 사유도 VI_ACTIVE로 기록한다.
+
+    시작 복원(main._restore_market_closed_from_db)은 VI_ACTIVE만 복원하므로
+    ENTRY_FAIL로 남기면 재시작 catch-up이 VI 해제가에 추격 진입할 수 있다."""
+    events = []
+    _reset_state()
+    state.get().target_ticker = "BAD001"
+    state.get().target_candidates = [
+        {"ticker": "BAD001", "name": "Bad", "expected_amount": 2_000_000.0},
+        {"ticker": "BAD002", "name": "Bad2", "expected_amount": 1_000_000.0},
+    ]
+    send_buy = AsyncMock()
+    notify = AsyncMock()
+
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(
+        f3,
+        "_fetch_expected_price",
+        AsyncMock(side_effect=[
+            (10310.0, 10000.0),
+            (10400.0, 10000.0),
+            (10400.0, 10000.0),
+        ]),
+    )
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3.notifier, "send", notify)
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    monkeypatch.setattr(
+        f3, "_fetch_vi_active",
+        AsyncMock(side_effect=[dict(_VI_ACTIVE_INFO), dict(_VI_ACTIVE_INFO)]),
+    )
+
+    await f3.run(force=True)
+
+    send_buy.assert_not_awaited()
+    assert state.get().day_skip is True
+    assert state.get().close_reason == "VI_ACTIVE"
+    skipped = [kwargs for event, kwargs in events if event == "ENTRY_CANDIDATE_RETRY_SKIPPED"]
+    assert skipped and skipped[-1]["reason"] == "NO_REMAINING_CANDIDATE"
+    f3.db.record_skip.assert_awaited_once()
+    assert f3.db.record_skip.await_args.args[1] == "VI_ACTIVE"
+    assert "NO_REMAINING_CANDIDATE" in f3.db.record_skip.await_args.args[2]
+    notify.assert_awaited_once()
+    assert notify.await_args.args[0] == "ENTRY_FAIL"
+
+
+@pytest.mark.asyncio
+async def test_mixed_rejection_reasons_keep_entry_fail(monkeypatch):
+    """소진 사유에 VI가 아닌 거절이 섞이면 최종 사유는 ENTRY_FAIL을 유지한다."""
+    events = []
+    _reset_state()
+    state.get().target_ticker = "BAD001"
+    state.get().target_candidates = [
+        {"ticker": "BAD001", "name": "Bad", "expected_amount": 2_000_000.0},
+        {"ticker": "BAD002", "name": "Bad2", "expected_amount": 1_000_000.0},
+    ]
+    send_buy = AsyncMock(return_value={
+        "rt_cd": "1",
+        "msg_cd": "APBK0919",
+        "msg1": "주문 거부",
+        "output": {},
+    })
+    notify = AsyncMock()
+
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(
+        f3,
+        "_fetch_expected_price",
+        AsyncMock(side_effect=[
+            (10310.0, 10000.0),
+            (10400.0, 10000.0),
+            (10400.0, 10000.0),
+        ]),
+    )
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3.notifier, "send", notify)
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    async def vi_status(ticker):
+        return dict(_VI_ACTIVE_INFO) if ticker == "BAD001" else None
+
+    monkeypatch.setattr(f3, "_fetch_vi_active", AsyncMock(side_effect=vi_status))
+
+    await f3.run(force=True)
+
+    assert state.get().day_skip is True
+    assert state.get().close_reason == "ENTRY_FAIL"
+    f3.db.record_skip.assert_awaited_once()
+    assert f3.db.record_skip.await_args.args[1] == "ENTRY_FAIL"
+    assert "NO_REMAINING_CANDIDATE" in f3.db.record_skip.await_args.args[2]
+
+
+@pytest.mark.asyncio
+async def test_entry_retry_rechecks_vi_before_second_order(monkeypatch):
+    """1차 미체결 폴링(최대 12초)·취소·대기 중 VI가 발동하면
+    2차 시장가 주문을 보내지 않고 당일 VI_ACTIVE로 차단해야 한다."""
+    events = []
+    _reset_state()
+    cancel_order = AsyncMock(return_value={"rt_cd": "0"})
+    send_buy = AsyncMock(return_value={
+        "rt_cd": "0",
+        "msg_cd": "MCA00000",
+        "msg1": "OK",
+        "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
+    })
+    notify = AsyncMock()
+
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(f3, "F3_ENTRY_RETRY_DELAY_SEC", 0)
+    monkeypatch.setattr(f3, "F3_ENTRY_CANCEL_RELEASE_WAIT_SEC", 0)
+    monkeypatch.setattr(f3, "_before_deadline", lambda deadline: True)
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10310.0, 10000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value=None))
+    monkeypatch.setattr(f3, "_cancel_order", cancel_order)
+    monkeypatch.setattr(f3.notifier, "send", notify)
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    async def vi_after_cancel(ticker):
+        # 1차 주문 취소 이후(= 재시도 직전)에만 VI 발동 상태를 돌려준다.
+        return dict(_VI_ACTIVE_INFO) if cancel_order.await_count else None
+
+    monkeypatch.setattr(f3, "_fetch_vi_active", AsyncMock(side_effect=vi_after_cancel))
+
+    await f3.run()
+
+    send_buy.assert_awaited_once()
+    assert state.get().position_status == "IDLE"
+    assert state.get().day_skip is True
+    assert state.get().close_reason == "VI_ACTIVE"
+    f3.db.record_skip.assert_awaited_once()
+    assert f3.db.record_skip.await_args.args[1] == "VI_ACTIVE"
+    blocked = [kwargs for event, kwargs in events if event == "F3_ENTRY_BLOCKED"]
+    assert blocked and blocked[-1]["reason"] == "VI_ACTIVE"
+
+
+@pytest.mark.asyncio
+async def test_entry_retry_vi_recheck_moves_to_next_candidate(monkeypatch):
+    """다후보 경로: 1순위 재시도 직전 VI가 감지되면 취소 상태를 정리하고
+    다음 후보로 넘어가 정상 진입해야 한다."""
+    events = []
+    _reset_state()
+    state.get().target_ticker = "BAD001"
+    state.get().target_candidates = [
+        {"ticker": "BAD001", "name": "Bad", "expected_amount": 2_000_000.0},
+        {"ticker": "GOOD02", "name": "Good", "expected_amount": 1_000_000.0},
+    ]
+    cancel_order = AsyncMock(return_value={"rt_cd": "0"})
+    send_buy = AsyncMock(return_value={
+        "rt_cd": "0",
+        "msg_cd": "MCA00000",
+        "msg1": "OK",
+        "output": {"ODNO": "0000000938", "KRX_FWDG_ORD_ORGNO": "001"},
+    })
+
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(f3, "F3_ENTRY_RETRY_DELAY_SEC", 0)
+    monkeypatch.setattr(f3, "F3_ENTRY_CANCEL_RELEASE_WAIT_SEC", 0)
+    monkeypatch.setattr(f3, "_before_deadline", lambda deadline: True)
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(
+        f3,
+        "_fetch_expected_price",
+        AsyncMock(side_effect=[
+            (10310.0, 10000.0),
+            (10400.0, 10000.0),
+            (10400.0, 10000.0),
+        ]),
+    )
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(
+        f3,
+        "_poll_fill",
+        AsyncMock(side_effect=[None, {"fill_price": 10400, "fill_qty": 91}]),
+    )
+    monkeypatch.setattr(f3, "_cancel_order", cancel_order)
+    monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=10400))
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "record_order", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "update_order_fill", AsyncMock())
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+
+    async def vi_status(ticker):
+        # BAD001은 1차 취소 이후에만 VI 발동, GOOD02는 항상 정상.
+        if ticker == "BAD001" and cancel_order.await_count:
+            return dict(_VI_ACTIVE_INFO)
+        return None
+
+    monkeypatch.setattr(f3, "_fetch_vi_active", AsyncMock(side_effect=vi_status))
+
+    await f3.run()
+
+    assert send_buy.await_count == 2
+    assert send_buy.await_args_list[0].args[0] == "BAD001"
+    assert send_buy.await_args_list[-1].args == ("GOOD02", 91, "PAPER")
+    assert state.get().target_ticker == "GOOD02"
+    assert state.get().position_status == "HOLDING"
+    retry_events = [kwargs for event, kwargs in events if event == "ENTRY_CANDIDATE_RETRY"]
+    assert retry_events and retry_events[-1]["ticker"] == "BAD001"
+    assert retry_events[-1]["reason"] == "VI_ACTIVE"
+    f3.db.record_skip.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_entry_retry_vi_check_runs_right_before_send(monkeypatch):
+    """재시도 VI 재확인은 quiet wait·매수가능수량 조회까지 끝난 뒤,
+    _send_buy 직전에 수행해야 한다 — 그 사이 발동한 VI도 잡아야 한다."""
+    events = []
+    _reset_state()
+    fetch_buyable = AsyncMock(return_value=_buyable())
+    send_buy = AsyncMock(return_value={
+        "rt_cd": "0",
+        "msg_cd": "MCA00000",
+        "msg1": "OK",
+        "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
+    })
+
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(f3, "F3_ENTRY_RETRY_DELAY_SEC", 0)
+    monkeypatch.setattr(f3, "F3_ENTRY_CANCEL_RELEASE_WAIT_SEC", 0)
+    monkeypatch.setattr(f3, "_before_deadline", lambda deadline: True)
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10310.0, 10000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_fetch_buyable_qty", fetch_buyable)
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value=None))
+    monkeypatch.setattr(f3, "_cancel_order", AsyncMock(return_value={"rt_cd": "0"}))
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    async def vi_status(ticker):
+        # 2차 시도의 매수가능수량 조회가 끝난 시점부터 VI 발동 — 조회~주문
+        # 사이 창에서 발동한 VI를 모델링한다.
+        return dict(_VI_ACTIVE_INFO) if fetch_buyable.await_count >= 2 else None
+
+    monkeypatch.setattr(f3, "_fetch_vi_active", AsyncMock(side_effect=vi_status))
+
+    await f3.run()
+
+    send_buy.assert_awaited_once()
+    assert state.get().position_status == "IDLE"
+    assert state.get().day_skip is True
+    assert state.get().close_reason == "VI_ACTIVE"
+    f3.db.record_skip.assert_awaited_once()
+    assert f3.db.record_skip.await_args.args[1] == "VI_ACTIVE"
+
+
+@pytest.mark.asyncio
+async def test_cancel_rejected_because_filled_recovers_fill(monkeypatch):
+    """취소 거부의 흔한 원인은 기체결 — 취소 실패 시 체결을 재확인해
+    재주문 없이 HOLDING으로 전환해야 한다(중복 주문 방지)."""
+    _reset_state()
+    send_buy = AsyncMock(return_value={
+        "rt_cd": "0",
+        "msg_cd": "MCA00000",
+        "msg1": "OK",
+        "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
+    })
+
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(f3, "F3_ENTRY_RETRY_DELAY_SEC", 0)
+    monkeypatch.setattr(f3, "F3_ENTRY_CANCEL_RELEASE_WAIT_SEC", 0)
+    monkeypatch.setattr(f3, "_before_deadline", lambda deadline: True)
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10310.0, 10000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(
+        f3,
+        "_poll_fill",
+        AsyncMock(side_effect=[None, {"fill_price": 10310, "fill_qty": 92}]),
+    )
+    monkeypatch.setattr(
+        f3, "_cancel_order",
+        AsyncMock(return_value={"rt_cd": "1", "msg_cd": "APBK0919", "msg1": "취소 불가"}),
+    )
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "record_order", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "update_order_fill", AsyncMock())
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+
+    await f3.run()
+
+    send_buy.assert_awaited_once()
+    assert state.get().position_status == "HOLDING"
+    assert state.get().entry_price == 10310
+    assert state.get().entry_qty == 92
+    f3.db.record_skip.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cancel_unconfirmed_blocks_candidate_switch_and_idle(monkeypatch):
+    """취소 성공을 확인하지 못하면 주문이 살아 있을 수 있다 —
+    재주문·후보 전환·IDLE 전환 없이 중단하고 운영자에게 알린다."""
+    events = []
+    _reset_state()
+    state.get().target_ticker = "BAD001"
+    state.get().target_candidates = [
+        {"ticker": "BAD001", "name": "Bad", "expected_amount": 2_000_000.0},
+        {"ticker": "GOOD02", "name": "Good", "expected_amount": 1_000_000.0},
+    ]
+    send_buy = AsyncMock(return_value={
+        "rt_cd": "0",
+        "msg_cd": "MCA00000",
+        "msg1": "OK",
+        "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
+    })
+    notify = AsyncMock()
+
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(f3, "F3_ENTRY_RETRY_DELAY_SEC", 0)
+    monkeypatch.setattr(f3, "F3_ENTRY_CANCEL_RELEASE_WAIT_SEC", 0)
+    monkeypatch.setattr(f3, "_before_deadline", lambda deadline: True)
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(
+        f3,
+        "_fetch_expected_price",
+        AsyncMock(side_effect=[
+            (10310.0, 10000.0),
+            (10400.0, 10000.0),
+            (10400.0, 10000.0),
+        ]),
+    )
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        f3, "_cancel_order",
+        AsyncMock(return_value={"rt_cd": "1", "msg_cd": "APBK1234", "msg1": "시스템 오류"}),
+    )
+    monkeypatch.setattr(f3.notifier, "send", notify)
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3.run()
+
+    # 살아 있을 수 있는 주문 옆에서 다른 후보로 갈아타면 안 된다.
+    send_buy.assert_awaited_once()
+    assert send_buy.await_args.args[0] == "BAD001"
+    # IDLE로 전환하지 않는다 — 미체결 주문 생존 가능성이 남아 있다.
+    assert state.get().position_status == "ENTERING"
+    assert state.get().day_skip is True
+    f3.db.record_skip.assert_awaited_once()
+    assert f3.db.record_skip.await_args.args[1] == "ENTRY_FAIL"
+    assert "CANCEL_UNCONFIRMED" in f3.db.record_skip.await_args.args[2]
+    unconfirmed_alerts = [
+        call for call in notify.await_args_list
+        if call.args[0] == "ENTRY_CANCEL_UNCONFIRMED"
+    ]
+    assert unconfirmed_alerts and unconfirmed_alerts[-1].kwargs["level"] == "ERROR"

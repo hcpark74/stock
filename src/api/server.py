@@ -42,6 +42,7 @@ from src.modules.f1_filter import (
     HIGH_GAP_MAX,
     HIGH_GAP_MIN_EXPECTED_AMOUNT,
     HIGH_GAP_MIN_VI_GAP,
+    MIN_EXPECTED_AMOUNT,
 )
 from src.modules.f3_entry import (
     ALLOC_RATIO,
@@ -54,6 +55,7 @@ from src.modules.f3_entry import (
     F3_PRE_ORDER_QUIET_SEC,
     F3_PYRAMID_AT,
     F3_PYRAMID_FILL_SEC,
+    F3_VI_CHECK_ENABLED,
     FIRST_RATIO,
     GAP_MAX_FILL,
     GAP_MAX_ORDER,
@@ -587,6 +589,7 @@ async def api_settings() -> JSONResponse:
                 "high_gap_pct": [round(GAP_MAX * 100, 2), round(HIGH_GAP_MAX * 100, 2)],
                 "high_gap_min_amount": HIGH_GAP_MIN_EXPECTED_AMOUNT,
                 "high_gap_min_vi_gap_pct": round(HIGH_GAP_MIN_VI_GAP * 100, 2),
+                "min_expected_amount": MIN_EXPECTED_AMOUNT,
                 "min_candidates": F1_MIN_CANDIDATES,
                 "retry_deadline": f"{F1_DEADLINE_H:02d}:{F1_DEADLINE_M:02d}",
                 "retry_interval_sec": F1_RETRY_INTERVAL_SEC,
@@ -613,6 +616,7 @@ async def api_settings() -> JSONResponse:
                 "retry_deadline": F3_ENTRY_RETRY_DEADLINE,
                 "pre_order_quiet_sec": F3_PRE_ORDER_QUIET_SEC,
                 "pyramid_fill_sec": F3_PYRAMID_FILL_SEC,
+                "vi_check_enabled": F3_VI_CHECK_ENABLED,
             },
             "f4": {
                 "hard_stop_pct": round(HARD_STOP_RATIO * 100, 2),

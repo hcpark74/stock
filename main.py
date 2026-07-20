@@ -179,11 +179,12 @@ async def _check_market_holiday() -> None:
 
 async def _restore_market_closed_from_db() -> None:
     """
-    재시작 복구: 당일 daily_skips에 MARKET_CLOSED가 있으면 휴장 상태 복원.
+    재시작 복구: 당일 daily_skips에 MARKET_CLOSED/VI_ACTIVE가 있으면 스킵 상태 복원.
 
-    F3의 휴장 주문 거부 감지는 인메모리(day_skip)만 세우고 상태 파일에도
+    F3의 휴장·VI 감지는 인메모리(day_skip)만 세우고 상태 파일에도
     남지 않으므로, 같은 날 재시작하면 catchup이 F1~F3를 다시 돌려 주문·알림이
-    반복된다. DB 기록이 유일한 재시작 생존 흔적이라 시작 시 1회 복원한다.
+    반복된다(VI_ACTIVE는 해제가 추격 진입까지). DB 기록이 유일한 재시작
+    생존 흔적이라 시작 시 1회 복원한다.
     """
     global _market_closed_date
     today = _today()
@@ -192,7 +193,15 @@ async def _restore_market_closed_from_db() -> None:
     except Exception as exc:
         logger.log("MARKET_CLOSED_RESTORE_FAILED", level="WARN", error=repr(exc))
         return
-    if not skip or skip.get("reason") != "MARKET_CLOSED":
+    reason = (skip or {}).get("reason")
+    if reason == "VI_ACTIVE":
+        s = state.get()
+        s.day_skip = True
+        s.close_reason = s.close_reason or "VI_ACTIVE"
+        logger.log("DAY_SKIP_RESTORED", level="INFO", date=today,
+                   reason="VI_ACTIVE", source="DAILY_SKIPS")
+        return
+    if reason != "MARKET_CLOSED":
         return
     _market_closed_date = today
     s = state.get()

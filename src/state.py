@@ -24,6 +24,7 @@ class State:
     position_status: str = "IDLE"       # IDLE | ENTERING | HOLDING | CLOSED
     close_reason: str | None = None     # TRAILING | HARD_STOP | TIMEOUT
                                         # ENTRY_FAIL | SLIPPAGE_GUARD | GAP_CHANGED
+                                        # VI_ACTIVE
     order_id: str | None = None
     trailing_active: bool = False
     highest_step: float = 0.0           # 마지막으로 통과한 이익 스텝 (0.025 단위, 예: 0.075)

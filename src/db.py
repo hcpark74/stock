@@ -101,7 +101,8 @@ async def init(db_path: str) -> None:
             date       TEXT NOT NULL UNIQUE,
             reason     TEXT NOT NULL CHECK (reason IN (
                            'NO_TARGET','GAP_CHANGED','ENTRY_FAIL',
-                           'SLIPPAGE_GUARD','MANUAL','MARKET_CLOSED'
+                           'SLIPPAGE_GUARD','MANUAL','MARKET_CLOSED',
+                           'VI_ACTIVE'
                        )),
             detail     TEXT,
             created_at TEXT NOT NULL
@@ -144,7 +145,7 @@ async def init(db_path: str) -> None:
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='daily_skips'"
     ) as cur:
         row = await cur.fetchone()
-    if row and "MARKET_CLOSED" not in (row["sql"] or ""):
+    if row and "VI_ACTIVE" not in (row["sql"] or ""):
         await _conn.executescript("""
             BEGIN;
             CREATE TABLE daily_skips_migrated (
@@ -152,7 +153,8 @@ async def init(db_path: str) -> None:
                 date       TEXT NOT NULL UNIQUE,
                 reason     TEXT NOT NULL CHECK (reason IN (
                                'NO_TARGET','GAP_CHANGED','ENTRY_FAIL',
-                               'SLIPPAGE_GUARD','MANUAL','MARKET_CLOSED'
+                               'SLIPPAGE_GUARD','MANUAL','MARKET_CLOSED',
+                               'VI_ACTIVE'
                            )),
                 detail     TEXT,
                 created_at TEXT NOT NULL

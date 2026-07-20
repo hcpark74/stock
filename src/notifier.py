@@ -24,6 +24,7 @@ _ACTIONABLE_ALERT_EVENTS = {
     "MARKET_CLOSED",
     "VI_DETECTED",
     "VI_RELEASED",
+    "VI_ENTRY_BLOCKED",
 }
 _CRITICAL_ALERT_LEVELS = {"error"}
 _LEVEL_LABELS = {
@@ -53,6 +54,8 @@ _ALERT_TITLES = {
     "PROCESS_RESTART_DETECTED": "프로세스 재시작 감지",
     "VI_DETECTED": "VI 발동",
     "VI_RELEASED": "VI 해제",
+    "VI_ENTRY_BLOCKED": "진입 전 VI 차단",
+    "ENTRY_CANCEL_UNCONFIRMED": "진입 주문 취소 확인 실패",
 }
 
 

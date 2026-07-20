@@ -19,12 +19,36 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
+from src.api import kis_rest
+
 KST = ZoneInfo("Asia/Seoul")
 
 _INFO_KEYS = (
     "vi_kind_code", "cntg_vi_hour", "bsop_date",
     "vi_prc", "vi_stnd_prc", "vi_dprt", "vi_count",
 )
+
+
+async def fetch_vi_status(ticker: str) -> dict:
+    """변동성완화장치(VI) 현황 조회 (FHPST01390000). F3 진입 전 체크·F4 감시 공용."""
+    resp = await kis_rest.get(
+        "/uapi/domestic-stock/v1/quotations/inquire-vi-status",
+        tr_id="FHPST01390000",
+        params={
+            "FID_DIV_CLS_CODE": "0",
+            "FID_COND_SCR_DIV_CODE": "20139",
+            "FID_MRKT_CLS_CODE": "0",
+            "FID_INPUT_ISCD": ticker,
+            "FID_RANK_SORT_CLS_CODE": "0",
+            "FID_INPUT_DATE_1": datetime.now(KST).strftime("%Y%m%d"),
+            "FID_TRGT_CLS_CODE": "",
+            "FID_TRGT_EXLS_CLS_CODE": "",
+        },
+    )
+    if str(resp.get("rt_cd", "")) != "0":
+        raise RuntimeError(
+            f"VI status query failed: {resp.get('msg_cd')} {resp.get('msg1')}")
+    return resp
 
 
 def parse_vi_payload(resp: dict, ticker: str) -> dict | None:
