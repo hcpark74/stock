@@ -1,6 +1,7 @@
 import asyncio
 import os
 import time
+from collections.abc import Callable
 
 import httpx
 
@@ -21,6 +22,7 @@ _TRANSIENT_RETRY_BASE_SEC = float(os.getenv("KIS_TRANSIENT_RETRY_BASE_SEC", "1.0
 _TRANSIENT_RETRY_MAX_SEC = float(os.getenv("KIS_TRANSIENT_RETRY_MAX_SEC", "8.0"))
 _TIMEOUT = 15.0        # 잔고조회 등 느린 API 대응 (문서: "조회속도가 느린 API")
 _rate_lock = asyncio.Lock()
+SEND_GUARD_BLOCKED_MSG_CD = "LOCAL_SEND_GUARD_BLOCKED"
 
 
 def account_no() -> str:
@@ -75,6 +77,7 @@ async def _request(
     _app_retry: int = 0,
     _transient_retry: int = 0,
     _token_retry: int = 0,
+    send_guard: Callable[[], bool] | None = None,
     **kwargs,
 ) -> dict:
     """Rate-limited KIS REST 요청. 401/429 자동 처리."""
@@ -95,6 +98,14 @@ async def _request(
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
+            # Rate-limit wait and client setup can consume the remaining order window.
+            # Evaluate at the last local point before handing the request to httpx.
+            if send_guard is not None and not send_guard():
+                return {
+                    "rt_cd": "1",
+                    "msg_cd": SEND_GUARD_BLOCKED_MSG_CD,
+                    "msg1": "request blocked by send guard",
+                }
             resp = await client.request(method, url, headers=_headers(tr_id), **kwargs)
     except httpx.HTTPError as exc:
         # 주문 등 POST는 서버 도달 후 응답만 유실됐을 수 있어(예: ReadTimeout)
@@ -120,6 +131,7 @@ async def _request(
                 _app_retry=_app_retry,
                 _transient_retry=_transient_retry + 1,
                 _token_retry=_token_retry,
+                send_guard=send_guard,
                 **kwargs,
             )
         log(
@@ -154,6 +166,7 @@ async def _request(
             timeout=timeout,
             _app_retry=_app_retry,
             _token_retry=_token_retry,
+            send_guard=send_guard,
             **kwargs,
         )
 
@@ -169,6 +182,7 @@ async def _request(
                 timeout=timeout,
                 _app_retry=_app_retry,
                 _token_retry=_token_retry + 1,
+                send_guard=send_guard,
                 **kwargs,
             )
 
@@ -190,6 +204,7 @@ async def _request(
                 timeout=timeout,
                 _app_retry=_app_retry,
                 _token_retry=_token_retry + 1,
+                send_guard=send_guard,
                 **kwargs,
             )
 
@@ -209,6 +224,7 @@ async def _request(
             timeout=timeout,
             _app_retry=_app_retry + 1,
             _token_retry=_token_retry,
+            send_guard=send_guard,
             **kwargs,
         )
 
@@ -229,5 +245,13 @@ async def post(
     body: dict | None = None,
     tr_id: str = "",
     timeout: float = _TIMEOUT,
+    send_guard: Callable[[], bool] | None = None,
 ) -> dict:
-    return await _request("POST", path, tr_id=tr_id, timeout=timeout, json=body)
+    return await _request(
+        "POST",
+        path,
+        tr_id=tr_id,
+        timeout=timeout,
+        send_guard=send_guard,
+        json=body,
+    )

@@ -43,6 +43,8 @@ def reset_fill_poll_summary(monkeypatch):
     monkeypatch.setattr(f3, "F3_PRE_ORDER_QUIET_SEC", 0)
     monkeypatch.setattr(f3, "_fetch_buyable_qty", AsyncMock(return_value=_buyable()))
     monkeypatch.setattr(f3, "_fetch_vi_active", AsyncMock(return_value=None))
+    # 마감 검사를 실제 시계와 분리 — 마감 동작 테스트는 개별적으로 False를 덮어쓴다
+    monkeypatch.setattr(f3, "_before_deadline", lambda _deadline: True)
     yield
     f3._last_fill_poll_summary = {}
 
@@ -211,6 +213,77 @@ async def test_fetch_available_cash_uses_settlement_amount_when_larger(monkeypat
 
     assert await f3._fetch_available_cash() == 8_865_465.0
     assert events[0][1]["cash_source"] == "prvs_rcdl_excc_amt"
+
+@pytest.mark.asyncio
+async def test_fetch_available_cash_retries_rate_limit_then_succeeds(monkeypatch):
+    """EGW00215 같은 일시 오류는 짧은 백오프 후 재시도해 정상 응답을 얻는다."""
+    sleep = AsyncMock()
+    get = AsyncMock(side_effect=[
+        {"rt_cd": "1", "msg_cd": "EGW00215", "msg1": "초당 거래건수 초과"},
+        {
+            "rt_cd": "0",
+            "output2": [{
+                "ord_psbl_cash": "5,000",
+                "dnca_tot_amt": "0",
+                "prvs_rcdl_excc_amt": "0",
+            }],
+        },
+    ])
+    monkeypatch.setattr(f3.kis_rest, "get", get)
+    monkeypatch.setattr(f3.asyncio, "sleep", sleep)
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+
+    assert await f3._fetch_available_cash() == 5000.0
+    assert get.await_count == 2
+    sleep.assert_awaited_once_with(f3.BALANCE_QUERY_RETRY_DELAY_SEC)
+
+@pytest.mark.asyncio
+async def test_fetch_available_cash_returns_none_when_retries_exhausted(monkeypatch):
+    """잔고 조회가 끝내 실패하면 현금 0이 아니라 None(조회 실패)을 반환한다."""
+    sleep = AsyncMock()
+    get = AsyncMock(return_value={
+        "rt_cd": "1", "msg_cd": "EGW00215", "msg1": "초당 거래건수 초과",
+    })
+    monkeypatch.setattr(f3.kis_rest, "get", get)
+    monkeypatch.setattr(f3.asyncio, "sleep", sleep)
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+
+    assert await f3._fetch_available_cash() is None
+    assert get.await_count == f3.BALANCE_QUERY_MAX_ATTEMPTS
+
+@pytest.mark.asyncio
+async def test_fetch_available_cash_retries_exception_then_succeeds(monkeypatch):
+    """kis_rest.get 예외(JSON 파싱 오류 등)도 오류 응답과 동일하게 재시도한다."""
+    sleep = AsyncMock()
+    get = AsyncMock(side_effect=[
+        RuntimeError("json parse error"),
+        {
+            "rt_cd": "0",
+            "output2": [{
+                "ord_psbl_cash": "5,000",
+                "dnca_tot_amt": "0",
+                "prvs_rcdl_excc_amt": "0",
+            }],
+        },
+    ])
+    monkeypatch.setattr(f3.kis_rest, "get", get)
+    monkeypatch.setattr(f3.asyncio, "sleep", sleep)
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+
+    assert await f3._fetch_available_cash() == 5000.0
+    assert get.await_count == 2
+
+@pytest.mark.asyncio
+async def test_fetch_available_cash_returns_none_when_exceptions_exhausted(monkeypatch):
+    """예외가 계속되면 전파하지 않고 None을 반환해 단일 경로도 BALANCE_QUERY_FAILED로 수렴한다."""
+    sleep = AsyncMock()
+    get = AsyncMock(side_effect=RuntimeError("boom"))
+    monkeypatch.setattr(f3.kis_rest, "get", get)
+    monkeypatch.setattr(f3.asyncio, "sleep", sleep)
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+
+    assert await f3._fetch_available_cash() is None
+    assert get.await_count == f3.BALANCE_QUERY_MAX_ATTEMPTS
 
 @pytest.mark.asyncio
 async def test_fetch_buyable_qty_uses_market_order_psbl_api(monkeypatch):
@@ -392,6 +465,152 @@ async def test_insufficient_balance_blocks_entry_with_reason(monkeypatch):
     send_buy.assert_not_awaited()
     f3.db.record_skip.assert_awaited_once()
     assert f3.db.record_skip.await_args.args[1] == "ENTRY_FAIL"
+
+@pytest.mark.asyncio
+async def test_first_order_blocked_when_deadline_passed_before_balance(monkeypatch):
+    """비강제 실행에서 마감(09:11)을 넘겼으면 잔고 조회 없이 최초 주문 전에 차단한다."""
+    events = []
+    send_buy = AsyncMock()
+    notify = AsyncMock()
+    fetch_cash = AsyncMock(return_value=1_000_000.0)
+    _reset_state()
+
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(f3, "_existing_trade_for_today", AsyncMock(return_value=None))
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10310.0, 10000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", fetch_cash)
+    monkeypatch.setattr(f3, "_before_deadline", lambda _deadline: False)
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3.notifier, "send", notify)
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3._run_single(force=False)
+
+    send_buy.assert_not_awaited()
+    fetch_cash.assert_not_awaited()
+    assert state.get().day_skip is True
+    blocked = [kwargs.get("reason") for event, kwargs in events if event == "F3_ENTRY_BLOCKED"]
+    assert "ENTRY_DEADLINE_PASSED" in blocked
+    f3.db.record_skip.assert_awaited_once()
+    assert "ENTRY_DEADLINE_PASSED" in f3.db.record_skip.await_args.args[2]
+
+@pytest.mark.asyncio
+async def test_first_order_blocked_when_deadline_passed_with_picked(monkeypatch):
+    """배치 경로에서 잔고 재시도로 지연된 경우에도 주문 직전 마감 검사가 최초 주문을 막는다."""
+    send_buy = AsyncMock()
+    notify = AsyncMock()
+    _reset_state()
+    picked = {
+        "ticker": "006340",
+        "expected_price": 10310.0,
+        "prev_close": 10000.0,
+        "cash": 1_000_000.0,
+        "total_amount": 100_000,
+        "total_qty": 9,
+    }
+
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(f3, "_existing_trade_for_today", AsyncMock(return_value=None))
+    monkeypatch.setattr(f3, "_before_deadline", lambda _deadline: False)
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3.notifier, "send", notify)
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3._run_single(force=False, picked=picked)
+
+    send_buy.assert_not_awaited()
+    assert state.get().day_skip is True
+    assert "ENTRY_DEADLINE_PASSED" in f3.db.record_skip.await_args.args[2]
+
+@pytest.mark.asyncio
+async def test_send_buy_blocked_when_deadline_passes_during_prep(monkeypatch):
+    """초기 검사 통과 후 quiet wait·수량 조회 중 마감을 넘기면
+    주문 직전 최종 검사가 전송을 막고 ENTERING을 IDLE로 되돌린다."""
+    events = []
+    send_buy = AsyncMock()
+    notify = AsyncMock()
+    _reset_state()
+
+    # 잔고 조회 전·1차 주문 전 검사는 통과, _send_buy 직전 최종 검사에서 마감 초과
+    deadline_checks = iter([True, True])
+    monkeypatch.setattr(f3, "_before_deadline", lambda deadline: next(deadline_checks, False))
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(f3, "_existing_trade_for_today", AsyncMock(return_value=None))
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10310.0, 10000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3.notifier, "send", notify)
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3._run_single(force=False)
+
+    send_buy.assert_not_awaited()
+    assert state.get().position_status == "IDLE"
+    assert state.get().day_skip is True
+    blocked = [kwargs.get("reason") for event, kwargs in events if event == "F3_ENTRY_BLOCKED"]
+    assert "ENTRY_DEADLINE_PASSED" in blocked
+    f3.db.record_skip.assert_awaited_once()
+    assert "ENTRY_DEADLINE_PASSED" in f3.db.record_skip.await_args.args[2]
+    assert "stage=AT_ORDER" in f3.db.record_skip.await_args.args[2]
+
+
+@pytest.mark.asyncio
+async def test_send_buy_blocked_when_deadline_passes_during_rest_rate_wait(monkeypatch):
+    """A REST dispatch guard rejection must restore IDLE and use the deadline path."""
+    events = []
+    send_buy = AsyncMock(return_value={
+        "rt_cd": "1",
+        "msg_cd": f3.kis_rest.SEND_GUARD_BLOCKED_MSG_CD,
+        "msg1": "request blocked by send guard",
+    })
+    _reset_state()
+
+    monkeypatch.setattr(f3, "_before_deadline", lambda _deadline: True)
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(f3, "_existing_trade_for_today", AsyncMock(return_value=None))
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10310.0, 10000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3._run_single(force=False)
+
+    send_buy.assert_awaited_once()
+    assert callable(send_buy.await_args.kwargs["send_guard"])
+    assert state.get().position_status == "IDLE"
+    assert state.get().day_skip is True
+    event_names = [event for event, _kwargs in events]
+    assert "ENTRY_ORDER_SENT" not in event_names
+    assert "ENTRY_DEADLINE_PASSED" in event_names
+    assert "stage=AT_HTTP_SEND" in f3.db.record_skip.await_args.args[2]
+
+@pytest.mark.asyncio
+async def test_run_single_cash_none_blocks_with_balance_query_failed(monkeypatch):
+    """단일 진입 경로에서도 잔고 조회 실패(None)는 QTY_ZERO가 아니라 BALANCE_QUERY_FAILED로 차단한다."""
+    events = []
+    send_buy = AsyncMock()
+    _reset_state()
+
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(f3, "_existing_trade_for_today", AsyncMock(return_value=None))
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10310.0, 10000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=None))
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3._run_single(force=True)
+
+    assert state.get().day_skip is True
+    assert state.get().close_reason == "BALANCE_QUERY_FAILED"
+    blocked = [kwargs.get("reason") for event, kwargs in events if event == "F3_ENTRY_BLOCKED"]
+    assert "QTY_ZERO" not in blocked
+    send_buy.assert_not_awaited()
+    assert f3.notifier.send.await_args.args[0] == "BALANCE_QUERY_FAILED"
+    f3.db.record_skip.assert_awaited_once()
+    assert f3.db.record_skip.await_args.args[1] == "ENTRY_FAIL"
+    assert "BALANCE_QUERY_FAILED" in f3.db.record_skip.await_args.args[2]
 
 @pytest.mark.asyncio
 async def test_order_rejected_sets_day_skip(monkeypatch):
@@ -1462,7 +1681,9 @@ async def test_candidate_retry_stops_at_deadline(monkeypatch):
     monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
     monkeypatch.setattr(f3, "_pre_order_quiet_wait", AsyncMock())
     monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
-    monkeypatch.setattr(f3, "_before_deadline", lambda deadline: False)
+    # 첫 주문 전·전송 직전 검사는 통과, 이후(후보 재시도 시점)는 마감 초과
+    deadline_checks = iter([True, True])
+    monkeypatch.setattr(f3, "_before_deadline", lambda deadline: next(deadline_checks, False))
     monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10310.0, 10000.0)))
     monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
     monkeypatch.setattr(f3, "_fetch_buyable_qty", AsyncMock(return_value=_buyable(qty=92, amt=999_999_999.0)))
@@ -1640,7 +1861,9 @@ async def test_entry_fail_uses_last_run_attempt_when_retry_skipped(monkeypatch):
     _reset_state()
 
     monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 2)
-    monkeypatch.setattr(f3, "_before_deadline", lambda deadline: False)
+    # 잔고 조회 전·첫 주문 전·전송 직전 검사는 통과, 2차 시도 시점은 마감 초과
+    deadline_checks = iter([True, True, True])
+    monkeypatch.setattr(f3, "_before_deadline", lambda deadline: next(deadline_checks, False))
     monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
     monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
     monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10310.0, 10000.0)))
@@ -1775,7 +1998,8 @@ async def test_recheck_candidate_exception_blocks_only_that_candidate(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_recheck_cash_exception_becomes_zero_cash_skip(monkeypatch):
+async def test_recheck_cash_exception_blocks_with_balance_query_failed(monkeypatch):
+    """잔고 조회 예외는 현금 0(INSUFFICIENT_BALANCE)이 아니라 BALANCE_QUERY_FAILED로 차단한다."""
     events = []
     _reset_state()
     state.get().target_ticker = "GOOD01"
@@ -1792,9 +2016,40 @@ async def test_recheck_cash_exception_becomes_zero_cash_skip(monkeypatch):
     ranked = await f3._rank_final_entry_candidates(state.get())
 
     assert ranked is None
+    assert state.get().day_skip is True
+    assert state.get().close_reason == "BALANCE_QUERY_FAILED"
     assert "BALANCE_QUERY_ERROR" in [event for event, _ in events]
+    blocked = [kwargs.get("reason") for event, kwargs in events if event == "F3_ENTRY_BLOCKED"]
+    assert "QTY_ZERO" not in blocked
     f3.notifier.send.assert_awaited_once()
+    assert f3.notifier.send.await_args.args[0] == "BALANCE_QUERY_FAILED"
     f3.db.record_skip.assert_awaited_once()
+    assert f3.db.record_skip.await_args.args[1] == "ENTRY_FAIL"
+    assert "BALANCE_QUERY_FAILED" in f3.db.record_skip.await_args.args[2]
+
+
+@pytest.mark.asyncio
+async def test_recheck_cash_none_blocks_with_balance_query_failed(monkeypatch):
+    """잔고 조회가 재시도 끝에 None을 반환하면 후보 재검증 없이 BALANCE_QUERY_FAILED로 차단한다."""
+    _reset_state()
+    state.get().target_ticker = "GOOD01"
+    state.get().target_candidates = [
+        {"ticker": "GOOD01", "name": "Good", "expected_amount": 2_000_000.0},
+    ]
+
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10400.0, 10000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=None))
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    ranked = await f3._rank_final_entry_candidates(state.get())
+
+    assert ranked is None
+    assert state.get().day_skip is True
+    assert state.get().close_reason == "BALANCE_QUERY_FAILED"
+    assert f3.notifier.send.await_args.args[0] == "BALANCE_QUERY_FAILED"
+    assert "BALANCE_QUERY_FAILED" in f3.db.record_skip.await_args.args[2]
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -156,6 +158,34 @@ async def persist(state_dir: str, date_str: str) -> None:
     }
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(dst)
+
+
+def discard(state_dir: str) -> None:
+    """지난 거래일의 today_state.json 폐기. 파일이 없으면 무시."""
+    (Path(state_dir) / "today_state.json").unlink(missing_ok=True)
+
+
+def backup_stale(state_dir: str, stale_date: str) -> bool:
+    """지난 거래일 상태 파일을 증거 사본으로 격리 (today_state.stale_<날짜>.json).
+
+    이후 당일 DB OPEN 거래 복구의 persist가 원본을 덮어써도 증거가 남는다.
+    같은 stale 날짜면 같은 이름에 덮어쓰므로 재시작이 반복돼도 사본이 쌓이지 않는다.
+    날짜는 YYYYMMDD만 신뢰한다 — 손상된 값(경로 문자 포함 가능)은 해시로 치환해
+    파일명 오류를 막는다. 사본 확보 여부를 반환하며 예외는 전파하지 않는다
+    (증거 백업 실패가 포지션 복구를 중단시키면 안 된다).
+    """
+    if not re.fullmatch(r"\d{8}", stale_date or ""):
+        digest = hashlib.md5((stale_date or "").encode("utf-8")).hexdigest()[:8]
+        stale_date = f"unknown_{digest}"
+    try:
+        src = Path(state_dir) / "today_state.json"
+        if not src.exists():
+            return True
+        dst = Path(state_dir) / f"today_state.stale_{stale_date}.json"
+        dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        return True
+    except Exception:
+        return False
 
 
 def load(state_dir: str) -> dict | None:

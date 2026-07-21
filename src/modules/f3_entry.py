@@ -3,6 +3,7 @@
 import asyncio
 import os
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -33,6 +34,8 @@ F3_PRE_ORDER_QUIET_SEC = float(os.getenv("F3_PRE_ORDER_QUIET_SEC", "1.5"))
 F3_RECHECK_MAX_ATTEMPTS = max(1, int(os.getenv("F3_RECHECK_MAX_ATTEMPTS", "3")))
 F3_RECHECK_RETRY_DELAY_SEC = float(os.getenv("F3_RECHECK_RETRY_DELAY_SEC", "1.0"))
 F3_RECHECK_BATCH_TIMEOUT_SEC = float(os.getenv("F3_RECHECK_BATCH_TIMEOUT_SEC", "0"))
+BALANCE_QUERY_MAX_ATTEMPTS = max(1, int(os.getenv("BALANCE_QUERY_MAX_ATTEMPTS", "3")))
+BALANCE_QUERY_RETRY_DELAY_SEC = float(os.getenv("BALANCE_QUERY_RETRY_DELAY_SEC", "1.0"))
 F3_FIRST_ORDER_AT = "IMMEDIATE"
 F3_PYRAMID_AT = os.getenv("F3_PYRAMID_AT", "09:10:40")
 F3_PYRAMID_FILL_SEC = float(os.getenv("F3_PYRAMID_FILL_SEC", "10.0"))
@@ -348,7 +351,16 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
         total_amount = int(picked["total_amount"])
         total_qty = int(picked["total_qty"])
     else:
+        # 잔고 재시도(최대 수 초)로 마감을 넘길 수 있으므로 조회 전에 먼저 확인한다
+        if not force and not _before_deadline(_entry_retry_deadline()):
+            await _block_entry_deadline_passed(ticker, "BEFORE_BALANCE_QUERY")
+            return
         cash = await _fetch_available_cash()
+        if cash is None:
+            s.day_skip = True
+            s.close_reason = "BALANCE_QUERY_FAILED"
+            await _alert_balance_query_failed(ticker, candidate_tickers)
+            return
         total_amount = int(cash * ALLOC_RATIO)
         total_qty = int(total_amount / expected_price) if expected_price else 0
     if total_qty == 0:
@@ -381,6 +393,12 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
 
     first_qty = max(1, int(total_qty * FIRST_RATIO))
     second_qty = total_qty - first_qty
+
+    # ── 진입 마감 재확인 — 잔고 재시도·느린 조회로 지연됐으면 최초 주문도 내지 않는다.
+    # 주문 루프의 마감 검사는 attempt>1에만 적용되므로 여기서 1차 주문을 막는다.
+    if not force and not _before_deadline(_entry_retry_deadline()):
+        await _block_entry_deadline_passed(ticker, "BEFORE_FIRST_ORDER")
+        return
 
     # ── 1차 배정 수량 100% 시장가 매수 ───────────────────────────────
     if not await state.set_entering():
@@ -564,7 +582,27 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
                 )
                 return
 
-        order_resp = await _send_buy(ticker, first_qty, mode)
+        # ── 마감 최종 확인 — quiet wait·수량 조회(재시도면 sleep·취소 대기까지)로
+        # 앞선 검사 이후에도 시간이 흘렀다. 아직 살아 있는 주문이 없으므로
+        # ENTERING을 IDLE로 되돌리고 차단하는 것이 안전하다.
+        if not force and not _before_deadline(_entry_retry_deadline()):
+            await state.reset_to_idle("ENTRY_FAIL")
+            await _block_entry_deadline_passed(ticker, "AT_ORDER")
+            return
+
+        if force:
+            order_resp = await _send_buy(ticker, first_qty, mode)
+        else:
+            order_resp = await _send_buy(
+                ticker,
+                first_qty,
+                mode,
+                send_guard=lambda: _before_deadline(_entry_retry_deadline()),
+            )
+        if order_resp.get("msg_cd") == kis_rest.SEND_GUARD_BLOCKED_MSG_CD:
+            await state.reset_to_idle("ENTRY_FAIL")
+            await _block_entry_deadline_passed(ticker, "AT_HTTP_SEND")
+            return
         order_id = order_resp.get("output", {}).get("ODNO", "UNKNOWN")
         _pending_buy_org_no = order_resp.get("output", {}).get("KRX_FWDG_ORD_ORGNO", "")
         log(
@@ -977,6 +1015,62 @@ def _entry_candidate_tickers(s: state.State) -> list[str]:
     return tickers
 
 
+async def _block_entry_deadline_passed(ticker: str | None, stage: str) -> None:
+    """진입 마감(F3_ENTRY_RETRY_DEADLINE) 초과 — 잔고 재시도 등으로 지연된 최초 주문 차단."""
+    s = state.get()
+    s.day_skip = True
+    s.close_reason = "ENTRY_FAIL"
+    log(
+        "ENTRY_DEADLINE_PASSED",
+        level="WARN",
+        ticker=ticker,
+        stage=stage,
+        deadline=F3_ENTRY_RETRY_DEADLINE,
+    )
+    _log_entry_blocked(ticker, "ENTRY_DEADLINE_PASSED", stage=stage)
+    await notifier.send(
+        "ENTRY_FAIL",
+        level="WARN",
+        message=(
+            f"진입 마감시각({F3_ENTRY_RETRY_DEADLINE}) 초과로 "
+            "최초 주문을 내지 않고 중단합니다."
+        ),
+        ticker=ticker,
+    )
+    await db.record_skip(
+        _today(),
+        "ENTRY_FAIL",
+        f"reason=ENTRY_DEADLINE_PASSED,stage={stage},ticker={ticker}",
+    )
+
+
+async def _alert_balance_query_failed(ticker: str | None, candidates: list[str]) -> None:
+    """잔고 조회 실패 확정 — 실제 잔고 부족(INSUFFICIENT_BALANCE)과 구분해 기록·통지한다."""
+    log(
+        "BALANCE_QUERY_FAILED",
+        level="CRIT",
+        ticker=ticker,
+        candidates=candidates,
+        max_attempts=BALANCE_QUERY_MAX_ATTEMPTS,
+    )
+    _log_entry_blocked(ticker, "BALANCE_QUERY_FAILED", candidates=candidates)
+    await notifier.send(
+        "BALANCE_QUERY_FAILED",
+        level="CRIT",
+        message=(
+            f"잔고 조회가 {BALANCE_QUERY_MAX_ATTEMPTS}회 재시도 끝에 실패해 "
+            "진입을 차단했습니다. 잔고 부족이 아니라 API 오류입니다. "
+            "KIS 상태와 계좌를 확인하세요."
+        ),
+        ticker=ticker,
+    )
+    await db.record_skip(
+        _today(),
+        "ENTRY_FAIL",
+        f"reason=BALANCE_QUERY_FAILED,candidates={','.join(candidates)}",
+    )
+
+
 async def _rank_final_entry_candidates(
     s: state.State,
     exclude_tickers: set[str] | None = None,
@@ -1028,7 +1122,7 @@ async def _rank_final_entry_candidates(
             "prev_close": prev_close,
         }
 
-    async def fetch_available_cash_safe() -> float:
+    async def fetch_available_cash_safe() -> float | None:
         try:
             return await _fetch_available_cash()
         except Exception as exc:
@@ -1038,7 +1132,7 @@ async def _rank_final_entry_candidates(
                 reason="EXCEPTION",
                 error=repr(exc),
             )
-            return 0.0
+            return None
 
     batch_started = time.perf_counter()
     cash_task = asyncio.create_task(fetch_available_cash_safe())
@@ -1078,6 +1172,13 @@ async def _rank_final_entry_candidates(
         elapsed_ms=batch_elapsed_ms,
         timeout_sec=F3_RECHECK_BATCH_TIMEOUT_SEC,
     )
+    if cash is None:
+        s.day_skip = True
+        s.close_reason = "BALANCE_QUERY_FAILED"
+        s.target_ticker = None
+        s.target_name = None
+        await _alert_balance_query_failed(tickers[0] if tickers else None, tickers)
+        return None
     total_amount = int(cash * ALLOC_RATIO)
 
     for row in recheck_rows:
@@ -1502,38 +1603,49 @@ async def _fetch_current_price(ticker: str) -> float:
     return float(resp.get("output", {}).get("stck_prpr") or 0)
 
 
-async def _fetch_available_cash() -> float:
-    """주문가능 현금 반환 (주식잔고조회 TTTC8434R).
+async def _fetch_available_cash() -> float | None:
+    """주문가능 현금 반환 (주식잔고조회 TTTC8434R). 조회 실패 시 None.
 
     ord_psbl_cash 우선, 부재 시 dnca_tot_amt와 prvs_rcdl_excc_amt(D+2 정산금) 중 큰 값.
+    오류 응답(EGW00215 호출 제한 등)은 백오프 후 재시도하고, 끝내 실패하면
+    실제 잔고 부족(0원)과 구분되도록 None을 반환한다.
     """
     mode = os.getenv("KIS_MODE", "PAPER")
-    resp = await kis_rest.get(
-        "/uapi/domestic-stock/v1/trading/inquire-balance",
-        tr_id=_BAL_TR[mode],
-        params=kis_rest.balance_inquiry_params(),
-    )
-    if str(resp.get("rt_cd", "0")) != "0":
+    output2 = None
+    for attempt in range(1, BALANCE_QUERY_MAX_ATTEMPTS + 1):
+        resp = None
+        error = None
+        try:
+            resp = await kis_rest.get(
+                "/uapi/domestic-stock/v1/trading/inquire-balance",
+                tr_id=_BAL_TR[mode],
+                params=kis_rest.balance_inquiry_params(),
+            )
+        except Exception as exc:
+            error = exc
+        if error is not None:
+            error_reason = "EXCEPTION"
+        elif str(resp.get("rt_cd", "0")) == "0":
+            output2 = resp.get("output2")
+            if isinstance(output2, list) and output2 and isinstance(output2[0], dict):
+                break
+            error_reason = "MISSING_OUTPUT2"
+        else:
+            error_reason = "ERROR_RESPONSE"
         log(
             "BALANCE_QUERY_ERROR",
             level="WARN",
-            rt_cd=resp.get("rt_cd"),
-            msg_cd=resp.get("msg_cd"),
-            msg1=resp.get("msg1"),
+            reason=error_reason,
+            attempt=attempt,
+            max_attempts=BALANCE_QUERY_MAX_ATTEMPTS,
+            error=repr(error) if error is not None else None,
+            rt_cd=resp.get("rt_cd") if resp else None,
+            msg_cd=resp.get("msg_cd") if resp else None,
+            msg1=resp.get("msg1") if resp else None,
         )
-        return 0.0
-
-    output2 = resp.get("output2")
-    if not isinstance(output2, list) or not output2 or not isinstance(output2[0], dict):
-        log(
-            "BALANCE_QUERY_ERROR",
-            level="WARN",
-            reason="MISSING_OUTPUT2",
-            rt_cd=resp.get("rt_cd"),
-            msg_cd=resp.get("msg_cd"),
-            msg1=resp.get("msg1"),
-        )
-        return 0.0
+        if attempt >= BALANCE_QUERY_MAX_ATTEMPTS:
+            return None
+        await asyncio.sleep(BALANCE_QUERY_RETRY_DELAY_SEC)
 
     summary = output2[0]
     ord_psbl_present = "ord_psbl_cash" in summary and str(summary.get("ord_psbl_cash", "")).strip() != ""
@@ -1615,11 +1727,17 @@ async def _fetch_buyable_qty(ticker: str, mode: str) -> dict:
     return result
 
 
-async def _send_buy(ticker: str, qty: int, mode: str) -> dict:
+async def _send_buy(
+    ticker: str,
+    qty: int,
+    mode: str,
+    send_guard: Callable[[], bool] | None = None,
+) -> dict:
     """시장가 매수 주문 (ORD_DVSN=01)."""
     return await kis_rest.post(
         "/uapi/domestic-stock/v1/trading/order-cash",
         tr_id=_BUY_TR[mode],
+        send_guard=send_guard,
         body={
             "CANO": kis_rest.account_no(),
             "ACNT_PRDT_CD": kis_rest.account_cd(),

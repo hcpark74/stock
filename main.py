@@ -448,10 +448,32 @@ async def _recover_state() -> None:
 
     if data is not None and data.get("date") != today:
         stale_status = data.get("position_status")
-        if stale_status in ("HOLDING", "ENTERING"):
-            # 전일 미청산 포지션 의심 — 실계좌에 잔고가 남아 있을 수 있으므로
-            # 운영자가 확인하기 전까지 당일 자동 진입(F1~F3)을 차단한다.
+        if stale_status in ("CLOSED", "IDLE"):
+            # 정상 종료된 지난 거래일 파일 — 잔류 위험이 없으므로 알림 없이
+            # 폐기한다. 남겨두면 재시작마다 다시 처리된다.
+            logger.log(
+                "STALE_STATE_DISCARDED",
+                level="INFO",
+                stale_date=data.get("date"),
+                stale_status=stale_status,
+                ticker=data.get("ticker"),
+            )
+            state.discard(STATE_DIR)
+        else:
+            # HOLDING/ENTERING은 전일 미청산 포지션 의심, 그 외(누락·알 수 없는
+            # 상태)는 파일 손상 의심 — 실계좌에 잔고가 남아 있을 수 있으므로
+            # 운영자가 확인하기 전까지 당일 자동 진입(F1~F3)을 차단하고
+            # 파일은 증거로 보존한다.
             # 해제: 계좌 확인 후 문제없으면 today_state.json 삭제 후 재시작.
+            # 당일 DB OPEN 거래 복구가 이 파일을 덮어쓸 수 있으므로 증거 사본을 먼저 격리한다.
+            # 사본 실패는 기록만 하고 계속한다 — 차단·알림·복구가 우선이다.
+            if not state.backup_stale(STATE_DIR, str(data.get("date"))):
+                logger.log(
+                    "STALE_BACKUP_FAILED",
+                    level="CRIT",
+                    stale_date=data.get("date"),
+                    stale_status=stale_status,
+                )
             state.get().day_skip = True
             logger.log(
                 "STALE_POSITION_DETECTED",
@@ -471,12 +493,6 @@ async def _recover_state() -> None:
                     "확인하고, 문제없으면 today_state.json 삭제 후 재시작하세요."
                 ),
                 ticker=data.get("ticker"),
-            )
-        else:
-            await notifier.send(
-                "STALE_POSITION_DETECTED",
-                level="CRIT",
-                message=f"전일 포지션 잔류 의심. date={data.get('date')}",
             )
         data = None
 

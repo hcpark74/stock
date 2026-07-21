@@ -103,6 +103,8 @@ async def main() -> None:
         raise SystemExit("ABORT: already past 11:00 KST")
 
     cash = await f3_entry._fetch_available_cash()
+    if cash is None:
+        raise SystemExit("ABORT: balance query failed (BALANCE_QUERY_FAILED)")
     price = await f3_entry._fetch_current_price(TICKER)
     orderable_qty, psbl_resp = await fetch_orderable_qty(TICKER, mode)
     theoretical_qty = int((cash * BUY_CASH_RATIO) // price) if price else 0

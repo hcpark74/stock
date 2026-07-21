@@ -56,6 +56,7 @@ _ALERT_TITLES = {
     "VI_RELEASED": "VI 해제",
     "VI_ENTRY_BLOCKED": "진입 전 VI 차단",
     "ENTRY_CANCEL_UNCONFIRMED": "진입 주문 취소 확인 실패",
+    "BALANCE_QUERY_FAILED": "잔고 조회 실패로 진입 차단",
 }
 
 

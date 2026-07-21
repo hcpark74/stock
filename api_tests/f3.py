@@ -49,6 +49,9 @@ async def run(confirm: bool = False) -> bool:
     except Exception as e:
         h.fail("_fetch_available_cash", repr(e))
         return False
+    if cash is None:
+        h.fail("_fetch_available_cash", "BALANCE_QUERY_FAILED (재시도 소진)")
+        return False
 
     alloc = int(cash * mod.ALLOC_RATIO)
     qty   = int(alloc / expected) if expected > 0 else 0

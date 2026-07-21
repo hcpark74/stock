@@ -513,6 +513,7 @@ Telegram Bot 구현 요건
   CIRCUIT_BREAKER           | CRIT   | 서킷브레이커 발동. 전 종목 거래 정지.
   TRADING_HALTED            | CRIT   | {ticker} 거래 정지. 수동 대응 필요.
   STALE_POSITION_DETECTED   | CRIT   | 전일 포지션 잔류 의심. 즉시 확인 필요.
+  BALANCE_QUERY_FAILED      | CRIT   | 잔고 조회 재시도 소진. API 오류로 진입 차단.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 6. 장애 복구 (Fault Recovery)
@@ -686,7 +687,17 @@ Telegram Bot 구현 요건
      skip_reason == "MACRO_KILL_SWITCH"이면 PROCESS_RESTART_DETECTED 로그에
      recovered_status="DAY_SKIP_RESTORED"를 남긴다.
   4. position_status == "CLOSED": 복구 불필요, 정상 대기.
-  5. date가 오늘이 아님: 전일 잔여 포지션 의심 → 즉시 긴급 알림.
+  5. date가 오늘이 아님:
+     position_status가 CLOSED/IDLE: 정상 종료된 파일 → 알림 없이 폐기
+     (STALE_STATE_DISCARDED, INFO 로그만 기록).
+     그 외(HOLDING/ENTERING/누락·알 수 없는 상태): 전일 잔여 포지션 또는
+     파일 손상 의심 → 즉시 긴급 알림(STALE_POSITION_DETECTED) + 당일 자동
+     진입 차단. 파일은 운영자 확인용 증거로 유지하되, 이후 당일 DB OPEN
+     거래 복구의 persist가 덮어쓸 수 있으므로 차단 시점에
+     today_state.stale_<날짜>.json 사본을 먼저 격리한다.
+     사본 파일명의 날짜는 YYYYMMDD만 신뢰하고 그 외는 unknown_<해시>로
+     치환한다. 사본 실패는 STALE_BACKUP_FAILED(CRIT) 로그만 남기고
+     차단·알림·포지션 복구는 계속한다.
   6. 알림: PROCESS_RESTART_DETECTED 이벤트 발송.
 
 ● today_state.json 초기화:
@@ -1002,6 +1013,12 @@ Walk-Forward 방식을 필수 적용한다.
   - `F3_ENTRY_RETRY_FILL_SEC`
   - `F3_ENTRY_RETRY_DEADLINE`
 - 매수 주문 직전에는 `F3_PRE_ORDER_QUIET_SEC`만큼 대기해 직전 조회 호출과 주문 호출이 연속으로 붙지 않게 한다.
+- 마감(`F3_ENTRY_RETRY_DEADLINE`, 기본 09:11) 검사는 재시도뿐 아니라 최초 주문에도 적용한다.
+  비강제 실행은 잔고 조회 전, 1차 주문 준비 전, 매 시도의 `_send_buy` 호출 직전, 그리고
+  KIS rate-limit 대기 후 실제 HTTP 전송 직전에 검사한다 — quiet wait·수량 조회·REST 대기 중
+  마감을 넘겨도 주문이 나가지 않는다.
+  전송 직전 차단 시점에는 이미 ENTERING이므로 IDLE로 되돌린 뒤
+  `ENTRY_DEADLINE_PASSED`로 기록한다 (force 캐치업은 예외).
 - 각 시도에서 미체결이면 취소 주문을 전송한다. 마지막 시도 미체결 주문도 반드시 취소 대상이다.
 - 체결조회 타임아웃, 주문 전송, 취소 전송, 재시도 시작/생략은 각각 로그 이벤트로 남긴다.
 - 최종 미체결이면 `ENTRY_FAIL`로 기록하고 당일 진입은 종료한다.

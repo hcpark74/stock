@@ -96,6 +96,46 @@ async def test_kis_rest_rate_limiter_serializes_concurrent_requests(monkeypatch)
     assert min(gaps) >= 0.040
 
 
+@pytest.mark.asyncio
+async def test_post_send_guard_runs_after_rate_limit_wait(monkeypatch):
+    """A deadline that passes during rate-limit sleep must block HTTP dispatch."""
+    allowed = True
+    request_calls = 0
+
+    async def fake_sleep(_seconds):
+        nonlocal allowed
+        allowed = False
+
+    class NoDispatchClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request(self, *args, **kwargs):
+            nonlocal request_calls
+            request_calls += 1
+            return _FakeResponse()
+
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 1.0)
+    monkeypatch.setattr(kis_rest, "_last_call_at", time.monotonic())
+    monkeypatch.setattr(kis_rest.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(kis_rest.httpx, "AsyncClient", NoDispatchClient)
+
+    resp = await kis_rest.post(
+        "/order",
+        body={"qty": 1},
+        send_guard=lambda: allowed,
+    )
+
+    assert resp["msg_cd"] == kis_rest.SEND_GUARD_BLOCKED_MSG_CD
+    assert request_calls == 0
+
+
 class _TokenExpiredThenOkClient:
     calls = 0
 

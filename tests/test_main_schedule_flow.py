@@ -1,5 +1,5 @@
 from datetime import timedelta
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -891,6 +891,7 @@ async def test_recover_state_stale_state_file_allows_today_db_fallback(monkeypat
     }
 
     monkeypatch.setattr(main.state, "load", lambda _state_dir: data)
+    monkeypatch.setattr(main.state, "backup_stale", MagicMock(), raising=False)
     monkeypatch.setattr(
         main.db,
         "get_trade_by_date",
@@ -935,6 +936,7 @@ async def test_recover_state_stale_holding_blocks_todays_entry(monkeypatch):
         "position_status": "HOLDING",
     }
     monkeypatch.setattr(main.state, "load", lambda _state_dir: data)
+    monkeypatch.setattr(main.state, "backup_stale", MagicMock(), raising=False)
     monkeypatch.setattr(main.db, "get_trade_by_date", AsyncMock(return_value=None))
     monkeypatch.setattr(main.notifier, "send", send)
     monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
@@ -946,9 +948,11 @@ async def test_recover_state_stale_holding_blocks_todays_entry(monkeypatch):
     assert "차단" in send.await_args_list[0].kwargs["message"]
 
 
-async def test_recover_state_stale_closed_does_not_block_entry(monkeypatch):
-    """전일 상태가 CLOSED(정상 청산)면 알림만 보내고 당일 거래는 진행한다."""
+async def test_recover_state_stale_closed_discards_silently(monkeypatch):
+    """전일 상태가 CLOSED(정상 청산)면 알림 없이 파일을 폐기하고 당일 거래를 진행한다."""
     send = AsyncMock()
+    events = []
+    discard = MagicMock()
     data = {
         "date": "20260713",
         "ticker": "000660",
@@ -956,6 +960,32 @@ async def test_recover_state_stale_closed_does_not_block_entry(monkeypatch):
         "position_status": "CLOSED",
     }
     monkeypatch.setattr(main.state, "load", lambda _state_dir: data)
+    monkeypatch.setattr(main.state, "discard", discard, raising=False)
+    monkeypatch.setattr(main.db, "get_trade_by_date", AsyncMock(return_value=None))
+    monkeypatch.setattr(main.notifier, "send", send)
+    monkeypatch.setattr(
+        main.logger, "log", lambda event, **kwargs: events.append((event, kwargs))
+    )
+
+    await main._recover_state()
+
+    assert state_mod.get().day_skip is False
+    send.assert_not_awaited()
+    discard.assert_called_once_with(main.STATE_DIR)
+    assert any(event == "STALE_STATE_DISCARDED" for event, _ in events)
+
+
+async def test_recover_state_stale_idle_discards_silently(monkeypatch):
+    """전일 상태가 IDLE(미진입)이어도 알림 없이 파일을 폐기한다."""
+    send = AsyncMock()
+    discard = MagicMock()
+    data = {
+        "date": "20260713",
+        "ticker": None,
+        "position_status": "IDLE",
+    }
+    monkeypatch.setattr(main.state, "load", lambda _state_dir: data)
+    monkeypatch.setattr(main.state, "discard", discard, raising=False)
     monkeypatch.setattr(main.db, "get_trade_by_date", AsyncMock(return_value=None))
     monkeypatch.setattr(main.notifier, "send", send)
     monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
@@ -963,7 +993,147 @@ async def test_recover_state_stale_closed_does_not_block_entry(monkeypatch):
     await main._recover_state()
 
     assert state_mod.get().day_skip is False
+    send.assert_not_awaited()
+    discard.assert_called_once_with(main.STATE_DIR)
+
+
+async def test_recover_state_stale_unknown_status_blocks_and_keeps_file(monkeypatch):
+    """전일 파일의 상태가 알 수 없는 값(누락·손상)이면 파일을 보존하고 진입을 차단한다."""
+    send = AsyncMock()
+    discard = MagicMock()
+    data = {
+        "date": "20260713",
+        "ticker": "000660",
+        # position_status 누락 — 손상 또는 알 수 없는 신규 상태
+    }
+    monkeypatch.setattr(main.state, "load", lambda _state_dir: data)
+    monkeypatch.setattr(main.state, "discard", discard)
+    monkeypatch.setattr(main.state, "backup_stale", MagicMock(), raising=False)
+    monkeypatch.setattr(main.db, "get_trade_by_date", AsyncMock(return_value=None))
+    monkeypatch.setattr(main.notifier, "send", send)
+    monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
+
+    await main._recover_state()
+
+    assert state_mod.get().day_skip is True
+    discard.assert_not_called()
     assert send.await_args_list[0].args[0] == "STALE_POSITION_DETECTED"
+    assert "차단" in send.await_args_list[0].kwargs["message"]
+
+
+def test_backup_stale_copies_state_file(tmp_path):
+    """backup_stale은 원본을 유지한 채 today_state.stale_<날짜>.json 사본을 만든다."""
+    src = tmp_path / "today_state.json"
+    src.write_text('{"date": "20260713"}', encoding="utf-8")
+
+    assert state_mod.backup_stale(str(tmp_path), "20260713") is True
+
+    dst = tmp_path / "today_state.stale_20260713.json"
+    assert dst.exists()
+    assert dst.read_text(encoding="utf-8") == '{"date": "20260713"}'
+    assert src.exists()
+
+
+def test_backup_stale_sanitizes_invalid_date(tmp_path):
+    """YYYYMMDD가 아닌 date(경로 문자 포함)는 unknown_<해시>로 치환해 경로 오류를 막는다."""
+    src = tmp_path / "today_state.json"
+    src.write_text('{"date": "2026/07/13"}', encoding="utf-8")
+
+    assert state_mod.backup_stale(str(tmp_path), "2026/07/13") is True
+
+    backups = list(tmp_path.glob("today_state.stale_unknown_*.json"))
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == '{"date": "2026/07/13"}'
+
+
+def test_backup_stale_io_failure_returns_false(tmp_path):
+    """사본 쓰기 실패는 예외를 전파하지 않고 False를 반환한다."""
+    src = tmp_path / "today_state.json"
+    src.write_text('{"date": "20260713"}', encoding="utf-8")
+    # 대상 경로를 디렉터리로 선점해 write_text가 실패하게 만든다
+    (tmp_path / "today_state.stale_20260713.json").mkdir()
+
+    assert state_mod.backup_stale(str(tmp_path), "20260713") is False
+
+
+async def test_recover_state_backup_failure_logs_crit_and_continues(monkeypatch):
+    """증거 백업 실패는 CRIT 로그만 남기고 차단·알림·복구 흐름을 계속한다."""
+    events = []
+    send = AsyncMock()
+    data = {
+        "date": "20260713",
+        "ticker": "000660",
+        "remaining_qty": 5,
+        "position_status": "HOLDING",
+    }
+    monkeypatch.setattr(main.state, "load", lambda _state_dir: data)
+    monkeypatch.setattr(main.state, "backup_stale", MagicMock(return_value=False))
+    monkeypatch.setattr(main.db, "get_trade_by_date", AsyncMock(return_value=None))
+    monkeypatch.setattr(main.notifier, "send", send)
+    monkeypatch.setattr(
+        main.logger, "log", lambda event, **kwargs: events.append((event, kwargs))
+    )
+
+    await main._recover_state()
+
+    assert any(
+        event == "STALE_BACKUP_FAILED" and kwargs.get("level") == "CRIT"
+        for event, kwargs in events
+    )
+    assert state_mod.get().day_skip is True
+    assert send.await_args_list[0].args[0] == "STALE_POSITION_DETECTED"
+
+
+async def test_recover_state_stale_unknown_with_db_open_backs_up_before_persist(monkeypatch):
+    """알 수 없는 stale 파일 + 당일 DB OPEN 거래: persist가 today_state.json을
+    덮어쓰기 전에 증거 사본(backup_stale)을 먼저 남긴다."""
+    calls = []
+    send = AsyncMock()
+    today = main.datetime.now(main.KST).strftime("%Y%m%d")
+    data = {"date": "20260713", "ticker": "000660"}  # position_status 누락
+
+    monkeypatch.setattr(main.state, "load", lambda _state_dir: data)
+    monkeypatch.setattr(
+        main.state,
+        "backup_stale",
+        lambda _state_dir, stale_date: calls.append(("backup", stale_date)),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        main.db,
+        "get_trade_by_date",
+        AsyncMock(return_value={
+            "id": 77,
+            "date": today,
+            "ticker": "005930",
+            "entry_price": 75000.0,
+            "entry_qty": 10,
+            "entry_at": "2026-07-02T09:01:00+09:00",
+            "high_price": 78000.0,
+            "highest_step": 0.05,
+            "pyramided": 0,
+            "status": "OPEN",
+        }),
+    )
+    monkeypatch.setattr(
+        main.kis_rest,
+        "get",
+        AsyncMock(return_value={"output1": [{"pdno": "005930", "hldg_qty": "10"}]}),
+    )
+
+    async def fake_persist(*_args, **_kwargs):
+        calls.append(("persist", None))
+
+    monkeypatch.setattr(main.state, "persist", fake_persist)
+    monkeypatch.setattr(main.notifier, "send", send)
+    monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
+
+    await main._recover_state()
+
+    assert ("backup", "20260713") in calls
+    assert ("persist", None) in calls
+    assert calls.index(("backup", "20260713")) < calls.index(("persist", None))
+    assert state_mod.get().position_status == "HOLDING"
 
 
 async def test_recover_state_holding_state_rt_cd_error_sends_alert_and_skips_restore(monkeypatch):
