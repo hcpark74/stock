@@ -884,6 +884,7 @@ def _improve_params() -> dict:
         "gap_max_fill_pct": round(GAP_MAX_FILL * 100, 2),
         "f1_gap_min_pct": round(GAP_MIN * 100, 2),
         "f1_gap_core_max_pct": round(GAP_MAX * 100, 2),
+        "f1_gap_hard_max_pct": round(HIGH_GAP_MAX * 100, 2),
         "timeout_time": _F5_EXEC_TIME,
         "force_trailing_time": f"{FORCE_TRAILING_HOUR:02d}:{FORCE_TRAILING_MINUTE:02d}",
     }
@@ -904,9 +905,15 @@ def _minutes_between(start: str | None, end: str | None) -> float | None:
 
 
 def _improve_from_rows(
-    trades: list[dict], orders: list[dict], skips: dict[str, int]
+    trades: list[dict],
+    orders: list[dict],
+    skips: dict[str, int],
+    skip_rows: list[dict] | None = None,
 ) -> dict:
-    """개선 화면 집계. trades는 date 오름차순의 CLOSED 행."""
+    """개선 화면 집계. 수동 거래는 전략 파라미터 진단에서 제외한다."""
+    source_closed_n = len(trades)
+    trades = [t for t in trades if (t.get("close_reason") or "") != "MANUAL"]
+    excluded_manual_n = source_closed_n - len(trades)
     total = len(trades)
     pnls = [(t.get("pnl_pct") or 0.0) for t in trades]
     win_pnls = [p for p in pnls if p > 0]
@@ -921,14 +928,17 @@ def _improve_from_rows(
     for p in pnls:
         run = run + 1 if p <= 0 else 0
         max_streak = max(max_streak, run)
-    cur_streak = run  # 마지막 연속 구간이 곧 현재 진행 중 스트릭
+    cur_streak = run
 
     mfe_rows: list[dict] = []
     near_miss_n = 0
     step1_n = 0
+    step_observed_n = 0
+    mfe_observed_n = 0
     hold_by_reason: dict[str, list[float]] = {}
     trailing_gb: list[float] = []
     trailing_pnl: list[float] = []
+    trailing_stop_slip: list[float] = []
     timeout_pnl: list[float] = []
     timeout_mfe: list[float] = []
     hs_pnl: list[float] = []
@@ -939,17 +949,23 @@ def _improve_from_rows(
         entry, high = t.get("entry_price"), t.get("high_price")
         pnl = t.get("pnl_pct")
         reason = t.get("close_reason") or ""
+        highest_step = t.get("highest_step") or 0.0
         mfe = round((high / entry - 1) * 100, 2) if entry and high else None
         giveback = (
             round(mfe - pnl, 2) if mfe is not None and pnl is not None else None
         )
+        if mfe is not None:
+            mfe_observed_n += 1
         mfe_rows.append({
             "date": t.get("date"), "ticker": t.get("ticker"),
             "name": t.get("name"), "mfe_pct": mfe, "pnl_pct": pnl,
             "giveback_pp": giveback, "close_reason": reason,
         })
 
-        if (t.get("highest_step") or 0.0) >= STEP_SIZE:
+        step_reached = highest_step >= STEP_SIZE
+        if step_reached or mfe is not None:
+            step_observed_n += 1
+        if step_reached:
             step1_n += 1
         elif mfe is not None and mfe >= _NEAR_MISS_MFE_PCT and (pnl or 0.0) <= 0:
             near_miss_n += 1
@@ -963,6 +979,9 @@ def _improve_from_rows(
                 trailing_gb.append(giveback)
             if pnl is not None:
                 trailing_pnl.append(pnl)
+            if pnl is not None and step_reached:
+                active_stop_pnl = (highest_step - STEP_TRAIL) * 100
+                trailing_stop_slip.append(active_stop_pnl - pnl)
         elif reason == "TIMEOUT":
             if pnl is not None:
                 timeout_pnl.append(pnl)
@@ -976,10 +995,9 @@ def _improve_from_rows(
                 if minutes <= _FAST_STOP_MIN:
                     fast_stop_n += 1
 
-    mfe_rows.reverse()  # 최신 거래 먼저
+    mfe_rows.reverse()
 
     avg_fill_pnl = _avg(hs_pnl)
-    # 손절 체결 편차: 설정 레벨(-2.0%)보다 더 밀린 폭만 양수로
     avg_slip_pp = (
         max(0.0, -(avg_fill_pnl + HARD_STOP_RATIO * 100)) if hs_pnl else 0.0
     )
@@ -993,7 +1011,7 @@ def _improve_from_rows(
             continue
         pp = (fill_price - order_price) / order_price * 100
         if phase not in _BUY_PHASES:
-            pp = -pp  # 매도는 싸게 체결될수록 불리 → 부호 반전해 '불리=양수' 통일
+            pp = -pp
         acc = slip_acc.setdefault(phase, {"pps": [], "lat": []})
         acc["pps"].append(pp)
         if o.get("fill_latency_ms") is not None:
@@ -1012,8 +1030,41 @@ def _improve_from_rows(
     buy_lat = [v for ph, a in slip_acc.items() if ph in _BUY_PHASES for v in a["lat"]]
     sell_pps = [p for ph, a in slip_acc.items() if ph not in _BUY_PHASES for p in a["pps"]]
     sell_lat = [v for ph, a in slip_acc.items() if ph not in _BUY_PHASES for v in a["lat"]]
-    # SLIPPAGE_GUARD는 거래를 열기 전에 daily_skips로 기록된다 — 종료 거래에는 없다.
+    fill_latency_measured_n = sum(
+        1 for a in slip_acc.values() for v in a["lat"] if isinstance(v, (int, float)) and v > 0
+    )
+
+    trade_dates = {str(t.get("date")) for t in trades if t.get("date")}
+    if skip_rows is None:
+        no_target_days = skips.get("NO_TARGET", 0)
+        market_closed_days = skips.get("MARKET_CLOSED", 0)
+        operational_skip_n = sum(
+            n for reason, n in skips.items()
+            if reason not in {"NO_TARGET", "MARKET_CLOSED"}
+        )
+        overlap_days = 0
+    else:
+        no_target_dates = {
+            str(r.get("date")) for r in skip_rows
+            if r.get("date") and r.get("reason") == "NO_TARGET"
+        }
+        market_closed_dates = {
+            str(r.get("date")) for r in skip_rows
+            if r.get("date") and r.get("reason") == "MARKET_CLOSED"
+        }
+        all_skip_dates = {str(r.get("date")) for r in skip_rows if r.get("date")}
+        no_target_days = len(no_target_dates - trade_dates)
+        market_closed_days = len(market_closed_dates)
+        operational_skip_n = sum(
+            1 for r in skip_rows
+            if r.get("reason") not in {"NO_TARGET", "MARKET_CLOSED"}
+        )
+        overlap_days = len(all_skip_dates & trade_dates)
+    trade_days = len(trade_dates) if trade_dates else total
+    evaluated_days = trade_days + no_target_days
     guard_n = skips.get("SLIPPAGE_GUARD", 0)
+    stop_slip_avg = _avg(trailing_stop_slip)
+
     return {
         "params": _improve_params(),
         "overall": {
@@ -1037,13 +1088,23 @@ def _improve_from_rows(
         },
         "step": {
             "step1_n": step1_n,
-            "step1_rate": round(step1_n / total * 100, 1) if total else 0.0,
+            "step1_rate": round(step1_n / step_observed_n * 100, 1) if step_observed_n else 0.0,
             "near_miss_n": near_miss_n,
+            "observed_n": step_observed_n,
+            "coverage_pct": round(step_observed_n / total * 100, 1) if total else 0.0,
         },
         "trailing": {
             "n": len(trailing_pnl),
             "avg_giveback_pp": round(_avg(trailing_gb), 2),
             "avg_pnl": round(_avg(trailing_pnl), 2),
+        },
+        "trailing_diagnostics": {
+            "giveback_n": len(trailing_gb),
+            "stop_eval_n": len(trailing_stop_slip),
+            "avg_stop_slip_pp": round(max(0.0, stop_slip_avg), 2),
+            "max_stop_slip_pp": round(max(0.0, max(trailing_stop_slip)), 2) if trailing_stop_slip else 0.0,
+            "structural_giveback_min_pp": round(STEP_TRAIL * 100, 2),
+            "structural_giveback_max_pp": round((STEP_SIZE + STEP_TRAIL) * 100, 2),
         },
         "slippage": {
             "buy": _slip_summary(buy_pps, buy_lat),
@@ -1059,7 +1120,24 @@ def _improve_from_rows(
         "candidates": {
             "skips": skips,
             "skip_days": sum(skips.values()),
-            "trade_days": total,
+            "trade_days": trade_days,
+        },
+        "candidate_supply": {
+            "trade_days": trade_days,
+            "no_target_days": no_target_days,
+            "evaluated_days": evaluated_days,
+            "operational_skip_n": operational_skip_n,
+            "market_closed_days": market_closed_days,
+            "overlap_days": overlap_days,
+        },
+        "data_quality": {
+            "source_closed_n": source_closed_n,
+            "strategy_trade_n": total,
+            "excluded_manual_n": excluded_manual_n,
+            "mfe_observed_n": mfe_observed_n,
+            "mfe_coverage_pct": round(mfe_observed_n / total * 100, 1) if total else 0.0,
+            "fill_latency_measured_n": fill_latency_measured_n,
+            "params_versioned": False,
         },
         "mfe_rows": mfe_rows,
         "hold_time": {
@@ -1067,7 +1145,6 @@ def _improve_from_rows(
             for reason, mins in hold_by_reason.items()
         },
     }
-
 
 @app.get("/api/improve")
 async def api_improve() -> JSONResponse:
@@ -1080,15 +1157,24 @@ async def api_improve() -> JSONResponse:
         ) as cur:
             trades = [dict(r) for r in await cur.fetchall()]
         async with conn.execute(
-            """SELECT order_phase, order_price, fill_price, fill_latency_ms
-               FROM orders WHERE status IN ('FILLED', 'PARTIAL_FILL')"""
+            """SELECT o.order_phase, o.order_price, o.fill_price, o.fill_latency_ms
+               FROM orders o
+               JOIN trades t ON t.id = o.trade_id
+               WHERE o.status IN ('FILLED', 'PARTIAL_FILL')
+                 AND COALESCE(t.close_reason, '') != 'MANUAL'"""
         ) as cur:
             orders = [dict(r) for r in await cur.fetchall()]
         async with conn.execute(
-            "SELECT reason, COUNT(*) as n FROM daily_skips GROUP BY reason"
+            "SELECT date, reason FROM daily_skips ORDER BY date, id"
         ) as cur:
-            skips = {r["reason"]: r["n"] for r in await cur.fetchall()}
-        return JSONResponse(_improve_from_rows(trades, orders, skips))
+            skip_rows = [dict(r) for r in await cur.fetchall()]
+        skips: dict[str, int] = {}
+        for row in skip_rows:
+            reason = row["reason"]
+            skips[reason] = skips.get(reason, 0) + 1
+        return JSONResponse(
+            _improve_from_rows(trades, orders, skips, skip_rows=skip_rows)
+        )
     except Exception as exc:
         log("API_IMPROVE_FAILED", level="WARN", error=repr(exc))
         return JSONResponse(_improve_from_rows([], [], {}))

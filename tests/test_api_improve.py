@@ -232,6 +232,97 @@ def test_improve_guard_count_and_skips():
     }
 
 
+def test_improve_echoes_f1_conditional_hard_max():
+    payload = server._improve_from_rows([], [], {})
+
+    assert payload["params"]["f1_gap_hard_max_pct"] == 10.0
+
+
+def test_improve_excludes_manual_trade_from_strategy_diagnostics():
+    trades = [
+        _trade(date="20260701", pnl_pct=2.0, close_reason="TRAILING", highest_step=0.025),
+        _trade(date="20260702", pnl_pct=-5.0, close_reason="MANUAL"),
+    ]
+
+    payload = server._improve_from_rows(trades, [], {})
+
+    assert payload["overall"]["total"] == 1
+    assert payload["overall"]["expectancy"] == 2.0
+    assert payload["data_quality"]["source_closed_n"] == 2
+    assert payload["data_quality"]["excluded_manual_n"] == 1
+
+
+def test_improve_step_rate_excludes_unobservable_legacy_rows():
+    trades = [
+        _trade(date="20260701", high_price=None, highest_step=0.0),
+        _trade(date="20260702", high_price=None, highest_step=0.025),
+        _trade(date="20260703", high_price=10_100.0, highest_step=0.0),
+    ]
+
+    payload = server._improve_from_rows(trades, [], {})
+    step = payload["step"]
+
+    assert step["observed_n"] == 2
+    assert step["step1_n"] == 1
+    assert step["step1_rate"] == 50.0
+    assert step["coverage_pct"] == 66.7
+    assert payload["data_quality"]["mfe_observed_n"] == 1
+
+
+def test_improve_trailing_diagnostic_compares_exit_with_active_step_stop():
+    trades = [
+        _trade(
+            date="20260701", high_price=10_988.0, pnl_pct=5.95,
+            close_reason="TRAILING", highest_step=0.075,
+        ),
+        _trade(
+            date="20260702", high_price=11_226.0, pnl_pct=8.58,
+            close_reason="TRAILING", highest_step=0.10,
+        ),
+    ]
+
+    payload = server._improve_from_rows(trades, [], {})
+    diag = payload["trailing_diagnostics"]
+
+    assert diag["giveback_n"] == 2
+    assert diag["stop_eval_n"] == 2
+    assert diag["avg_stop_slip_pp"] == 0.0
+    assert diag["max_stop_slip_pp"] == 0.05
+    assert diag["structural_giveback_min_pp"] == 1.5
+    assert diag["structural_giveback_max_pp"] == 4.0
+
+
+def test_improve_candidate_supply_uses_no_target_only_and_deduplicates_dates():
+    trades = [_trade(date="20260703", close_reason="TIMEOUT", pnl_pct=1.0)]
+    skips = {"NO_TARGET": 2, "ENTRY_FAIL": 1, "MARKET_CLOSED": 1}
+    skip_rows = [
+        {"date": "20260701", "reason": "NO_TARGET"},
+        {"date": "20260703", "reason": "NO_TARGET"},
+        {"date": "20260704", "reason": "ENTRY_FAIL"},
+        {"date": "20260705", "reason": "MARKET_CLOSED"},
+    ]
+
+    supply = server._improve_from_rows(
+        trades, [], skips, skip_rows=skip_rows,
+    )["candidate_supply"]
+
+    assert supply == {
+        "trade_days": 1,
+        "no_target_days": 1,
+        "evaluated_days": 2,
+        "operational_skip_n": 1,
+        "market_closed_days": 1,
+        "overlap_days": 1,
+    }
+
+
+def test_improve_marks_zero_fill_latency_as_unmeasured():
+    orders = [_order("FIRST_BUY", 10_000.0, 10_010.0, latency=0)]
+
+    quality = server._improve_from_rows([], orders, {})["data_quality"]
+
+    assert quality["fill_latency_measured_n"] == 0
+
 @pytest.mark.asyncio
 async def test_api_improve_empty_db_returns_default_structure(tmp_path):
     await db.init(str(tmp_path / "improve.db"))

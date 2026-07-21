@@ -13,7 +13,7 @@
 
 | 모듈 | 파라미터 | 현재값 |
 |---|---|---|
-| F1 | GAP_MIN / GAP_CORE_MAX | 3.0% / 8.0% |
+| F1 | GAP_MIN / GAP_CORE_MAX / GAP_HARD_MAX | 3.0% / 8.0% / 10.0% (8~10%는 조건부) |
 | F3 | GAP_MAX_ORDER / GAP_MAX_FILL (버퍼) | 6.5% / 7.0% (0.5%p) |
 | F4 | STEP_SIZE | +2.5% |
 | F4 | STEP_TRAIL | −1.5% |
@@ -52,6 +52,8 @@
 
 - **MFE**(고점 수익률) = `(high_price / entry_price − 1) × 100`. 두 값이 모두 있는 거래만 계산.
 - **반납폭(giveback)** = `MFE − pnl_pct` (%p).
+- **활성 스탑 체결 편차** = `(highest_step − STEP_TRAIL) × 100 − pnl_pct`. 양수면 목표보다 불리하게 청산. STEP 방식의 정상 고점 반납 범위는 `STEP_TRAIL ~ STEP_TRAIL + STEP_SIZE`(현재 1.5~4.0%p).
+- `MANUAL` 청산은 전략 파라미터 성과에서 제외하고 별도 제외 건수로 표시.
 - **근접 이탈(near miss)** = 스텝1 미도달(`highest_step < STEP_SIZE`) AND `MFE ≥ 1.5%` AND `pnl_pct ≤ 0`인 거래.
 - **슬리피지**: FILLED 주문 중 order_price·fill_price가 모두 있는 건만. 불리하면 양수로 부호 통일 —
   매수(`FIRST_BUY`,`PYRAMID_BUY`): `(fill − order) / order × 100`,
@@ -67,13 +69,13 @@
 
 | 카드 | 표본 가드 | 판정 |
 |---|---|---|
-| 전략 종합 | total < 10 → ⚪ | 🔴 기대값 < 0 (total ≥ 20) → "전략 자체 재검토" · 🔴 현재 연속손실 ≥ 3 → "일시 중단 검토" · 🟡 손익비 < 1 (total ≥ 10) · 그 외 🟢 |
+| 전략 종합 | total < 20 → ⚪(10건 미만은 최소 표본, 10~19건은 경향만 표시) | 🔴 현재 연속손실 ≥ 3은 표본과 무관하게 우선 표시 · 20건 이상에서 기대값 < 0 → "전략 자체 재검토" · 🟡 손익비 < 1 |
 | HARD_STOP | 손절 n < 3 → ⚪ | 🔴 체결 편차 > 0.3%p → "지정가 손절 또는 폭 조정 검토" · 🔴 손절 비중 > 50% (total ≥ 10) → "진입 품질 우선 점검" · 🟡 빠른 손절 비중 ≥ 50% → "시초 변동성 구간, 진입 지연 검토" |
-| STEP_SIZE | total < 5 → ⚪ | 🔴 근접 이탈 ≥ 3건 AND 근접 이탈 > 스텝1 도달 건수 → "간격 2.0% 축소 검토" · 🟡 근접 이탈 ≥ 2건 · 🟢 스텝1 도달률 ≥ 40% |
-| STEP_TRAIL | 트레일링 청산 n < 5 → ⚪ | 🔴 평균 반납폭 > 2.0%p → "폭 축소 검토" · 🟡 평균 반납폭 > 1.5%p |
-| 슬리피지 버퍼 | 매수 슬리피지 n < 3 → ⚪ | 🔴 SLIPPAGE_GUARD ≥ 2건 OR 매수 슬리피지 최대 > 0.5%p → "GAP_MAX_ORDER 하향 또는 버퍼 확대 검토" · 🟡 매수 슬리피지 평균 > 0.25%p |
+| STEP_SIZE | total < 5 또는 고점/스텝 관측률 < 80% → ⚪ | 🔴 근접 이탈 ≥ 3건 AND 근접 이탈 > 스텝1 도달 건수 → "간격 2.0% 축소 검토" · 🟡 근접 이탈 ≥ 2건 |
+| STEP_TRAIL | 활성 스탑 비교 n < 5 → ⚪ | 🔴 활성 스탑 대비 평균 불리 편차 > 0.3%p 또는 최대 > 0.5%p → 주문 실행 점검 · 정상 고점 반납 범위 1.5~4.0%p 안내 |
+| 슬리피지 버퍼 | 매수 슬리피지 n < 3 → ⚪ | 🔴 SLIPPAGE_GUARD ≥ 2건 OR 매수 슬리피지 최대 > 0.5%p · 🟡 GUARD 1건 또는 평균 > 0.25%p |
 | F5 타임아웃 | TIMEOUT n < 5 → ⚪ | 🔴 평균 손익 < 0 → "청산 시각 단축 검토" · 🟡 평균 MFE ≥ 1.5% → "강제 트레일링(10:50) 앞당김 검토" |
-| F1 갭 범위 | 스킵+거래일 < 10 → ⚪ | 🟡 스킵일 > 거래일 → "후보 부족, 범위 확대는 신중히". 진입 갭 미저장으로 정밀 판정 불가 — 카드에 "진입 갭 기록 시 판정 가능" 안내 고정 표시. 🔴 없음 |
+| F1 갭 범위 | 거래일+순수 NO_TARGET일 < 10 → ⚪ | 🟡 순수 NO_TARGET일 > 거래일. ENTRY_FAIL·GAP_CHANGED·SLIPPAGE_GUARD·MARKET_CLOSED는 후보 부족 판정에서 제외하고 별도 표시. 3~8% 코어와 8~10% 조건부 구간을 함께 표시. |
 
 ## API: `GET /api/improve`
 
@@ -118,6 +120,8 @@
 - `mfe_rows`는 CLOSED 거래 전체를 date 내림차순으로. MFE 계산 불가(고점/진입가 누락) 거래는 mfe/giveback을 null로.
 - `guard_n`은 `close_reason='SLIPPAGE_GUARD'` 거래 수.
 - `candidates.trade_days`는 CLOSED 거래가 있는 날짜 수, `skip_days`는 daily_skips 행 수.
+- `candidate_supply`는 날짜 기준으로 거래일과 순수 `NO_TARGET`일을 중복 제거해 집계한다. 운영 실패와 휴장일은 별도 수치이며 F1 범위 판정에 사용하지 않는다.
+- `data_quality`는 수동 거래 제외 건수, MFE 관측률, 체결지연 실측 건수, 파라미터 버전 미구분 여부를 제공한다.
 
 ## 프론트 변경
 

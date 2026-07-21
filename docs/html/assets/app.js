@@ -1466,13 +1466,13 @@ function impCard(title, cur, [level, evidence, guide]) {
 function judgeOverall(d) {
   const o = d.overall;
   const ev = `기대값 ${fmtPct(o.expectancy)} · 손익비 ${(o.payoff_ratio||0).toFixed(2)} · 승률 ${o.win_rate}% · 연속손실 ${o.cur_loss_streak}건(최대 ${o.max_loss_streak})`;
-  if (o.total < 10) return ['nodata', ev, `판정까지 ${10 - o.total}건 더 필요합니다.`];
-  if (o.total >= 20 && o.expectancy < 0) return ['adjust', ev, '기대값이 음수입니다(20건 이상 누적). 파라미터 이전에 전략 자체를 재검토하세요.'];
+  if (o.total < 10) return ['nodata', ev, `최소 판단까지 ${10 - o.total}건 더 필요합니다.`];
   if (o.cur_loss_streak >= 3) return ['adjust', ev, `연속 손실 ${o.cur_loss_streak}건입니다(기준 3건). 일시 중단을 검토하세요.`];
+  if (o.total < 20) return ['nodata', ev, `전략 조정 판단까지 ${20 - o.total}건 더 필요합니다. 현재 값은 경향만 참고하세요.`];
+  if (o.expectancy < 0) return ['adjust', ev, '기대값이 음수입니다(20건 이상 누적). 파라미터 이전에 전략 자체를 재검토하세요.'];
   if (o.avg_loss < 0 && o.payoff_ratio < 1) return ['watch', ev, '손익비가 1 미만입니다(기준 1.0). 이긴 거래의 크기가 진 거래보다 작습니다.'];
   return ['ok', ev, '기대값·손익비·스트릭 모두 경고 기준 이내입니다.'];
 }
-
 function judgeHardStop(d) {
   const h = d.hard_stop;
   const ev = `손절 ${h.n}건(${h.share_pct}%) · 체결 편차 ${h.avg_slip_pp}%p · 10분 내 손절 ${h.fast_stop_n}건 · 평균 ${h.avg_min_to_stop}분`;
@@ -1485,33 +1485,31 @@ function judgeHardStop(d) {
 
 function judgeStepSize(d) {
   const s = d.step;
-  const ev = `스텝1 도달 ${s.step1_n}건(${s.step1_rate}%) · 근접 이탈 ${s.near_miss_n}건`;
-  if (d.overall.total < 5) return ['nodata', ev, `판정까지 ${5 - d.overall.total}건 더 필요합니다.`];
+  const ev = `관측 ${s.observed_n}/${d.overall.total}건(${s.coverage_pct}%) · 스텝1 ${s.step1_n}건(${s.step1_rate}%) · 근접 이탈 ${s.near_miss_n}건`;
+  if (d.overall.total < 5) return ['nodata', ev, `최소 판단까지 ${5 - d.overall.total}건 더 필요합니다.`];
+  if (s.observed_n < 5 || s.coverage_pct < 80) return ['nodata', ev, '고점 또는 스텝 데이터가 전체의 80% 미만입니다. 누락 데이터가 더 쌓인 뒤 판단하세요.'];
   if (s.near_miss_n >= 3 && s.near_miss_n > s.step1_n) return ['adjust', ev, `고점 +1.5~${d.params.step_size_pct}%에서 손실로 끝난 거래(${s.near_miss_n}건)가 스텝1 도달(${s.step1_n}건)보다 많습니다. 간격 2.0% 축소를 검토하세요.`];
   if (s.near_miss_n >= 2) return ['watch', ev, `근접 이탈이 ${s.near_miss_n}건 누적됐습니다(조정 기준 3건). 추이를 관찰하세요.`];
-  if (s.step1_rate >= 40) return ['ok', ev, `스텝1 도달률 ${s.step1_rate}%로 양호합니다(기준 40%).`];
-  return ['ok', ev, '근접 이탈이 없어 현재 간격에 무리가 없습니다.'];
+  return ['ok', ev, '관측된 근접 이탈이 없어 현재 간격을 유지합니다.'];
 }
-
 function judgeStepTrail(d) {
   const t = d.trailing;
-  const ev = `트레일링 청산 ${t.n}건 · 평균 반납 ${t.avg_giveback_pp}%p · 평균 손익 ${fmtPct(t.avg_pnl)}`;
-  if (t.n < 5) return ['nodata', ev, `판정까지 트레일링 청산 ${5 - t.n}건 더 필요합니다.`];
-  if (t.avg_giveback_pp > 2.0) return ['adjust', ev, `고점 대비 평균 ${t.avg_giveback_pp}%p 반납하고 청산됩니다(기준 2.0%p). 폭 축소를 검토하세요.`];
-  if (t.avg_giveback_pp > 1.5) return ['watch', ev, `반납폭이 설정(${d.params.step_trail_pct}%)을 넘고 있습니다(관찰 기준 1.5%p).`];
-  return ['ok', ev, '고점 반납이 설정 범위 이내입니다.'];
+  const x = d.trailing_diagnostics || {};
+  const ev = `트레일링 ${t.n}건 · 활성 스탑 비교 ${x.stop_eval_n||0}건 · 평균 불리 편차 ${x.avg_stop_slip_pp||0}%p · 평균 고점 반납 ${t.avg_giveback_pp}%p(${x.giveback_n||0}건)`;
+  if ((x.stop_eval_n||0) < 5) return ['nodata', ev, `판정까지 활성 스탑 비교 ${5 - (x.stop_eval_n||0)}건 더 필요합니다. 고점 반납의 구조적 범위는 ${x.structural_giveback_min_pp||0}~${x.structural_giveback_max_pp||0}%p입니다.`];
+  if ((x.avg_stop_slip_pp||0) > 0.3 || (x.max_stop_slip_pp||0) > 0.5) return ['adjust', ev, '활성 스탑 목표보다 체결이 반복적으로 밀립니다. 트레일 폭보다 주문 실행 경로를 먼저 점검하세요.'];
+  return ['ok', ev, `활성 스탑대로 청산되고 있습니다. 고점 반납 ${x.structural_giveback_min_pp}~${x.structural_giveback_max_pp}%p는 STEP_SIZE가 포함된 정상 구조 범위입니다.`];
 }
-
 function judgeSlipBuffer(d) {
   const sl = d.slippage;
   const buf = (d.params.gap_max_fill_pct - d.params.gap_max_order_pct).toFixed(1);
   const ev = `매수 슬리피지 평균 ${sl.buy.avg_pp}%p·최대 ${sl.buy.max_pp}%p (${sl.buy.n}건) · GUARD ${sl.guard_n}건`;
   if (sl.buy.n < 3) return ['nodata', ev, `판정까지 매수 체결 ${3 - sl.buy.n}건 더 필요합니다.`];
-  if (sl.guard_n >= 2 || sl.buy.max_pp > 0.5) return ['adjust', ev, `슬리피지가 버퍼(${buf}%p)를 위협합니다(GUARD ${sl.guard_n}건, 최대 ${sl.buy.max_pp}%p). GAP_MAX_ORDER 하향 또는 버퍼 확대를 검토하세요.`];
+  if (sl.guard_n >= 2 || sl.buy.max_pp > 0.5) return ['adjust', ev, `슬리피지가 버퍼(${buf}%p)를 반복적으로 위협합니다(GUARD ${sl.guard_n}건, 최대 ${sl.buy.max_pp}%p). GAP_MAX_ORDER 하향을 우선 검토하세요.`];
+  if (sl.guard_n === 1) return ['watch', ev, `급격한 갭 확대 1건을 안전장치가 차단했습니다. 버퍼(${buf}%p)는 유지하고 재발 여부를 관찰하세요.`];
   if (sl.buy.avg_pp > 0.25) return ['watch', ev, '평균 매수 슬리피지가 0.25%p를 넘었습니다. 버퍼 소진 추이를 관찰하세요.'];
   return ['ok', ev, `슬리피지가 버퍼(${buf}%p) 대비 여유 있습니다.`];
 }
-
 function judgeTimeout(d) {
   const to = d.timeout_exit;
   const ev = `시간 청산 ${to.n}건 · 평균 손익 ${fmtPct(to.avg_pnl)} · 평균 고점 ${fmtPct(to.avg_mfe)}`;
@@ -1522,18 +1520,21 @@ function judgeTimeout(d) {
 }
 
 function judgeGapRange(d) {
-  const c = d.candidates;
-  const days = c.skip_days + c.trade_days;
-  const skipList = Object.entries(c.skips || {}).map(([k, v]) => `${k} ${v}`).join(' · ') || '스킵 없음';
-  const ev = `거래일 ${c.trade_days} · 스킵일 ${c.skip_days} (${skipList})`;
-  const note = ' 진입 시점 갭이 저장되면 정밀 판정이 가능합니다.';
-  if (days < 10) return ['nodata', ev, `판정까지 실행일 ${10 - days}일 더 필요합니다.` + note];
-  if (c.skip_days > c.trade_days) return ['watch', ev, `스킵일이 거래일보다 많습니다. 후보 부족이면 갭 범위(${d.params.f1_gap_min_pct}~${d.params.f1_gap_core_max_pct}%) 확대를 검토하되 신중하게.` + note];
-  return ['ok', ev, '후보 공급에 문제가 없습니다.' + note];
+  const c = d.candidate_supply || {};
+  const ev = `거래 ${c.trade_days||0}일 · 후보 없음 ${c.no_target_days||0}일 · 운영 실패 ${c.operational_skip_n||0}건 · 휴장 ${c.market_closed_days||0}일`;
+  const range = `${d.params.f1_gap_min_pct}~${d.params.f1_gap_core_max_pct}% 코어 / ${d.params.f1_gap_core_max_pct}~${d.params.f1_gap_hard_max_pct}% 조건부`;
+  const note = ' 진입 갭과 파라미터 버전이 거래별로 저장되면 성과 기반 정밀 판정이 가능합니다.';
+  if ((c.evaluated_days||0) < 10) return ['nodata', ev, `판정까지 후보 공급 관측일 ${10 - (c.evaluated_days||0)}일 더 필요합니다.` + note];
+  if ((c.no_target_days||0) > (c.trade_days||0)) return ['watch', ev, `실제 후보 없음이 거래일보다 많습니다. 현재 범위(${range}) 확대 여부를 신중히 검토하세요.` + note];
+  return ['ok', ev, `실제 후보 공급은 정상입니다. 현재 범위(${range})를 유지하세요.` + note];
 }
-
 function renderImprove(d) {
-  $('imp-sample-note').textContent = sampleNote(d.overall.total || 0);
+  const q = d.data_quality || {};
+  const notes = [sampleNote(d.overall.total || 0)];
+  if (q.excluded_manual_n) notes.push(`수동 거래 ${q.excluded_manual_n}건 제외`);
+  notes.push(`MFE 관측 ${q.mfe_observed_n||0}/${q.strategy_trade_n||0}건`);
+  if (!q.params_versioned) notes.push('파라미터 변경 전·후 성과는 아직 구분되지 않음');
+  $('imp-sample-note').textContent = notes.join(' · ');
   const p = d.params;
   const cards = [
     ['전략 종합',     `${d.overall.total}건`,                          judgeOverall(d)],
@@ -1542,14 +1543,13 @@ function renderImprove(d) {
     ['STEP_TRAIL',   `-${p.step_trail_pct}%`,                          judgeStepTrail(d)],
     ['슬리피지 버퍼', `${p.gap_max_order_pct}→${p.gap_max_fill_pct}%`, judgeSlipBuffer(d)],
     ['F5 타임아웃',  p.timeout_time,                                   judgeTimeout(d)],
-    ['F1 갭 범위',   `${p.f1_gap_min_pct}~${p.f1_gap_core_max_pct}%`,  judgeGapRange(d)],
+    ['F1 갭 범위',   `${p.f1_gap_min_pct}~${p.f1_gap_core_max_pct}% / 조건부 ${p.f1_gap_hard_max_pct}%`, judgeGapRange(d)],
   ];
   $('imp-cards').innerHTML = cards.map(([t, cur, j]) => impCard(t, cur, j)).join('');
   renderMfeTable(d.mfe_rows);
-  renderSlipTable(d.slippage);
+  renderSlipTable(d.slippage, q);
   renderSkipHold(d);
 }
-
 function renderMfeTable(rows) {
   const tb = $('imp-mfe-tbody');
   if (!rows || !rows.length) {
@@ -1564,7 +1564,7 @@ function renderMfeTable(rows) {
   }).join('');
 }
 
-function renderSlipTable(sl) {
+function renderSlipTable(sl, quality = {}) {
   const tb = $('imp-slip-tbody');
   const phaseLabel = {FIRST_BUY:'1차 매수', PYRAMID_BUY:'피라미딩 매수', CLOSE_SELL:'청산 매도', PARTIAL_SELL:'부분 매도', TIMEOUT_SELL:'시간 청산 매도', SLIPPAGE_SELL:'슬리피지 청산'};
   const rows = Object.entries(sl.by_phase || {});
@@ -1573,7 +1573,7 @@ function renderSlipTable(sl) {
     return;
   }
   tb.innerHTML = rows.map(([ph, v]) =>
-    `<tr><td>${esc(phaseLabel[ph] || ph)}</td><td>${fmt(v.n)}건</td><td>${v.avg_pp}%p</td><td>${v.max_pp}%p</td><td>${fmt(v.avg_latency_ms)}ms</td></tr>`
+    `<tr><td>${esc(phaseLabel[ph] || ph)}</td><td>${fmt(v.n)}건</td><td>${v.avg_pp}%p</td><td>${v.max_pp}%p</td><td>${quality.fill_latency_measured_n ? fmt(v.avg_latency_ms)+'ms' : '미측정'}</td></tr>`
   ).join('');
 }
 
