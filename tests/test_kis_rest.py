@@ -28,8 +28,19 @@ def test_account_helpers_accept_documented_env_names(monkeypatch):
     assert kis_rest.account_cd() == "01"
 
     params = kis_rest.balance_inquiry_params()
-    assert params["CANO"] == "12345678"
-    assert params["ACNT_PRDT_CD"] == "01"
+    assert params == {
+        "CANO": "12345678",
+        "ACNT_PRDT_CD": "01",
+        "AFHR_FLPR_YN": "N",
+        "OFL_YN": "",
+        "INQR_DVSN": "01",
+        "UNPR_DVSN": "01",
+        "FUND_STTL_ICLD_YN": "N",
+        "FNCG_AMT_AUTO_RDPT_YN": "N",
+        "PRCS_DVSN": "01",
+        "CTX_AREA_FK100": "",
+        "CTX_AREA_NK100": "",
+    }
 
 
 def test_account_helpers_prefer_runtime_env_names(monkeypatch):
@@ -355,6 +366,65 @@ async def test_kis_rest_429_retry_preserves_token_refresh_budget(monkeypatch):
     assert resp["msg_cd"] == "EGW00123"
     assert refresh_calls == 1
     assert _TokenExpired429TokenExpiredClient.calls == 3
+
+
+class _RateLimitClient:
+    calls = 0
+    status_code = 429
+    body = {"rt_cd": "1", "msg_cd": "EGW00201", "msg1": "rate limit"}
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def request(self, *args, **kwargs):
+        self.__class__.calls += 1
+        outer = self
+
+        class Response:
+            status_code = outer.status_code
+
+            def json(self):
+                return dict(outer.body)
+
+        return Response()
+
+
+@pytest.mark.asyncio
+async def test_kis_rest_investigation_mode_stops_on_http_429(monkeypatch):
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 0.0)
+    monkeypatch.setattr(kis_rest, "_last_call_at", 0.0)
+    monkeypatch.setattr(kis_rest.httpx, "AsyncClient", _RateLimitClient)
+    _RateLimitClient.calls = 0
+    _RateLimitClient.status_code = 429
+
+    resp = await kis_rest.get("/test", stop_on_rate_limit=True)
+
+    assert resp == {
+        "rt_cd": "1",
+        "msg_cd": "HTTP_429",
+        "msg1": "HTTP 429 rate limit",
+    }
+    assert _RateLimitClient.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_kis_rest_investigation_mode_stops_on_egw00201(monkeypatch):
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 0.0)
+    monkeypatch.setattr(kis_rest, "_last_call_at", 0.0)
+    monkeypatch.setattr(kis_rest.httpx, "AsyncClient", _RateLimitClient)
+    _RateLimitClient.calls = 0
+    _RateLimitClient.status_code = 200
+
+    resp = await kis_rest.get("/test", stop_on_rate_limit=True)
+
+    assert resp["msg_cd"] == "EGW00201"
+    assert _RateLimitClient.calls == 1
 
 
 def test_transient_sleep_seconds_exponential_backoff_with_cap(monkeypatch):

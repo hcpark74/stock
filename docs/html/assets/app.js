@@ -817,7 +817,7 @@ function positionAssetValues(d) {
 function buyableSourceLabel(source) {
   if(source === 'ord_psbl_cash') return '주문가능 현금';
   if(source === 'dnca_tot_amt') return '예수금 기준';
-  if(source === 'prvs_rcdl_excc_amt') return 'D+2 정산금 기준';
+  if(source === 'prvs_rcdl_excc_amt') return '가수도 정산금 기준';
   return '출처 대기';
 }
 

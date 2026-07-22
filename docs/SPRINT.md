@@ -6,9 +6,12 @@
 > **후속 갱신**: 2026-07-14 (운영 UI/F5 안정화 기록)
 > **기준 브랜치**: main
 > **후속 문서**: [SPRINT_F3_F4_OPTIMIZATION.md](SPRINT_F3_F4_OPTIMIZATION.md)
+> **개발 도구 도입**: [SPRINT_KIS_MCP.md](SPRINT_KIS_MCP.md)
 
 이 문서는 초기 구현, Paper Trading 검증, F3/F4 안정화 보강까지의 기준 스프린트 기록으로 종료한다.
 이후 작업(09:00 직후 진입 속도 개선, HOLDING 중 trailing 상태 복구력)은 별도 후속 스프린트에서 관리한다.
+KIS MCP는 자동매매 런타임과 분리된 개발·사고 분석 도구로만 검토하며, 도입 작업과 검증 기준은
+[SPRINT_KIS_MCP.md](SPRINT_KIS_MCP.md)에서 관리한다.
 
 ---
 

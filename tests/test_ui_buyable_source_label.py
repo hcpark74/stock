@@ -46,7 +46,7 @@ def _label_for(source) -> str:
     [
         ("ord_psbl_cash", "주문가능 현금"),
         ("dnca_tot_amt", "예수금 기준"),
-        ("prvs_rcdl_excc_amt", "D+2 정산금 기준"),
+        ("prvs_rcdl_excc_amt", "가수도 정산금 기준"),
         (None, "출처 대기"),
         ("unknown_field", "출처 대기"),
     ],

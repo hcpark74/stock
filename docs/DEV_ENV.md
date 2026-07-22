@@ -576,7 +576,10 @@ F3_PYRAMID_FILL_SEC=10.0
   - 항목: 주문번호, 종목, 매수/매도, 주문수량, 주문가격, 체결수량, 상태, 주문 단계, 주문시각/체결시각
 - 주문/체결 내역은 `/api/stream`의 로그 이벤트 수신 시 즉시 `/api/orders`를 재조회하고, 5초 폴링을 백업으로 둔다.
 - `주문가능금액`은 자산 데이터이므로 `/api/assets`가 원천이다. 주문 메뉴에서는 주문 판단용 보조 참조값으로만 노출한다.
-- KIS 잔고 조회 응답에 `ord_psbl_cash`가 없으면 UI의 주문가능금액은 `dnca_tot_amt`와 `prvs_rcdl_excc_amt`(D+2 정산금) 중 큰 값을 fallback으로 사용한다(매도대금 T+2 미결제 시 `dnca_tot_amt` 과소평가 보정). 종목별 정확한 주문가능수량/금액 판단은 F3의 매수가능조회 경로를 우선한다.
+- KIS 잔고 조회 응답에 비문서 확장 필드 `ord_psbl_cash`가 없으면 UI의 추정 주문가능금액은
+  `dnca_tot_amt`와 `prvs_rcdl_excc_amt`(가수도정산금액) 중 큰 값을 fallback으로 사용한다.
+  이 값은 주문 가능 보장이 아니며, 종목별 정확한 주문가능수량/금액 판단은 F3의 매수가능조회 경로를
+  우선한다.
 - 보유 후 가격흐름은 `/api/status`의 `tick_history`, `minute_price_history`, `trade_marks`를 함께 사용한다.
   - 원시 tick은 최대 5,000개, 분 단위 마지막 가격은 별도 버퍼에 최대 180분 보관한다.
   - 보유 중에는 최근 20분 슬라이딩 창, 청산 후에는 진입부터 마지막 체결/tick까지 고정 범위를 표시한다.
@@ -607,3 +610,265 @@ node tests\js\price_flow_checks.js
 - 알림 메시지는 `제목 -> 상황 -> 조치 -> 세부 -> 코드` 순서로 표시된다.
 - `STALE_POSITION_DETECTED`처럼 조치가 필요한 이벤트는 이벤트 코드보다 사람이 읽는 제목을 우선한다.
 - Telegram 전송에는 Markdown `parse_mode`를 사용하지 않는다. 이벤트 코드의 `_` 문자나 한글 문구가 파싱 오류를 만들지 않게 하기 위함이다.
+
+---
+
+## 16. KIS MCP Phase 1 공식 자료 확인 (2026-07-21)
+
+### 결론
+
+| 대상 | 확인 결과 | 도입 판정 |
+|------|-----------|-----------|
+| KIS Code Assistant MCP | API 명세 검색·공식 샘플코드 조회 전용. 실제 KIS 계좌 API는 호출하지 않음 | Phase 2 진행 |
+| KIS Trading MCP | 시세·계좌 조회와 함께 주문·정정·취소 기능 노출. 주문 계열만 끄는 공식 설정 없음 | 도입 보류 |
+
+두 도구 모두 한국투자증권의 공식 KIS Developers 포털과 공식 GitHub 조직에서 안내한다. 이 프로젝트에는
+Code Assistant만 개발 도구 후보로 등록하며, Trading MCP와 KIS Quant Plugin은 주문 기능을 포함하므로
+현재 운영 정책의 도입 대상에서 제외한다.
+
+### 공식 소스와 버전
+
+- KIS Developers 포털
+  - [MCP 소개](https://apiportal.koreainvestment.com/tools-mcp)
+  - [코딩도우미 MCP](https://apiportal.koreainvestment.com/tools-sample)
+  - [트레이딩 MCP](https://apiportal.koreainvestment.com/tools-trading)
+- 공식 저장소
+  - [open-trading-api/MCP](https://github.com/koreainvestment/open-trading-api/tree/main/MCP)
+  - [KIS Code Assistant MCP](https://github.com/koreainvestment/open-trading-api/tree/main/MCP/KIS%20Code%20Assistant%20MCP)
+  - [KIS Trading MCP](https://github.com/koreainvestment/open-trading-api/tree/main/MCP/Kis%20Trading%20MCP)
+- 확인일: 2026-07-21
+- Code Assistant 버전
+  - NPM `package.json`: `0.1.1`
+  - 내부 `pyproject.toml` 및 HTTP health 응답 예시: `0.1.0`
+  - 두 메타데이터가 일치하지 않으므로 설치 후에는 NPM 패키지 버전과 서버 보고 버전을 각각 기록한다.
+- Trading MCP 버전: `pyproject.toml` 기준 `0.1.0`
+- 공식 저장소는 샘플이 별도 공지 없이 갱신될 수 있다고 명시하므로, 설치 시 확인일과 실제 설치 버전을
+  함께 남긴다.
+
+### Code Assistant 설치·실행 기준
+
+요구사항은 Node.js 18 이상, Python 3.12 이상, `uv`다. 공식 문서의 권장 stdio 실행은 다음과 같다.
+
+```powershell
+npx -y @koreainvestment/kis-code-assistant-mcp
+```
+
+소스 검토가 필요한 경우에만 별도 개발 도구 디렉터리에 클론해 실행한다.
+
+```powershell
+git clone https://github.com/koreainvestment/open-trading-api.git
+Set-Location "open-trading-api/MCP/KIS Code Assistant MCP"
+uv sync
+uv run server.py --stdio
+```
+
+이 명령은 Phase 1에서 공식 절차만 확인한 것이며 아직 이 저장소에 설치하거나 등록하지 않았다.
+
+### 제공 기능과 권한 경계
+
+Code Assistant는 인증, 국내주식, 국내채권, 국내선물옵션, 해외주식, 해외선물옵션, ELW, ETF/ETN
+카테고리별 API 검색 도구와 공식 GitHub 샘플코드 읽기 도구를 제공한다. 로컬 `data.csv` 기반 검색과
+공식 GitHub 코드 조회만 수행하며, README도 실제 API 호출은 별도 구현이 필요하다고 명시한다.
+따라서 KIS 앱 키·시크릿·계좌번호가 필요 없고 KIS REST 호출 한도를 소비하지 않는다.
+
+Trading MCP는 166개 API를 대상으로 시세, 잔고, 주문·체결내역, 현물·신용·선물옵션 주문과
+정정·취소를 제공한다. 현재 `server.py`는 국내주식 등 모든 상품군 Tool 클래스를 조건 없이 등록한다.
+공식 README, 환경 변수, 서버 등록 코드에는 주문 계열만 제외하는 allowlist/denylist 또는 조회 전용
+모드가 없다. MCP 접근 토큰은 서버 접속자를 인증할 뿐 KIS 주문 권한을 축소하지 않는다.
+
+### 호출 제한 확인 결과
+
+- Code Assistant: KIS Open API를 호출하지 않으므로 KIS 호출 쿼터와 무관하다.
+- Trading MCP: 사용자 App Key/Secret으로 KIS Open API를 직접 호출하며 공식 README도 KIS API 호출
+  제한 준수를 요구한다. 같은 자격 증명을 봇과 함께 쓰면 호출 충돌 위험이 있으므로 운영상 같은 쿼터로
+  간주한다.
+- 미확정: 제한 산정의 정확한 단위가 앱 키, 계좌 또는 사용자 중 무엇인지는 2026-07-21 현재 공개된
+  공식 문서에서 확인하지 못했다. Trading MCP 재검토 전에 KIS Developers 공식 문의 채널에서 확인한다.
+
+### Phase 1 결정
+
+1. Phase 2에서는 Code Assistant만 격리된 개발 환경에 등록한다.
+2. Code Assistant에는 KIS 자격 증명을 전달하지 않는다.
+3. Trading MCP는 공식 조회 전용 모드 또는 신뢰할 수 있는 도구 allowlist가 제공될 때까지 설치하지 않는다.
+4. 쿼터 산정 단위가 확인되기 전에도 09:00~09:11 KIS MCP 호출 금지 정책은 유지한다.
+
+### Phase 2 Code Assistant 연결 (2026-07-21)
+
+Codex의 프로젝트 전용 `.codex/config.toml`에 Code Assistant를 등록했다. 전역 Codex 설정은 변경하지
+않았으며, 이 저장소가 신뢰 상태일 때만 설정이 로드된다.
+
+```toml
+[mcp_servers.kis-code-assistant]
+command = "npx"
+args = ["-y", "@koreainvestment/kis-code-assistant-mcp@0.1.1"]
+enabled = true
+required = false
+startup_timeout_sec = 60.0
+tool_timeout_sec = 60.0
+default_tools_approval_mode = "approve"
+enabled_tools = [
+  "search_auth_api",
+  "search_domestic_stock_api",
+  "search_domestic_bond_api",
+  "search_domestic_futureoption_api",
+  "search_overseas_stock_api",
+  "search_overseas_futureoption_api",
+  "search_elw_api",
+  "search_etfetn_api",
+  "read_source_code",
+]
+```
+
+`default_tools_approval_mode = "approve"`는 위 allowlist에 포함된 검색·소스 읽기 도구에만 적용된다.
+KIS 앱 키, 앱 시크릿, 계좌번호와 환경 변수는 설정하지 않는다. Trading MCP는 등록하지 않는다.
+
+설정 확인:
+
+```powershell
+codex mcp list
+codex mcp get kis-code-assistant --json
+```
+
+실제 새 Codex 프로세스에서 `search_domestic_stock_api`로 “국내주식 잔고조회 API”를 검색해 MCP 응답
+`inquire_balance`, `inquire_balance_rlz_pl`을 수신했다. 설정 변경 전에 실행 중이던 Codex 세션은 MCP
+목록을 자동 갱신하지 않을 수 있으므로 새 세션을 열거나 Codex/IDE 확장을 재시작한다.
+
+### Phase 4 PAPER 읽기 전용 사고 분석 (2026-07-21)
+
+Code Assistant에는 계좌 조회 기능이 없고 Trading MCP는 주문 도구를 분리할 수 없어 사용하지 않는다.
+실제 원장 대조는 기존 KIS REST 래퍼를 통해 잔고와 당일 미체결 GET만 호출한다.
+
+```powershell
+python scripts\kis_phase4_readonly_audit.py
+```
+
+도구의 안전 조건:
+
+- `KIS_MODE=PAPER`만 허용
+- 09:00~09:11 및 15:40 이전 실행 차단
+- 잔고조회 성공 후에만 미체결조회 수행
+- `stop_on_rate_limit=True`로 HTTP 429와 `EGW00201` 즉시 중단
+- 응답 컨테이너·필수 필드 누락, 인증·권한 오류, `rt_cd != 0`에서 추가 호출 중단
+- 계좌번호·종목·주문번호·금액·원문 응답을 출력하지 않음
+- DB는 SQLite read-only URI로 열고 JSONL은 읽기만 하며 자동 보정하지 않음
+
+2026-07-21 16:27 KST PAPER 재현에서 잔고와 미체결조회가 성공했고, 보유 0종목·미체결 0건을
+DB 당일 주문 2건(pending 0건)과 JSONL 이벤트 215건에 대조해 불일치 0건(`MATCH`)을 확인했다.
+상세 확인 순서와 기록 양식은 [KIS_INCIDENT_AUDIT.md](KIS_INCIDENT_AUDIT.md)를 따른다.
+
+### Phase 5 과거 데이터 읽기 전용 PoC (2026-07-22)
+
+로컬 F1 스냅샷과 Improve 메뉴의 DB 집계를 읽기 전용으로 비교한다. 기본 실행은 외부 API를 호출하지
+않는다.
+
+```powershell
+python scripts\kis_phase5_historical_poc.py
+```
+
+장 종료 후 PAPER 공식 일봉으로 최대 3표본을 대조하려면 다음처럼 실행한다.
+
+```powershell
+python scripts\kis_phase5_historical_poc.py --with-kis --max-kis-samples 3
+```
+
+- `--with-kis`는 `KIS_MODE=PAPER`, 15:40 이후만 허용하고 09:00~09:11에는 차단한다.
+- 호출 API는 `inquire-daily-itemchartprice` GET뿐이며 HTTP 429·`EGW00201`·응답 오류에서 즉시
+  중단한다. 주문·정정·취소 경로는 없다.
+- 스냅샷은 09:00:00~09:10:59 KST의 날짜별 최초 정상 파일만 선택하고 주말, 확인된 휴장,
+  범위 밖 시각과 중복 파일은 집계에서 제외한다.
+- 수정주가 플래그 설명이 공식 일봉 샘플 사이에서 일치하지 않으므로 엔드포인트와 플래그를 함께
+  기록한다. 다른 일봉 API에 플래그 의미를 그대로 적용하지 않는다.
+- 상세 데이터 정의, 537행 품질 검사, PAPER 3표본 결과와 Improve 비교는
+  [KIS_HISTORICAL_POC.md](KIS_HISTORICAL_POC.md)에 기록했다.
+
+### Phase 6 MCP 운영 안전성·비활성화 (2026-07-22)
+
+#### 호출 시간과 조사 기록
+
+- 09:00:00 이상 09:11:00 미만에는 Code Assistant를 포함한 KIS MCP와 개발용 KIS 조회를
+  실행하지 않는다.
+- 그 밖의 장중 호출은 봇을 먼저 중지했거나, 봇과 앱 키·호출 쿼터가 분리된 별도 PAPER 키를
+  사용하는 경우에만 허용한다. 일반적인 명세 조사와 과거 데이터 조회는 15:40 이후를 기본으로 한다.
+- REAL 계좌 조사는 별도 승인과 조회 전용 경로가 확인된 경우만 허용한다. 주문 도구가 함께 노출되는
+  Trading MCP는 사용하지 않는다.
+- 모든 MCP 조사는 시각(KST), 목적, 도구/버전, 계정 구분, 봇 상태, 자격 증명 분리 여부, 조회
+  대상·TR/데이터 기간, 호출 횟수와 결과·중단 코드를 남긴다. 기록 양식은
+  [KIS_INCIDENT_AUDIT.md](KIS_INCIDENT_AUDIT.md)를 사용한다.
+
+#### 정적 안전 감사
+
+다음 명령은 외부 API나 MCP를 호출하지 않고 프로젝트 설정과 문서, 런타임 의존성만 검사한다.
+
+```powershell
+python scripts\kis_phase6_safety_audit.py
+```
+
+검사 항목은 Code Assistant `0.1.1`만 등록됐는지, 주문·계좌·Trading 도구가 없는지, 설정에 KIS
+자격 증명 표식이 없는지, `main.py`와 `src/`가 MCP를 참조하지 않는지, `.codex/`가 Git에서
+제외됐는지, 운영·폐기 절차가 문서화됐는지다.
+
+#### MCP 중지·등록 해제
+
+1. 진행 중인 MCP 조회가 없는지 확인하고 Codex/IDE 세션을 종료한다. 세션 종료가 stdio MCP 자식
+   프로세스를 정상 종료하는 기본 절차다.
+2. 사용자 전역 등록으로 설치한 경우 다음 명령으로 제거한다.
+
+```powershell
+codex mcp remove kis-code-assistant
+```
+
+   현재처럼 `.codex/config.toml`에 둔 프로젝트 로컬 등록은 `codex mcp list`에는 보이지만
+   `codex mcp remove`의 제거 대상이 아니다. 이 경우 해당 TOML의 `kis-code-assistant` 블록을
+   제거한다. 파일에 다른 설정이 없다면 파일 자체를 제거해도 된다. 제거 후 새 프로세스에서 확인한다.
+
+```powershell
+Remove-Item -LiteralPath .codex\config.toml
+codex mcp list
+```
+
+3. 비정상 종료로 프로세스가 남았을 때만 명령행을 먼저 확인하고, 정확히
+   `@koreainvestment/kis-code-assistant-mcp`인 PID만 중지한다. 광범위한 `node.exe` 종료는 금지한다.
+
+```powershell
+Get-CimInstance Win32_Process |
+  Where-Object { $_.CommandLine -match '@koreainvestment/kis-code-assistant-mcp' } |
+  Select-Object ProcessId, ParentProcessId, Name, CommandLine
+
+Stop-Process -Id <확인한_PID> -Force
+```
+
+4. 설정 제거 상태에서는 다음 감사와 봇 검증을 실행한다.
+
+```powershell
+python scripts\kis_phase6_safety_audit.py --require-config-absent
+python -c "import main; print('START_PATH_IMPORT_OK')"
+python -m pytest -q -p no:cacheprovider
+```
+
+#### 자격 증명 폐기·교체
+
+- 현재 Code Assistant에는 KIS 앱 키·시크릿·계좌번호·토큰을 전달하지 않았으므로 폐기할 MCP 전용
+  자격 증명이 없다. 등록 제거와 프로세스 종료만 수행한다.
+- Trading MCP는 설치하지 않았고 별도 자격 증명도 발급하지 않았다.
+- 향후 별도 PAPER 자격 증명을 발급했다면 KIS Developers에서 해당 앱 키를 폐기·재발급하고,
+  사용자 전용 환경 변수/운영체제 비밀 저장소와 MCP 토큰 캐시에서 이전 값을 삭제한다.
+- MCP가 봇 자격 증명을 공유한 사실이 확인되면 봇을 중지하고 공유 키를 폐기·교체한 뒤 `.env`와
+  토큰 캐시를 갱신한다. 새 키 검증 전에는 봇을 재시작하지 않는다.
+- 폐기 기록에는 자격 증명 식별용 별칭, 폐기 시각, 수행자, 영향받는 환경과 재발급 확인만 남기며
+  키 원문은 기록하지 않는다.
+
+#### Phase 6 비활성화 재현 결과
+
+2026-07-22 KST에 프로젝트 설정을 임시 제거하고 실행 중인 Code Assistant stdio 프로세스 트리
+1개를 정확한 명령행·PID로 확인해 종료했다. 잔존 프로세스는 0개였고 새 `codex mcp list`는 등록
+없음을 반환했다. 설정 부재 상태에서 다음을 확인했다.
+
+- `kis_phase6_safety_audit.py --require-config-absent`: `PASS`, 외부 호출 0회
+- `import main` 및 `main.main` 시작 callable 확인: `START_PATH_IMPORT_OK`
+- 전체 테스트: `440 passed`
+- 런타임 `main.py`·`src/`의 MCP 참조: 0건
+
+검증 뒤 개발용 프로젝트 설정은 원본 SHA-256이 같은 파일로 복원했으며 MCP 프로세스는 중지 상태로
+두었다. 새 Codex/IDE 세션은 복원된 프로젝트 설정을 읽어 Code Assistant를 다시 시작할 수 있다.
+`codex mcp remove kis-code-assistant`는 이 프로젝트 로컬 등록에 대해 “not found”를 반환했으므로,
+프로젝트 등록 해제 절차는 `.codex/config.toml` 제거가 기준이다.

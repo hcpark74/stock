@@ -1604,10 +1604,11 @@ async def _fetch_current_price(ticker: str) -> float:
 
 
 async def _fetch_available_cash() -> float | None:
-    """주문가능 현금 반환 (주식잔고조회 TTTC8434R). 조회 실패 시 None.
+    """잔고 요약 기반 1차 매수 예산 반환. 조회 실패 시 None.
 
-    ord_psbl_cash 우선, 부재 시 dnca_tot_amt와 prvs_rcdl_excc_amt(D+2 정산금) 중 큰 값.
-    오류 응답(EGW00215 호출 제한 등)은 백오프 후 재시도하고, 끝내 실패하면
+    비문서 확장 필드 ord_psbl_cash 우선, 부재 시 dnca_tot_amt와
+    prvs_rcdl_excc_amt(가수도정산금액) 중 큰 값을 1차 예산으로 사용한다.
+    오류 응답(호출 제한 포함)은 백오프 후 재시도하고, 끝내 실패하면
     실제 잔고 부족(0원)과 구분되도록 None을 반환한다.
     """
     mode = os.getenv("KIS_MODE", "PAPER")
@@ -1655,8 +1656,7 @@ async def _fetch_available_cash() -> float | None:
     cash_source = "ord_psbl_cash"
     cash = ord_psbl_cash
     if not ord_psbl_present:
-        # 매도대금 T+2 미결제 상태에서는 dnca_tot_amt가 실제 주문가능금액을 과소평가하므로
-        # D+2 정산금(prvs_rcdl_excc_amt)과 비교해 큰 값을 사용한다.
+        # 예수금보다 가수도정산금액(prvs_rcdl_excc_amt)이 크면 1차 예산으로 사용한다.
         # 과대평가되더라도 주문 직전 종목별 매수가능조회(nrcvb_buy_qty)가 상한을 재적용한다.
         if prvs_rcdl_excc_amt > dnca_tot_amt:
             cash = prvs_rcdl_excc_amt
@@ -1866,5 +1866,3 @@ async def _poll_fill(
                 "poll_last_error": str(exc)[:160],
             })
         await asyncio.sleep(1)
-
-

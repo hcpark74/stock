@@ -196,7 +196,7 @@ async def test_fetch_available_cash_falls_back_when_orderable_cash_missing(monke
 
 @pytest.mark.asyncio
 async def test_fetch_available_cash_uses_settlement_amount_when_larger(monkeypatch):
-    # 매도대금 T+2 미결제 상태: 예수금(dnca)은 작지만 D+2 정산금(prvs)이 실제 주문가능금액에 가깝다
+    # 미결제 상태: 예수금(dnca)은 작지만 가수도정산금액(prvs)이 1차 예산에 더 가깝다.
     events = []
     monkeypatch.setattr(
         f3.kis_rest,
@@ -216,10 +216,10 @@ async def test_fetch_available_cash_uses_settlement_amount_when_larger(monkeypat
 
 @pytest.mark.asyncio
 async def test_fetch_available_cash_retries_rate_limit_then_succeeds(monkeypatch):
-    """EGW00215 같은 일시 오류는 짧은 백오프 후 재시도해 정상 응답을 얻는다."""
+    """호출 제한 오류는 짧은 백오프 후 재시도해 정상 응답을 얻는다."""
     sleep = AsyncMock()
     get = AsyncMock(side_effect=[
-        {"rt_cd": "1", "msg_cd": "EGW00215", "msg1": "초당 거래건수 초과"},
+        {"rt_cd": "1", "msg_cd": "EGW00201", "msg1": "초당 거래건수 초과"},
         {
             "rt_cd": "0",
             "output2": [{
@@ -242,7 +242,7 @@ async def test_fetch_available_cash_returns_none_when_retries_exhausted(monkeypa
     """잔고 조회가 끝내 실패하면 현금 0이 아니라 None(조회 실패)을 반환한다."""
     sleep = AsyncMock()
     get = AsyncMock(return_value={
-        "rt_cd": "1", "msg_cd": "EGW00215", "msg1": "초당 거래건수 초과",
+        "rt_cd": "1", "msg_cd": "EGW00201", "msg1": "초당 거래건수 초과",
     })
     monkeypatch.setattr(f3.kis_rest, "get", get)
     monkeypatch.setattr(f3.asyncio, "sleep", sleep)

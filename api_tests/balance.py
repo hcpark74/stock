@@ -53,7 +53,7 @@ async def run() -> bool:
         if o2:
             print()
             print(f"  예수금(D+0)  : {int(o2.get('dnca_tot_amt') or 0):>15,} 원")
-            print(f"  D+2 예수금   : {int(o2.get('prvs_rcdl_excc_amt') or 0):>15,} 원")
+            print(f"  가수도정산금: {int(o2.get('prvs_rcdl_excc_amt') or 0):>15,} 원")
             print(f"  유가평가금액 : {int(o2.get('scts_evlu_amt') or 0):>15,} 원")
             print(f"  총평가금액   : {int(o2.get('tot_evlu_amt') or 0):>15,} 원")
             print(f"  자산증감액   : {int(o2.get('asst_icdc_amt') or 0):>+15,} 원")

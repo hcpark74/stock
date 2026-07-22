@@ -78,9 +78,13 @@ async def _request(
     _transient_retry: int = 0,
     _token_retry: int = 0,
     send_guard: Callable[[], bool] | None = None,
+    stop_on_rate_limit: bool = False,
     **kwargs,
 ) -> dict:
-    """Rate-limited KIS REST 요청. 401/429 자동 처리."""
+    """Rate-limited KIS REST 요청.
+
+    조사 모드는 429/EGW00201에서 즉시 중단하며, 401 토큰 갱신은 항상 수행한다.
+    """
     global _last_call_at
 
     base_url = os.getenv("KIS_BASE_URL", "")
@@ -132,6 +136,7 @@ async def _request(
                 _transient_retry=_transient_retry + 1,
                 _token_retry=_token_retry,
                 send_guard=send_guard,
+                stop_on_rate_limit=stop_on_rate_limit,
                 **kwargs,
             )
         log(
@@ -158,6 +163,12 @@ async def _request(
     # 429 — Rate limit 초과
     if resp.status_code == 429:
         log("RATE_LIMIT_HIT", level="WARN", path=path)
+        if stop_on_rate_limit:
+            return {
+                "rt_cd": "1",
+                "msg_cd": "HTTP_429",
+                "msg1": "HTTP 429 rate limit",
+            }
         await asyncio.sleep(1)
         return await _request(
             method,
@@ -167,6 +178,7 @@ async def _request(
             _app_retry=_app_retry,
             _token_retry=_token_retry,
             send_guard=send_guard,
+            stop_on_rate_limit=stop_on_rate_limit,
             **kwargs,
         )
 
@@ -183,6 +195,7 @@ async def _request(
                 _app_retry=_app_retry,
                 _token_retry=_token_retry + 1,
                 send_guard=send_guard,
+                stop_on_rate_limit=stop_on_rate_limit,
                 **kwargs,
             )
 
@@ -205,8 +218,19 @@ async def _request(
                 _app_retry=_app_retry,
                 _token_retry=_token_retry + 1,
                 send_guard=send_guard,
+                stop_on_rate_limit=stop_on_rate_limit,
                 **kwargs,
             )
+
+    if data.get("msg_cd") == "EGW00201" and stop_on_rate_limit:
+        log(
+            "RATE_LIMIT_HIT",
+            level="WARN",
+            path=path,
+            msg_cd=data.get("msg_cd"),
+            msg1=data.get("msg1"),
+        )
+        return data
 
     if data.get("msg_cd") == "EGW00201" and _app_retry < 3:
         log(
@@ -225,6 +249,7 @@ async def _request(
             _app_retry=_app_retry + 1,
             _token_retry=_token_retry,
             send_guard=send_guard,
+            stop_on_rate_limit=stop_on_rate_limit,
             **kwargs,
         )
 
@@ -236,8 +261,16 @@ async def get(
     params: dict | None = None,
     tr_id: str = "",
     timeout: float = _TIMEOUT,
+    stop_on_rate_limit: bool = False,
 ) -> dict:
-    return await _request("GET", path, tr_id=tr_id, timeout=timeout, params=params)
+    return await _request(
+        "GET",
+        path,
+        tr_id=tr_id,
+        timeout=timeout,
+        params=params,
+        stop_on_rate_limit=stop_on_rate_limit,
+    )
 
 
 async def post(

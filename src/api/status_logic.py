@@ -77,8 +77,7 @@ def parse_asset_snapshot_response(resp: dict) -> dict:
     cash = _required_balance_float(summary, "dnca_tot_amt")
     buyable = _optional_balance_float(summary, "ord_psbl_cash")
     settlement = _optional_balance_float(summary, "prvs_rcdl_excc_amt")
-    # ord_psbl_cash 부재 시: 매도대금 T+2 미결제 상태에서는 dnca_tot_amt가 과소평가되므로
-    # D+2 정산금(prvs_rcdl_excc_amt)과 비교해 큰 값을 주문가능금액으로 표시한다.
+    # ord_psbl_cash 부재 시 예수금과 가수도정산금액 중 큰 값을 추정치로 표시한다.
     if buyable is not None:
         buyable_cash, buyable_source = buyable, "ord_psbl_cash"
     elif settlement is not None and settlement > cash:
