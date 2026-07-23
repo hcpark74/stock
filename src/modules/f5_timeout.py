@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -100,6 +101,10 @@ async def execute() -> None:
     if s.position_status != "HOLDING":
         return  # 이미 F4에서 청산됨
 
+    # REAL-BLOCKER: CLOSED currently doubles as an in-process duplicate-sell
+    # guard before broker fill confirmation. If liquidation later fails, the
+    # account can still hold shares while local state says CLOSED. Replace this
+    # with a persisted EXITING state before enabling REAL; see the checklist.
     if not await state.set_closed("TIMEOUT"):
         return
 
@@ -120,11 +125,13 @@ async def execute() -> None:
     order_sent_qty = 0
     order_recorded_qty = 0
     order_recorded_amt = 0.0
+    order_started_at: float | None = None
+    liquidation_started_at: float | None = None
 
     async def _apply_order_fill(cum_qty: int, cum_amt: float) -> None:
         """현재 주문의 누적 체결을 총계와 DB에 델타 반영한다."""
         nonlocal remaining, filled_qty_total, filled_amt_total
-        nonlocal order_recorded_qty, order_recorded_amt
+        nonlocal order_recorded_qty, order_recorded_amt, order_started_at
         delta = cum_qty - order_recorded_qty
         if delta <= 0:
             return
@@ -136,9 +143,19 @@ async def execute() -> None:
         if order_db_id:
             fill_status = "FILLED" if cum_qty >= order_sent_qty else "PARTIAL_FILL"
             avg_price = round(cum_amt / cum_qty) if cum_qty else 0
+            fill_latency_ms = (
+                max(0, round((time.perf_counter() - order_started_at) * 1000))
+                if order_started_at is not None
+                else None
+            )
             try:
                 await db.update_order_fill(
-                    order_db_id, avg_price, cum_qty, 0, status=fill_status)
+                    order_db_id,
+                    avg_price,
+                    cum_qty,
+                    fill_latency_ms,
+                    status=fill_status,
+                )
             except Exception as e:
                 log("TIMEOUT_ORDER_DB_RECORD_FAILED", level="WARN",
                     ticker=ticker, order_id=last_sell_id, error=repr(e))
@@ -192,7 +209,7 @@ async def execute() -> None:
         if remaining <= 0:
             break
 
-        # order_price 기준가는 주문 발송 전에 조회한다 — 발송 후 조회하면
+        # trigger_price 기준가는 주문 발송 전에 조회한다 — 발송 후 조회하면
         # 시장가 체결 이후 가격이 기준이 되어 슬리피지가 왜곡된다.
         # 조회 실패 시 0.0 (슬리피지 집계에서 제외될 뿐, 청산 자체는 막지 않는다).
         ref_price = 0.0
@@ -204,10 +221,14 @@ async def execute() -> None:
                     ticker=ticker, error=str(e))
 
         try:
+            send_started_at = time.perf_counter()
             resp = await _send_sell(ticker, remaining, mode)
             output = resp.get("output", {})
             last_sell_id = output.get("ODNO", "")
             last_org_no = output.get("KRX_FWDG_ORD_ORGNO", "")
+            order_started_at = send_started_at
+            if liquidation_started_at is None:
+                liquidation_started_at = send_started_at
         except Exception as e:
             log("TIMEOUT_RETRY", level="WARN", ticker=ticker, attempt=attempt, error=str(e))
             if attempt < _RETRY:
@@ -223,8 +244,15 @@ async def execute() -> None:
             # 주문 실패 경로와 분리해 로그만 남긴다.
             try:
                 order_db_id = await db.record_order(
-                    s.trade_id, last_sell_id, "SELL", remaining, ref_price,
-                    "TIMEOUT_SELL", ticker, s.target_name,
+                    s.trade_id,
+                    last_sell_id,
+                    "SELL",
+                    remaining,
+                    0.0,
+                    "TIMEOUT_SELL",
+                    ticker,
+                    s.target_name,
+                    trigger_price=ref_price,
                 )
             except Exception as e:
                 log("TIMEOUT_ORDER_DB_RECORD_FAILED", level="WARN",
@@ -250,7 +278,19 @@ async def execute() -> None:
         if filled_qty_total > 0 and filled_amt_total > 0:
             # 여러 번 나눠 체결돼도 평균 청산가(총 체결대금/총 수량)로 손익을 계산한다.
             exit_avg = round(filled_amt_total / filled_qty_total)
-            await _finalize_close(s, ticker, entry, exit_avg, filled_qty_total)
+            fill_latency_ms = (
+                max(0, round((time.perf_counter() - liquidation_started_at) * 1000))
+                if liquidation_started_at is not None
+                else None
+            )
+            await _finalize_close(
+                s,
+                ticker,
+                entry,
+                exit_avg,
+                filled_qty_total,
+                fill_latency_ms=fill_latency_ms,
+            )
             return
         if qty <= 0:
             # precheck에서 잔고 0 확인 — 애초에 매도할 수량이 없었다.
@@ -292,12 +332,28 @@ async def execute() -> None:
                         ticker=ticker)
 
 
-async def _finalize_close(s, ticker: str, entry: float, exit_price: float, exit_qty: int) -> None:
+async def _finalize_close(
+    s,
+    ticker: str,
+    entry: float,
+    exit_price: float,
+    exit_qty: int,
+    *,
+    fill_latency_ms: int | None = None,
+) -> None:
     """전량 체결 확인 후 거래 종료 기록. DB 실패는 재매도 사유가 아니므로 격리한다."""
     pnl_pct = round((exit_price / entry - 1) * 100, 2) if (entry and exit_price) else 0.0
     if s.trade_id:
         try:
-            await db.close_trade(s.trade_id, exit_price, "TIMEOUT", pnl_pct, s.highest_step)
+            await db.close_trade(
+                s.trade_id,
+                exit_price,
+                "TIMEOUT",
+                pnl_pct,
+                s.highest_step,
+                exit_qty=exit_qty,
+                high_price=s.high_price,
+            )
         except Exception as e:
             log("TIMEOUT_CLOSE_DB_FAILED", level="CRIT", ticker=ticker, error=repr(e))
             await notifier.send(
@@ -307,7 +363,7 @@ async def _finalize_close(s, ticker: str, entry: float, exit_price: float, exit_
             )
     log("TIMEOUT_CLOSE", level="INFO", ticker=ticker,
         entry_price=entry, exit_price=exit_price, exit_qty=exit_qty,
-        pnl_pct=pnl_pct, fill_latency_ms=0)
+        pnl_pct=pnl_pct, fill_latency_ms=fill_latency_ms)
     await notifier.send("TIMEOUT_CLOSE", level="INFO",
                         message=f"11시 청산: {ticker} {exit_qty}주 @ {exit_price:,.0f}원",
                         ticker=ticker)

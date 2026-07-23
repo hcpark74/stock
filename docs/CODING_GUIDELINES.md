@@ -222,6 +222,8 @@ logger.log("TRAILING_STOP", level="INFO",
 - F1 KOSPI/KOSDAQ처럼 시장 단위 조회를 연속 호출할 때는 `F1_MARKET_INTERVAL_SEC`를 사용한다.
 - F3 매수 주문 직전에는 `F3_PRE_ORDER_QUIET_SEC` 대기를 거쳐 직전 조회 호출과 주문 호출을 분리한다.
 - F2에서 대상 종목이 잠기면 F3는 기본적으로 매수를 시도한다. 주문 전 차단이 필요하면 `F3_ENTRY_BLOCKED`에 표준 `reason`을 남긴다.
+- 대체 후보가 남은 후보별 보호 차단(갭 범위 이탈, VI, 주문가능수량 0)은 `INFO`로 기록한다. 모든 후보 소진, 주문/API 실패처럼 거래 파이프라인이 실제로 중단될 때만 `WARN` 이상을 사용한다.
+- `ENTRY_QTY_CLAMPED`는 축소율이 `F3_QTY_CLAMP_WARN_PCT` 미만이면 `INFO`, 이상이면 `WARN`으로 기록한다.
 - F3 진입 재시도는 마지막 시도까지 미체결 주문 취소가 보장되어야 한다.
 - F3 실패 로그에는 주문번호, 주문가, 주문수량, 재시도 횟수, 체결조회 요약을 가능한 한 포함한다.
 - DRY_RUN 경로에서는 실제 주문, 실제 KIS API, 운영 DB를 호출하지 않는다.

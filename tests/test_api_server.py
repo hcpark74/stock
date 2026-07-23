@@ -354,7 +354,16 @@ async def test_api_orders_returns_today_orders(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "_today", lambda: today)
     trade_id = await db.open_trade(today, "005930", 75_000.0, 10)
     order_id = await db.record_order(
-        trade_id, "ORD001", "BUY", 10, 75_000.0, "FIRST_BUY", "005930", "삼성전자")
+        trade_id,
+        "ORD001",
+        "BUY",
+        10,
+        0.0,
+        "FIRST_BUY",
+        "005930",
+        "삼성전자",
+        trigger_price=75_000.0,
+    )
     await db.update_order_fill(order_id, 75_100.0, 10, 120)
     old_trade_id = await db.open_trade("20260701", "000660", 120_000.0, 1)
     await db.record_order(old_trade_id, "OLD001", "BUY", 1, 120_000.0, "FIRST_BUY", "000660")
@@ -364,6 +373,9 @@ async def test_api_orders_returns_today_orders(tmp_path, monkeypatch):
 
     assert '"kis_order_id":"ORD001"' in body
     assert '"order_phase":"FIRST_BUY"' in body
+    assert '"order_price":0.0' in body
+    assert '"trigger_price":75000.0' in body
+    assert '"fill_latency_ms":120' in body
     assert '"name":"삼성전자"' in body
     assert '"status":"FILLED"' in body
     assert "OLD001" not in body
@@ -417,10 +429,16 @@ async def test_today_trade_marks_returns_filled_orders_in_time_order(tmp_path, m
 async def test_api_history_returns_recent_trade_contract(tmp_path):
     await db.init(str(tmp_path / "history.db"))
     old_trade_id = await db.open_trade("20260701", "000660", 120_000.0, 1)
-    await db.close_trade(old_trade_id, 121_000.0, "TIMEOUT", 0.83, 0.0)
+    await db.close_trade(
+        old_trade_id, 121_000.0, "TIMEOUT", 0.83, 0.0,
+        exit_qty=1, high_price=121_000.0,
+    )
     trade_id = await db.open_trade("20260702", "005930", 75_000.0, 10, name="삼성전자")
     await db.mark_pyramided(trade_id)
-    await db.close_trade(trade_id, 78_750.0, "TRAILING", 5.0, 0.05)
+    await db.close_trade(
+        trade_id, 78_750.0, "TRAILING", 5.0, 0.05,
+        exit_qty=10, high_price=78_750.0,
+    )
 
     resp = await server.api_history(limit=1)
     rows = json.loads(resp.body.decode("utf-8"))
@@ -446,13 +464,22 @@ async def test_api_stats_returns_strategy_breakdowns_contract(tmp_path):
     await db.init(str(tmp_path / "stats.db"))
     first_id = await db.open_trade("20260701", "005930", 75_000.0, 10)
     await db.mark_pyramided(first_id)
-    await db.close_trade(first_id, 78_750.0, "TRAILING", 5.0, 0.05)
+    await db.close_trade(
+        first_id, 78_750.0, "TRAILING", 5.0, 0.05,
+        exit_qty=10, high_price=78_750.0,
+    )
 
     second_id = await db.open_trade("20260702", "000660", 120_000.0, 1)
-    await db.close_trade(second_id, 118_800.0, "HARD_STOP", -1.0, 0.0)
+    await db.close_trade(
+        second_id, 118_800.0, "HARD_STOP", -1.0, 0.0,
+        exit_qty=1, high_price=120_000.0,
+    )
 
     third_id = await db.open_trade("20260703", "035420", 200_000.0, 1)
-    await db.close_trade(third_id, 204_000.0, "TIMEOUT", 2.0, 0.075)
+    await db.close_trade(
+        third_id, 204_000.0, "TIMEOUT", 2.0, 0.075,
+        exit_qty=1, high_price=204_000.0,
+    )
 
     conn = db.get()
     await conn.execute(

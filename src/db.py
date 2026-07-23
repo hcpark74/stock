@@ -66,6 +66,7 @@ async def init(db_path: str) -> None:
             name            TEXT,
             order_qty       INTEGER NOT NULL,
             order_price     REAL,
+            trigger_price   REAL,
             fill_price      REAL,
             fill_qty        INTEGER,
             fill_latency_ms INTEGER,
@@ -138,6 +139,19 @@ async def init(db_path: str) -> None:
         await _conn.execute("ALTER TABLE orders ADD COLUMN name TEXT")
     except Exception:
         pass  # 이미 존재하면 무시
+    try:
+        await _conn.execute("ALTER TABLE orders ADD COLUMN trigger_price REAL")
+    except Exception:
+        pass  # already exists
+    # Older rows used order_price as the decision-time reference even for
+    # market orders. Preserve that history while new rows separate the actual
+    # submitted price from the trigger/reference price.
+    await _conn.execute(
+        """UPDATE orders
+              SET trigger_price=order_price
+            WHERE trigger_price IS NULL
+              AND order_price IS NOT NULL"""
+    )
     # 기존 DB 마이그레이션: daily_skips.reason CHECK 확장 — SQLite는 CHECK 변경이
     # 불가하므로 재구축. record_skip이 INSERT OR IGNORE라 구 제약에 걸리면
     # 에러 없이 기록만 누락되기 때문에 반드시 맞춰야 한다.
@@ -165,6 +179,45 @@ async def init(db_path: str) -> None:
             ALTER TABLE daily_skips_migrated RENAME TO daily_skips;
             COMMIT;
         """)
+
+    # Backfill legacy CLOSED rows that predate complete close summaries.
+    # Filled sell orders are the durable source of truth; cancelled orders can
+    # still contain a valid partial fill, so the predicate is fill_qty > 0
+    # rather than status='FILLED'. Existing non-NULL summaries are preserved.
+    await _conn.execute("""
+        UPDATE trades
+           SET exit_qty = (
+               SELECT SUM(o.fill_qty)
+                 FROM orders AS o
+                WHERE o.trade_id = trades.id
+                  AND o.order_type = 'SELL'
+                  AND o.fill_qty > 0
+           )
+         WHERE status = 'CLOSED'
+           AND exit_qty IS NULL
+           AND EXISTS (
+               SELECT 1
+                 FROM orders AS o
+                WHERE o.trade_id = trades.id
+                  AND o.order_type = 'SELL'
+                  AND o.fill_qty > 0
+           )
+    """)
+    # pyramided rows are excluded: trades.entry_price holds only the first
+    # fill price, so the flat formula would misstate pnl by the second-buy
+    # price difference — and the IS NULL idempotency guard would then freeze
+    # that wrong value forever. Left NULL until a weighted-average backfill
+    # from BUY fills exists.
+    await _conn.execute("""
+        UPDATE trades
+           SET pnl_amount = (exit_price - entry_price) * exit_qty
+         WHERE status = 'CLOSED'
+           AND pnl_amount IS NULL
+           AND pyramided = 0
+           AND exit_price IS NOT NULL
+           AND entry_price IS NOT NULL
+           AND exit_qty IS NOT NULL
+    """)
     await _conn.commit()
 
 
@@ -284,20 +337,34 @@ async def record_order(
     phase: str,
     ticker: str,
     name: str | None = None,
+    *,
+    trigger_price: float | None = None,
 ) -> int:
-    """orders 테이블에 주문 INSERT. order_db_id 반환.
+    """Insert a pending order and return its local id.
 
-    side: 'BUY' | 'SELL'
-    phase: 'FIRST_BUY' | 'PYRAMID_BUY' | 'CLOSE_SELL' | 'TIMEOUT_SELL' | 'SLIPPAGE_SELL'
+    ``price`` is the price submitted to KIS (zero for market orders), while
+    ``trigger_price`` is the decision-time quote used for slippage analysis.
     """
     now = _now()
     conn = get()
     async with conn.execute(
         """INSERT INTO orders
                (trade_id, kis_order_id, order_type, order_phase,
-                ticker, name, order_qty, order_price, status, ordered_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)""",
-        (trade_id, kis_order_id, side, phase, ticker, name, qty, price, now),
+                ticker, name, order_qty, order_price, trigger_price,
+                status, ordered_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)""",
+        (
+            trade_id,
+            kis_order_id,
+            side,
+            phase,
+            ticker,
+            name,
+            qty,
+            price,
+            trigger_price,
+            now,
+        ),
     ) as cur:
         order_db_id = cur.lastrowid
     await conn.commit()
@@ -308,7 +375,7 @@ async def update_order_fill(
     order_db_id: int,
     fill_price: float,
     fill_qty: int,
-    fill_latency_ms: int,
+    fill_latency_ms: int | None,
     status: str = "FILLED",
 ) -> None:
     """orders 체결 정보 갱신 (기본 FILLED, 부분체결은 PARTIAL_FILL)."""
@@ -370,17 +437,57 @@ async def close_trade(
     close_reason: str,
     pnl_pct: float,
     highest_step: float,
+    *,
+    exit_qty: int,
+    high_price: float | None,
 ) -> None:
-    """trades 청산 정보 갱신 (status → CLOSED)."""
+    """Persist the complete, fee-exclusive trade close summary atomically.
+
+    ``exit_qty`` must be the confirmed cumulative sell fill quantity. The
+    caller supplies the latest in-memory ``high_price`` because the final tick
+    can trigger a close before the throttled progress writer reaches SQLite.
+    ``pnl_amount`` deliberately excludes fees and taxes, matching DB_DESIGN.
+    """
+    if exit_qty <= 0:
+        raise ValueError("exit_qty must be positive when closing a trade")
+
     now = _now()
     conn = get()
-    await conn.execute(
+    cursor = await conn.execute(
         """UPDATE trades
-           SET exit_price=?, exit_at=?, close_reason=?,
-               pnl_pct=?, highest_step=?, status='CLOSED', updated_at=?
-           WHERE id=?""",
-        (exit_price, now, close_reason, pnl_pct, highest_step, now, trade_id),
+           SET exit_price=?, exit_qty=?, exit_at=?, close_reason=?,
+               pnl_pct=?,
+               pnl_amount=CASE
+                   WHEN entry_price IS NULL THEN NULL
+                   ELSE (? - entry_price) * ?
+               END,
+               high_price=CASE
+                   WHEN ? IS NULL THEN high_price
+                   WHEN high_price IS NULL OR ? > high_price THEN ?
+                   ELSE high_price
+               END,
+               highest_step=?, status='CLOSED', updated_at=?
+           WHERE id=? AND status='OPEN'""",
+        (
+            exit_price,
+            exit_qty,
+            now,
+            close_reason,
+            pnl_pct,
+            exit_price,
+            exit_qty,
+            high_price,
+            high_price,
+            high_price,
+            highest_step,
+            now,
+            trade_id,
+        ),
     )
+    if cursor.rowcount != 1:
+        # No rollback: a zero-row UPDATE changed nothing, and rolling back the
+        # shared connection could discard another coroutine's uncommitted write.
+        raise RuntimeError(f"open trade not found while closing trade_id={trade_id}")
     await conn.commit()
 
 

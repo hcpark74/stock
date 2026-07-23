@@ -1,6 +1,6 @@
 """F5 타임아웃 청산 — 중복 매도 방지, 부분체결 평균가, 미체결 취소 확정 검증."""
 
-from unittest.mock import AsyncMock, call
+from unittest.mock import ANY, AsyncMock, MagicMock, call
 
 import pytest
 
@@ -19,6 +19,7 @@ def holding_state(monkeypatch):
     s.entry_price = 10_000.0
     s.entry_qty = 10
     s.remaining_qty = 10
+    s.high_price = 10_400.0
     s.trade_id = 7
     s.highest_step = 0.0
     monkeypatch.setattr(f5_timeout, "_RETRY_INTERVAL", 0)
@@ -85,7 +86,10 @@ async def test_recovers_actual_fill_from_order_status(monkeypatch):
     await f5_timeout.execute()
 
     assert send_sell.await_count == 1            # 중복 매도 주문 없음
-    close_trade.assert_awaited_once_with(7, 10_100, "TIMEOUT", 1.0, 0.0)
+    close_trade.assert_awaited_once_with(
+        7, 10_100, "TIMEOUT", 1.0, 0.0,
+        exit_qty=10, high_price=10_400.0,
+    )
     codes = [c.args[0] for c in send.await_args_list]
     assert "TIMEOUT_ORDER_FAILED" not in codes
 
@@ -137,7 +141,10 @@ async def test_pending_order_is_cancelled_before_reorder(monkeypatch):
     cancel.assert_awaited_once_with("S1", "91252", "PAPER")
     assert send_sell.await_count == 2            # 취소 확정 후에만 재주문
     update_status.assert_awaited_once_with(42, "CANCELLED")   # 감사 이력 일치
-    close_trade.assert_awaited_once_with(7, 10_100, "TIMEOUT", 1.0, 0.0)
+    close_trade.assert_awaited_once_with(
+        7, 10_100, "TIMEOUT", 1.0, 0.0,
+        exit_qty=10, high_price=10_400.0,
+    )
 
 
 async def test_cancel_skipped_when_no_cancelable_qty(monkeypatch):
@@ -161,7 +168,10 @@ async def test_cancel_skipped_when_no_cancelable_qty(monkeypatch):
 
     cancel.assert_not_awaited()                  # 취소할 것이 없으면 요청도 없음
     assert send_sell.await_count == 1
-    close_trade.assert_awaited_once_with(7, 10_100, "TIMEOUT", 1.0, 0.0)
+    close_trade.assert_awaited_once_with(
+        7, 10_100, "TIMEOUT", 1.0, 0.0,
+        exit_qty=10, high_price=10_400.0,
+    )
 
 
 async def test_no_reorder_when_cancel_unconfirmed(monkeypatch):
@@ -345,20 +355,18 @@ async def test_partial_fills_close_at_weighted_average_price(monkeypatch):
     assert send_sell.await_count == 2
     assert send_sell.await_args_list[1].args[1] == 4          # 잔량만 재주문
     assert update_fill.await_args_list == [
-        call(42, 10_100, 6, 0, status="PARTIAL_FILL"),        # 부분체결 상태 기록
-        call(42, 10_050, 4, 0, status="FILLED"),
+        call(42, 10_100, 6, ANY, status="PARTIAL_FILL"),
+        call(42, 10_050, 4, ANY, status="FILLED"),
     ]
-    close_trade.assert_awaited_once_with(7, 10_080, "TIMEOUT", 0.8, 0.0)  # 평균 청산가
+    close_trade.assert_awaited_once_with(
+        7, 10_080, "TIMEOUT", 0.8, 0.0,
+        exit_qty=10, high_price=10_400.0,
+    )  # 평균 청산가
     codes = [c.args[0] for c in send.await_args_list]
     assert "TIMEOUT_ORDER_FAILED" not in codes
 
 
-async def test_timeout_sell_records_order_time_price(monkeypatch):
-    """TIMEOUT_SELL의 order_price에는 주문 발송 전 현재가를 기록한다 (0 고정 금지).
-
-    order_price=0이면 슬리피지 집계에서 타임아웃 매도가 전부 제외되고,
-    발송 후에 조회하면 체결 이후 가격이 기준이 되어 슬리피지가 왜곡된다.
-    """
+async def test_timeout_sell_separates_trigger_price_and_measures_latency(monkeypatch):
     calls = []
     send_sell = AsyncMock(
         side_effect=lambda *a, **k: calls.append("sell") or {"output": {"ODNO": "S1"}})
@@ -371,10 +379,17 @@ async def test_timeout_sell_records_order_time_price(monkeypatch):
         raising=False)
     record_order, update_fill, close_trade = _wire_db(monkeypatch)
     monkeypatch.setattr(f5_timeout.notifier, "send", AsyncMock())
+    monkeypatch.setattr(
+        f5_timeout.time,
+        "perf_counter",
+        MagicMock(side_effect=[100.0, 100.25, 100.3]),
+    )
 
     await f5_timeout.execute()
 
-    assert record_order.await_args.args[4] == 10_050.0
+    assert record_order.await_args.args[4] == 0.0
+    assert record_order.await_args.kwargs["trigger_price"] == 10_050.0
+    assert update_fill.await_args.args[3] == 250
     assert calls == ["price", "sell"]  # 기준가 조회는 주문 발송보다 먼저
     close_trade.assert_awaited_once()
 
@@ -394,6 +409,7 @@ async def test_timeout_sell_price_fetch_failure_still_records_and_sells(monkeypa
     await f5_timeout.execute()
 
     assert record_order.await_args.args[4] == 0.0
+    assert record_order.await_args.kwargs["trigger_price"] == 0.0
     close_trade.assert_awaited_once()
 
 
@@ -409,8 +425,11 @@ async def test_confirmed_fill_closes_trade_once(monkeypatch):
     await f5_timeout.execute()
 
     assert send_sell.await_count == 1
-    update_fill.assert_awaited_once_with(42, 10_100, 10, 0, status="FILLED")
-    close_trade.assert_awaited_once_with(7, 10_100, "TIMEOUT", 1.0, 0.0)
+    update_fill.assert_awaited_once_with(42, 10_100, 10, ANY, status="FILLED")
+    close_trade.assert_awaited_once_with(
+        7, 10_100, "TIMEOUT", 1.0, 0.0,
+        exit_qty=10, high_price=10_400.0,
+    )
 
 
 async def test_exception_then_confirmed_fill_recovers(monkeypatch):

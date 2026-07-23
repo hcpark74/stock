@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -66,6 +66,14 @@ def test_fill_gap_reaches_max_boundary():
     """체결가 갭이 정확히 상한(7%)이면 청산 대상이다 (>=, 초과가 아닌 이상)."""
     assert f3._fill_gap_reaches_max(f3.GAP_MAX_FILL) is True
     assert f3._fill_gap_reaches_max(f3.GAP_MAX_FILL - 1e-9) is False
+
+
+def test_qty_clamp_level_uses_configured_reduction_threshold(monkeypatch):
+    monkeypatch.setattr(f3, "F3_QTY_CLAMP_WARN_PCT", 20.0)
+
+    assert f3._qty_clamp_reduction_pct(657, 558) == pytest.approx(15.07)
+    assert f3._qty_clamp_log_level(657, 558) == "INFO"
+    assert f3._qty_clamp_log_level(9, 5) == "WARN"
 
 
 def test_parse_deadline_logs_invalid_value(monkeypatch):
@@ -870,11 +878,7 @@ async def test_full_cash_quantity_places_first_buy(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_entry_records_expected_price_as_order_price(monkeypatch):
-    """orders.order_price에는 체결가가 아닌 주문 시점 예상가를 기록한다.
-
-    두 값이 같으면 슬리피지 집계가 항상 0이 된다 — 체결가는 update_order_fill로만.
-    """
+async def test_entry_separates_market_order_and_trigger_price(monkeypatch):
     _reset_state()
     record_order = AsyncMock(return_value=1)
     update_fill = AsyncMock()
@@ -896,16 +900,22 @@ async def test_entry_records_expected_price_as_order_price(monkeypatch):
     monkeypatch.setattr(f3.db, "record_order", record_order)
     monkeypatch.setattr(f3.db, "update_order_fill", update_fill)
     monkeypatch.setattr(f3.state, "persist", AsyncMock())
+    monkeypatch.setattr(
+        f3.time,
+        "perf_counter",
+        MagicMock(side_effect=[20.0, 20.25]),
+    )
 
     await f3.run(force=True)
 
-    assert record_order.await_args.args[4] == 1000.0  # 주문 시점 예상가
-    assert update_fill.await_args.args[1] == 1010     # 체결가
+    assert record_order.await_args.args[4] == 0.0
+    assert record_order.await_args.kwargs["trigger_price"] == 1000.0
+    assert update_fill.await_args.args[1] == 1010
+    assert update_fill.await_args.args[3] == 250
 
 
 @pytest.mark.asyncio
-async def test_pyramid_records_current_price_as_order_price(monkeypatch):
-    """피라미딩 주문도 order_price에는 주문 시점 현재가를 기록한다."""
+async def test_pyramid_separates_market_order_and_trigger_price(monkeypatch):
     _reset_state()
     record_order = AsyncMock(return_value=1)
     update_fill = AsyncMock()
@@ -952,9 +962,11 @@ async def test_pyramid_records_current_price_as_order_price(monkeypatch):
 
     await f3.run(force=True)
 
-    assert record_order.await_args_list[0].args[4] == 1000.0  # 1차: 예상가
-    assert record_order.await_args_list[1].args[4] == 1006    # 2차: 주문 시점 현재가
-    assert update_fill.await_args_list[1].args[1] == 1008     # 2차 체결가
+    assert record_order.await_args_list[0].args[4] == 0.0
+    assert record_order.await_args_list[0].kwargs["trigger_price"] == 1000.0
+    assert record_order.await_args_list[1].args[4] == 0.0
+    assert record_order.await_args_list[1].kwargs["trigger_price"] == 1006
+    assert update_fill.await_args_list[1].args[1] == 1008
 
 
 @pytest.mark.asyncio
@@ -1020,6 +1032,9 @@ async def test_entry_qty_is_clamped_by_buyable_quantity(monkeypatch):
     assert clamped["planned_qty"] == 9
     assert clamped["buyable_qty"] == 5
     assert clamped["order_qty"] == 5
+    assert clamped["level"] == "WARN"
+    assert clamped["reduction_pct"] == pytest.approx(44.44)
+    assert clamped["warn_threshold_pct"] == 20.0
 
 @pytest.mark.asyncio
 async def test_entry_blocks_when_buyable_quantity_is_zero(monkeypatch):
@@ -1557,6 +1572,13 @@ async def test_candidate_retry_skips_next_candidate_when_freshness_gap_changes(m
     changed = [kwargs for event, kwargs in events if event == "GAP_CHANGED"][-1]
     assert changed["ticker"] == "STALE2"
     assert changed["freshness_check"] is True
+    assert changed["level"] == "INFO"
+    blocked = [
+        kwargs
+        for event, kwargs in events
+        if event == "F3_ENTRY_BLOCKED" and kwargs.get("ticker") == "STALE2"
+    ]
+    assert blocked[-1]["level"] == "INFO"
 
 @pytest.mark.asyncio
 async def test_entry_recheck_uses_candidate_prev_close_when_quote_prev_close_missing(monkeypatch):
@@ -1593,6 +1615,7 @@ async def test_entry_recheck_uses_candidate_prev_close_when_quote_prev_close_mis
 
 @pytest.mark.asyncio
 async def test_entry_all_candidates_fail_recheck_skips_without_order(monkeypatch):
+    events = []
     _reset_state()
     state.get().target_ticker = "BAD001"
     state.get().target_candidates = [
@@ -1602,7 +1625,7 @@ async def test_entry_all_candidates_fail_recheck_skips_without_order(monkeypatch
     ]
     send_buy = AsyncMock()
 
-    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
     monkeypatch.setattr(
         f3,
         "_fetch_expected_price",
@@ -1629,6 +1652,20 @@ async def test_entry_all_candidates_fail_recheck_skips_without_order(monkeypatch
     notify.assert_awaited_once()
     assert notify.await_args.args[0] == "GAP_CHANGED"
     assert notify.await_args.kwargs["ticker"] == "BAD001"
+    candidate_blocks = [
+        kwargs
+        for event, kwargs in events
+        if event == "F3_ENTRY_BLOCKED" and not kwargs.get("terminal")
+    ]
+    terminal_blocks = [
+        kwargs
+        for event, kwargs in events
+        if event == "F3_ENTRY_BLOCKED" and kwargs.get("terminal")
+    ]
+    assert candidate_blocks
+    assert all(item["level"] == "INFO" for item in candidate_blocks)
+    assert len(terminal_blocks) == 1
+    assert terminal_blocks[0]["level"] == "WARN"
 
 @pytest.mark.asyncio
 async def test_entry_recheck_detects_gap_change_with_derived_prev_close(monkeypatch):

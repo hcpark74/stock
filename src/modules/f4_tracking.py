@@ -451,7 +451,9 @@ async def _execute_close_impl(price: float, reason: str) -> bool:
 
     sell_id = ""
     exit_price = price
+    fill_latency_ms: int | None = None
     try:
+        order_started_at = time.perf_counter()
         sell_resp = await _send_sell(s.target_ticker, qty, mode)
         output = sell_resp.get("output") if isinstance(sell_resp.get("output"), dict) else {}
         sell_id = output.get("ODNO", "")
@@ -464,6 +466,13 @@ async def _execute_close_impl(price: float, reason: str) -> bool:
         fill = await _poll_fill(sell_id, timeout_sec=30)
         if fill:
             exit_price = fill["fill_price"]
+            fill_latency_ms = max(
+                0,
+                round((time.perf_counter() - order_started_at) * 1000),
+            )
+        else:
+            log("F4_FILL_UNCONFIRMED", level="WARN", ticker=s.target_ticker,
+                order_id=sell_id)
     except Exception as e:
         log("F4_SELL_ERROR", level="CRIT", ticker=s.target_ticker, error=repr(e))
         await notifier.send(
@@ -478,12 +487,36 @@ async def _execute_close_impl(price: float, reason: str) -> bool:
 
     if s.trade_id:
         try:
-            # order_price에는 매도 트리거 시점 가격을 기록한다 (체결가는 update_order_fill).
+            # 시장가 제출 가격(0)과 매도 트리거 가격을 분리하고 체결가는 별도 갱신한다.
             order_db_id = await db.record_order(
-                s.trade_id, sell_id, "SELL", qty, price, "CLOSE_SELL", s.target_ticker, s.target_name,
+                s.trade_id,
+                sell_id,
+                "SELL",
+                qty,
+                0.0,
+                "CLOSE_SELL",
+                s.target_ticker,
+                s.target_name,
+                trigger_price=price,
             )
-            await db.update_order_fill(order_db_id, exit_price, qty, 0)
-            await db.close_trade(s.trade_id, exit_price, reason, pnl_pct, s.highest_step)
+            if fill:
+                await db.update_order_fill(
+                    order_db_id,
+                    exit_price,
+                    qty,
+                    fill_latency_ms,
+                )
+            # fill 미확인 주문은 PENDING으로 남긴다 — 트리거가를 체결가로
+            # 기록하면 슬리피지 0%p 가짜 표본이 개선 통계에 섞인다.
+            await db.close_trade(
+                s.trade_id,
+                exit_price,
+                reason,
+                pnl_pct,
+                s.highest_step,
+                exit_qty=qty,
+                high_price=s.high_price,
+            )
         except Exception as e:
             log(
                 "F4_CLOSE_RECORD_ERROR",
@@ -510,8 +543,8 @@ async def _execute_close_impl(price: float, reason: str) -> bool:
         log_extra = {"highest_step": s.highest_step, "stop_price": round(stop_price, 0)}
 
     log(event_name, level=level, ticker=s.target_ticker,
-        entry_price=entry, exit_price=exit_price, exit_qty=qty,
-        pnl_pct=pnl_pct, fill_latency_ms=0, **log_extra)
+        entry_price=entry, trigger_price=price, exit_price=exit_price, exit_qty=qty,
+        pnl_pct=pnl_pct, fill_latency_ms=fill_latency_ms, **log_extra)
     await notifier.send(
         event_name, level=level,
         message=f"{reason} 청산: {s.target_ticker} @ {exit_price:,}원 (P&L {pnl_pct:+.2f}%)",
@@ -581,6 +614,10 @@ async def _send_sell(ticker: str, qty: int, mode: str) -> dict:
 
 
 async def _poll_fill(order_id: str, timeout_sec: int = 30) -> dict | None:
+    # REAL-BLOCKER: this helper returns on the first positive cumulative fill
+    # and does not prove that the full sell quantity filled. The caller also
+    # lacks pending-order reconciliation when this returns None. Keep REAL
+    # disabled until docs/REAL_TRADING_CHECKLIST.md items R1/R2 are resolved.
     mode = os.getenv("KIS_MODE", "PAPER")
     today = datetime.now(KST).strftime("%Y%m%d")
     attempts = max(1, round(timeout_sec / F4_FILL_POLL_INTERVAL_SEC))

@@ -11,7 +11,8 @@ from src import db, notifier, state
 from src.api import kis_rest
 from src.modules import f1_selector
 from src.utils.logger import log
-from src.utils.number import to_float as _to_float, to_int as _to_int
+from src.utils.number import to_float as _to_float
+from src.utils.number import to_int as _to_int
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -30,6 +31,8 @@ F1_DEADLINE_M = 10
 F1_RETRY_INTERVAL_SEC = int(os.getenv("F1_RETRY_INTERVAL_SEC", "5"))
 F1_SNAPSHOT_DIR = os.getenv("F1_SNAPSHOT_DIR", "data/f1_snapshots")
 F1_SNAPSHOT_KEEP = int(os.getenv("F1_SNAPSHOT_KEEP", "20"))
+# Keep the PAPER default at 1. A 2026-07-23 read-only benchmark found no speed
+# benefit at 2 and observed one KIS rate-limit response; see docs/F1_SPEED_EXPERIMENT_20260723.md.
 F1_EXPECTED_QUOTE_CONCURRENCY = int(os.getenv("F1_EXPECTED_QUOTE_CONCURRENCY", "1"))
 F1_PROGRESS_LOG_EVERY = max(1, int(os.getenv("F1_PROGRESS_LOG_EVERY", "10")))
 F1_MARKET_INTERVAL_SEC = float(os.getenv("F1_MARKET_INTERVAL_SEC", "3.0"))
@@ -351,7 +354,11 @@ async def _parse_candidate(item: dict, market: str = "J", quote_market: str = "J
     gap_source = "ranking.prdy_ctrt"
 
     expected_quote = await _fetch_expected_quote(ticker, quote_market)
-    if expected_quote and expected_quote["expected_price"] > 0 and expected_quote["expected_qty"] > 0:
+    if (
+        expected_quote
+        and expected_quote["expected_price"] > 0
+        and expected_quote["expected_qty"] > 0
+    ):
         expected_price = expected_quote["expected_price"]
         expected_qty = expected_quote["expected_qty"]
         expected_amount = expected_quote["expected_amount"]
@@ -427,7 +434,11 @@ async def _fetch_expected_quote(ticker: str, market: str = "J") -> dict | None:
 
 def _log_expected_comparison(candidates: list[dict]) -> None:
     ranking_pass = sum(1 for c in candidates if GAP_MIN <= c.get("ranking_gap_pct", 0.0) < GAP_MAX)
-    expected_pass = sum(1 for c in candidates if GAP_MIN <= (c.get("expected_api_gap_pct") or 0.0) < GAP_MAX)
+    expected_pass = sum(
+        1
+        for c in candidates
+        if GAP_MIN <= (c.get("expected_api_gap_pct") or 0.0) < GAP_MAX
+    )
     final_pass = sum(1 for c in candidates if _is_gap_candidate(c))
     expected_valid = sum(1 for c in candidates if (c.get("expected_api_price") or 0) > 0)
     gap_source_expected = sum(1 for c in candidates if c.get("gap_source") == "expected.antc_cnpr")

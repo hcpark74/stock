@@ -548,7 +548,7 @@ Telegram Bot 구현 요건
   TIME_SYNC_WARN            | CRIT   | 시스템 시각 오차 {ms}ms. 확인 필요.
   NO_TARGET                 | INFO   | 당일 필터 통과 종목 없음. 거래 스킵.
   TARGET_LOCKED             | INFO   | 타겟 확정: {ticker}, 예상갭 {gap}%
-  GAP_CHANGED               | WARN   | 진입 직전 갭 변동. 거래 스킵.
+  GAP_CHANGED               | INFO/WARN | 대체 후보가 남으면 후보 제외(INFO), 전체 거래 스킵이면 WARN.
   SLIPPAGE_GUARD            | WARN   | 슬리피지 초과 체결. 즉시 청산.
   ENTRY_EXECUTED            | INFO   | 진입: {ticker} {qty}주 @ {price}원
   PYRAMID_SKIPPED           | INFO   | 2차 피라미딩 생략. 갭 미확인.

@@ -20,11 +20,14 @@ def _trade(**over):
     return base
 
 
-def _order(phase, order_price, fill_price, latency=500):
-    return {
+def _order(phase, order_price, fill_price, latency=500, trigger_price=None):
+    row = {
         "order_phase": phase, "order_price": order_price,
         "fill_price": fill_price, "fill_latency_ms": latency,
     }
+    if trigger_price is not None:
+        row["trigger_price"] = trigger_price
+    return row
 
 
 def test_improve_empty_rows_returns_zero_structure():
@@ -216,6 +219,17 @@ def test_improve_slippage_skips_rows_without_prices():
     assert sl["by_phase"] == {}
 
 
+def test_improve_slippage_prefers_trigger_price_for_market_order():
+    orders = [
+        _order("CLOSE_SELL", 0.0, 9_980.0, trigger_price=10_000.0),
+    ]
+
+    sl = server._improve_from_rows([], orders, {})["slippage"]
+
+    assert sl["sell"]["n"] == 1
+    assert sl["sell"]["avg_pp"] == 0.2
+
+
 def test_improve_guard_count_and_skips():
     # SLIPPAGE_GUARD는 거래를 열기 전에 daily_skips에 기록되고 반환된다 —
     # 종료 거래(close_reason)에는 존재할 수 없으므로 skips에서 집계해야 한다.
@@ -346,11 +360,17 @@ async def test_api_improve_aggregates_seeded_trades_orders_skips(tmp_path):
     # 거래 1: 손절 (MFE 2.1%, 8분 보유 → 근접 이탈 + 빠른 손절)
     t1 = await db.open_trade("20260701", "005930", 10_000.0, 10, name="삼성전자")
     await db.update_trade_progress(t1, 10_210.0, 0.0)
-    await db.close_trade(t1, 9_787.0, "HARD_STOP", -2.13, 0.0)
+    await db.close_trade(
+        t1, 9_787.0, "HARD_STOP", -2.13, 0.0,
+        exit_qty=10, high_price=10_210.0,
+    )
     # 거래 2: 트레일링 (스텝1 도달, MFE 4.0%)
     t2 = await db.open_trade("20260702", "000660", 10_000.0, 10, name="SK하이닉스")
     await db.update_trade_progress(t2, 10_400.0, 0.025)
-    await db.close_trade(t2, 10_100.0, "TRAILING", 1.0, 0.025)
+    await db.close_trade(
+        t2, 10_100.0, "TRAILING", 1.0, 0.025,
+        exit_qty=10, high_price=10_400.0,
+    )
     # 진입·청산 시각을 결정적으로 고정 (close_trade는 now를 기록)
     await conn.execute(
         "UPDATE trades SET entry_at=?, exit_at=? WHERE id=?",

@@ -91,6 +91,78 @@ class _FakeAsyncClient:
         return _FakeResponse()
 
 
+class _ControlledClock:
+    def __init__(self, now: float = 1000.0):
+        self.now = now
+
+    def monotonic(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _timed_client(clock: _ControlledClock, request_seconds: float):
+    class TimedClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request(self, *args, **kwargs):
+            clock.now += request_seconds
+            return _FakeResponse()
+
+    return TimedClient
+
+
+@pytest.mark.asyncio
+async def test_latency_warning_excludes_deliberate_rate_limit_wait(monkeypatch):
+    clock = _ControlledClock()
+    events = []
+
+    monkeypatch.setattr(kis_rest.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(kis_rest.asyncio, "sleep", clock.sleep)
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 1.1)
+    monkeypatch.setattr(kis_rest, "_last_call_at", clock.now)
+    monkeypatch.setattr(kis_rest.httpx, "AsyncClient", _timed_client(clock, 0.1))
+    monkeypatch.setattr(kis_rest, "log", lambda event, **fields: events.append((event, fields)))
+
+    resp = await kis_rest.get("/test")
+
+    assert resp == {"rt_cd": "0"}
+    assert not [event for event, _ in events if event == "LATENCY_HIGH"]
+
+
+@pytest.mark.asyncio
+async def test_latency_warning_reports_network_wait_and_total_times(monkeypatch):
+    clock = _ControlledClock()
+    events = []
+
+    monkeypatch.setattr(kis_rest.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(kis_rest.asyncio, "sleep", clock.sleep)
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 1.1)
+    monkeypatch.setattr(kis_rest, "_last_call_at", clock.now)
+    monkeypatch.setattr(kis_rest.httpx, "AsyncClient", _timed_client(clock, 0.6))
+    monkeypatch.setattr(kis_rest, "log", lambda event, **fields: events.append((event, fields)))
+
+    await kis_rest.get("/test")
+
+    latency_events = [fields for event, fields in events if event == "LATENCY_HIGH"]
+    assert len(latency_events) == 1
+    fields = latency_events[0]
+    assert fields["level"] == "WARN"
+    assert fields["api_endpoint"] == "/test"
+    assert 599 <= fields["latency_ms"] <= 600
+    assert fields["network_ms"] == fields["latency_ms"]
+    assert 1099 <= fields["rate_wait_ms"] <= 1100
+    assert 1699 <= fields["total_ms"] <= 1700
+
+
 @pytest.mark.asyncio
 async def test_kis_rest_rate_limiter_serializes_concurrent_requests(monkeypatch):
     monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 0.05)

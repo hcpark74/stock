@@ -68,6 +68,7 @@ erDiagram
         text ticker
         integer order_qty
         real order_price
+        real trigger_price
         real fill_price
         integer fill_qty
         integer fill_latency_ms
@@ -202,11 +203,12 @@ CREATE TABLE IF NOT EXISTS orders (
     ticker       TEXT NOT NULL,
     order_qty    INTEGER NOT NULL,              -- 주문 수량
     order_price  REAL,                          -- 요청 기준가 (시장가=0)
+    trigger_price REAL,                         -- 주문 판단 시점 기준가/실행 트리거가
 
     -- 체결 결과
     fill_price   REAL,                          -- 실제 체결가
     fill_qty     INTEGER,                       -- 실제 체결 수량
-    fill_latency_ms INTEGER,                    -- 주문→체결 소요시간
+    fill_latency_ms INTEGER,                    -- 주문 호출 직전→체결 확인 소요시간
 
     -- 상태
     status       TEXT NOT NULL DEFAULT 'PENDING'
@@ -388,7 +390,8 @@ async def update_order_fill(order_id: int, fill_price: float,
 async def record_partial_exit(trade_id: int, order_id: int, ...) -> None: ...
 
 async def close_trade(trade_id: int, exit_price: float,
-                      exit_qty: int, close_reason: str, pnl_pct: float) -> None: ...
+                      close_reason: str, pnl_pct: float, highest_step: float,
+                      *, exit_qty: int, high_price: float | None) -> None: ...
 
 async def record_skip(date: str, reason: str, detail: dict) -> None: ...
 ```

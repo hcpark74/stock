@@ -90,7 +90,7 @@ async def _request(
     base_url = os.getenv("KIS_BASE_URL", "")
     url = base_url + path
 
-    start = time.monotonic()
+    total_start = time.monotonic()
     await _rate_lock.acquire()
     try:
         wait = _RATE_INTERVAL - (time.monotonic() - _last_call_at)
@@ -99,6 +99,8 @@ async def _request(
         _last_call_at = time.monotonic()
     finally:
         _rate_lock.release()
+    request_ready_at = time.monotonic()
+    rate_wait_ms = int((request_ready_at - total_start) * 1000)
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -110,7 +112,9 @@ async def _request(
                     "msg_cd": SEND_GUARD_BLOCKED_MSG_CD,
                     "msg1": "request blocked by send guard",
                 }
+            request_start = time.monotonic()
             resp = await client.request(method, url, headers=_headers(tr_id), **kwargs)
+            request_end = time.monotonic()
     except httpx.HTTPError as exc:
         # 주문 등 POST는 서버 도달 후 응답만 유실됐을 수 있어(예: ReadTimeout)
         # 재전송 시 중복 주문 위험 — 요청 미전송이 보장되는 ConnectError만 재시도.
@@ -153,12 +157,23 @@ async def _request(
             "msg_cd": exc.__class__.__name__,
             "msg1": str(exc),
         }
-    latency_ms = int((time.monotonic() - start) * 1000)
+    # Keep latency_ms for existing log consumers, but make it represent the
+    # actual HTTP round trip. The old measurement also included the deliberate
+    # local rate-limit wait, which made normal PAPER-mode throttling look like
+    # upstream API latency.
+    network_ms = int((request_end - request_start) * 1000)
+    total_ms = int((request_end - total_start) * 1000)
+    latency_fields = {
+        "latency_ms": network_ms,
+        "network_ms": network_ms,
+        "rate_wait_ms": rate_wait_ms,
+        "total_ms": total_ms,
+    }
 
-    if latency_ms > 500:
-        log("LATENCY_HIGH", level="WARN", api_endpoint=path, latency_ms=latency_ms)
-    elif latency_ms > 200:
-        log("LATENCY_HIGH", level="INFO", api_endpoint=path, latency_ms=latency_ms)
+    if network_ms > 500:
+        log("LATENCY_HIGH", level="WARN", api_endpoint=path, **latency_fields)
+    elif network_ms > 200:
+        log("LATENCY_HIGH", level="INFO", api_endpoint=path, **latency_fields)
 
     # 429 — Rate limit 초과
     if resp.status_code == 429:

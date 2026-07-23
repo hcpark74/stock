@@ -90,6 +90,28 @@ async def test_record_order_status_is_pending(mem):
     assert row["status"] == "PENDING"
 
 
+async def test_record_order_separates_submitted_and_trigger_price(mem):
+    trade_id = await db.open_trade("20260623", "005930", 75_000.0, 10)
+    order_id = await db.record_order(
+        trade_id,
+        "ORD001",
+        "BUY",
+        10,
+        0.0,
+        "FIRST_BUY",
+        "005930",
+        trigger_price=75_000.0,
+    )
+    conn = db.get()
+    async with conn.execute(
+        "SELECT order_price, trigger_price FROM orders WHERE id=?",
+        (order_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    assert row["order_price"] == 0.0
+    assert row["trigger_price"] == pytest.approx(75_000.0)
+
+
 # ── update_order_fill ─────────────────────────────────────────────────
 
 async def test_update_order_fill_sets_filled(mem):
@@ -127,7 +149,10 @@ async def test_update_trade_progress_stores_high_and_step(mem):
 
 async def test_update_trade_progress_ignores_closed_trade(mem):
     trade_id = await db.open_trade("20260623", "005930", 75_000.0, 10)
-    await db.close_trade(trade_id, 76_000.0, "TRAILING", 1.33, 0.025)
+    await db.close_trade(
+        trade_id, 76_000.0, "TRAILING", 1.33, 0.025,
+        exit_qty=10, high_price=None,
+    )
 
     await db.update_trade_progress(trade_id, 80_000.0, 0.075)
 
@@ -145,7 +170,10 @@ async def test_update_trade_progress_ignores_closed_trade(mem):
 
 async def test_close_trade_status_is_closed(mem):
     trade_id = await db.open_trade("20260623", "005930", 75_000.0, 10)
-    await db.close_trade(trade_id, 78_000.0, "TRAILING", 4.0, 0.025)
+    await db.close_trade(
+        trade_id, 78_000.0, "TRAILING", 4.0, 0.025,
+        exit_qty=10, high_price=78_000.0,
+    )
     conn = db.get()
     async with conn.execute("SELECT status FROM trades WHERE id=?", (trade_id,)) as cur:
         row = await cur.fetchone()
@@ -154,10 +182,15 @@ async def test_close_trade_status_is_closed(mem):
 
 async def test_close_trade_stores_pnl_and_highest_step(mem):
     trade_id = await db.open_trade("20260623", "005930", 75_000.0, 10)
-    await db.close_trade(trade_id, 78_750.0, "TRAILING", 5.0, 0.05)
+    await db.close_trade(
+        trade_id, 78_750.0, "TRAILING", 5.0, 0.05,
+        exit_qty=10, high_price=79_000.0,
+    )
     conn = db.get()
     async with conn.execute(
-        "SELECT close_reason, pnl_pct, highest_step, exit_price FROM trades WHERE id=?",
+        """SELECT close_reason, pnl_pct, pnl_amount, highest_step,
+                  exit_price, exit_qty, high_price
+           FROM trades WHERE id=?""",
         (trade_id,),
     ) as cur:
         row = await cur.fetchone()
@@ -165,11 +198,125 @@ async def test_close_trade_stores_pnl_and_highest_step(mem):
     assert row["pnl_pct"] == pytest.approx(5.0)
     assert row["highest_step"] == pytest.approx(0.05)
     assert row["exit_price"] == pytest.approx(78_750.0)
+    assert row["exit_qty"] == 10
+    assert row["pnl_amount"] == pytest.approx(37_500.0)
+    assert row["high_price"] == pytest.approx(79_000.0)
+
+
+async def test_close_trade_preserves_higher_persisted_high(mem):
+    trade_id = await db.open_trade("20260623", "005930", 75_000.0, 10)
+    await db.update_trade_progress(trade_id, 80_000.0, 0.05)
+
+    await db.close_trade(
+        trade_id, 78_750.0, "TRAILING", 5.0, 0.05,
+        exit_qty=10, high_price=79_000.0,
+    )
+
+    conn = db.get()
+    async with conn.execute(
+        "SELECT high_price FROM trades WHERE id=?", (trade_id,)
+    ) as cur:
+        row = await cur.fetchone()
+    assert row["high_price"] == pytest.approx(80_000.0)
+
+
+async def test_init_backfills_legacy_closed_trade_summary(tmp_path):
+    db_path = str(tmp_path / "legacy-close.db")
+    await db.init(db_path)
+    trade_id = await db.open_trade("20260623", "005930", 75_000.0, 10)
+    order_id = await db.record_order(
+        trade_id, "SELL001", "SELL", 10, 78_000.0, "CLOSE_SELL", "005930"
+    )
+    await db.update_order_fill(order_id, 78_000.0, 10, 200)
+    await db.close_trade(
+        trade_id, 78_000.0, "TRAILING", 4.0, 0.025,
+        exit_qty=10, high_price=79_000.0,
+    )
+    conn = db.get()
+    await conn.execute(
+        "UPDATE trades SET exit_qty=NULL, pnl_amount=NULL WHERE id=?", (trade_id,)
+    )
+    await conn.commit()
+    await db.close()
+
+    await db.init(db_path)
+    conn = db.get()
+    async with conn.execute(
+        "SELECT exit_qty, pnl_amount FROM trades WHERE id=?", (trade_id,)
+    ) as cur:
+        row = await cur.fetchone()
+    async with conn.execute(
+        "SELECT order_price, trigger_price FROM orders WHERE id=?", (order_id,)
+    ) as cur:
+        order_row = await cur.fetchone()
+    assert row["exit_qty"] == 10
+    assert row["pnl_amount"] == pytest.approx(30_000.0)
+    assert order_row["trigger_price"] == pytest.approx(order_row["order_price"])
+    await db.close()
+
+
+async def test_init_backfill_leaves_pyramided_pnl_amount_null(tmp_path):
+    db_path = str(tmp_path / "legacy-pyramided.db")
+    await db.init(db_path)
+    trade_id = await db.open_trade("20260623", "005930", 10_000.0, 100)
+    await db.mark_pyramided(trade_id)
+    order_id = await db.record_order(
+        trade_id, "SELL001", "SELL", 130, 10_200.0, "CLOSE_SELL", "005930"
+    )
+    await db.update_order_fill(order_id, 10_200.0, 130, 200)
+    await db.close_trade(
+        trade_id, 10_200.0, "TRAILING", 2.0, 0.02,
+        exit_qty=130, high_price=None,
+    )
+    conn = db.get()
+    await conn.execute(
+        "UPDATE trades SET exit_qty=NULL, pnl_amount=NULL WHERE id=?", (trade_id,)
+    )
+    await conn.commit()
+    await db.close()
+
+    await db.init(db_path)
+    conn = db.get()
+    async with conn.execute(
+        "SELECT exit_qty, pnl_amount FROM trades WHERE id=?", (trade_id,)
+    ) as cur:
+        row = await cur.fetchone()
+    # exit_qty comes from summed sell fills and is correct even when
+    # pyramided; pnl_amount must stay NULL because entry_price holds only
+    # the first fill price.
+    assert row["exit_qty"] == 130
+    assert row["pnl_amount"] is None
+    await db.close()
+
+
+async def test_close_trade_rejects_non_positive_exit_qty(mem):
+    trade_id = await db.open_trade("20260623", "005930", 75_000.0, 10)
+    with pytest.raises(ValueError):
+        await db.close_trade(
+            trade_id, 78_000.0, "TRAILING", 4.0, 0.025,
+            exit_qty=0, high_price=None,
+        )
+
+
+async def test_close_trade_raises_when_already_closed(mem):
+    trade_id = await db.open_trade("20260623", "005930", 75_000.0, 10)
+    await db.close_trade(
+        trade_id, 78_000.0, "TRAILING", 4.0, 0.025,
+        exit_qty=10, high_price=None,
+    )
+    with pytest.raises(RuntimeError):
+        await db.close_trade(
+            trade_id, 77_000.0, "TIMEOUT", 2.67, 0.025,
+            exit_qty=10, high_price=None,
+        )
 
 
 async def test_close_trade_hard_stop(mem):
     trade_id = await db.open_trade("20260623", "005930", 75_000.0, 10)
-    await db.close_trade(trade_id, 73_500.0, "HARD_STOP", -2.0, 0.0)
+    await db.close_trade(
+        trade_id, 73_500.0, "HARD_STOP", -2.0, 0.0,
+        exit_qty=10, high_price=75_000.0,
+    )
     conn = db.get()
     async with conn.execute("SELECT close_reason FROM trades WHERE id=?", (trade_id,)) as cur:
         row = await cur.fetchone()
@@ -268,7 +415,10 @@ async def test_full_lifecycle_open_buy_close(mem):
     )
     await db.update_order_fill(sell_id, 78_000.0, 10, 200)
 
-    await db.close_trade(trade_id, 78_000.0, "TRAILING", 3.72, 0.025)
+    await db.close_trade(
+        trade_id, 78_000.0, "TRAILING", 3.72, 0.025,
+        exit_qty=10, high_price=78_000.0,
+    )
 
     conn = db.get()
     async with conn.execute(
@@ -311,7 +461,10 @@ async def test_mark_pyramided_updates_trade_flag(mem):
 async def test_timeout_close_reason(mem):
     """TIMEOUT으로 close_trade → close_reason 정상 기록."""
     trade_id = await db.open_trade("20260623", "000660", 130_000.0, 5)
-    await db.close_trade(trade_id, 129_000.0, "TIMEOUT", -0.77, 0.0)
+    await db.close_trade(
+        trade_id, 129_000.0, "TIMEOUT", -0.77, 0.0,
+        exit_qty=5, high_price=130_000.0,
+    )
     conn = db.get()
     async with conn.execute(
         "SELECT close_reason, pnl_pct FROM trades WHERE id=?", (trade_id,)

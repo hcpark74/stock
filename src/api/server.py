@@ -691,8 +691,9 @@ async def api_orders(limit: int = 60) -> JSONResponse:
         conn = db.get()
         async with conn.execute(
             """SELECT o.id, o.kis_order_id, o.order_type, o.order_phase,
-                      o.ticker, o.name, o.order_qty, o.order_price, o.fill_price,
-                      o.fill_qty, o.status, o.ordered_at, o.filled_at,
+                      o.ticker, o.name, o.order_qty, o.order_price, o.trigger_price,
+                      o.fill_price, o.fill_qty, o.fill_latency_ms,
+                      o.status, o.ordered_at, o.filled_at,
                       o.error_code, o.error_msg, t.date
                FROM orders o
                JOIN trades t ON t.id = o.trade_id
@@ -1005,11 +1006,14 @@ def _improve_from_rows(
     slip_acc: dict[str, dict[str, list]] = {}
     for o in orders:
         phase = o.get("order_phase") or ""
-        order_price = o.get("order_price") or 0
+        trigger_price = o.get("trigger_price")
+        if trigger_price is None:
+            trigger_price = o.get("order_price")
+        trigger_price = trigger_price or 0
         fill_price = o.get("fill_price")
-        if not order_price or fill_price is None:
+        if not trigger_price or fill_price is None:
             continue
-        pp = (fill_price - order_price) / order_price * 100
+        pp = (fill_price - trigger_price) / trigger_price * 100
         if phase not in _BUY_PHASES:
             pp = -pp
         acc = slip_acc.setdefault(phase, {"pps": [], "lat": []})
@@ -1157,7 +1161,8 @@ async def api_improve() -> JSONResponse:
         ) as cur:
             trades = [dict(r) for r in await cur.fetchall()]
         async with conn.execute(
-            """SELECT o.order_phase, o.order_price, o.fill_price, o.fill_latency_ms
+            """SELECT o.order_phase, o.order_price, o.trigger_price,
+                      o.fill_price, o.fill_latency_ms
                FROM orders o
                JOIN trades t ON t.id = o.trade_id
                WHERE o.status IN ('FILLED', 'PARTIAL_FILL')
