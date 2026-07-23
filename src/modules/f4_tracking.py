@@ -30,6 +30,31 @@ F4_STATE_PERSIST_INTERVAL_SEC = float(os.getenv("F4_STATE_PERSIST_INTERVAL_SEC",
 VI_WATCH_ENABLED = os.getenv("VI_WATCH_ENABLED", "1") == "1"
 VI_FREEZE_SUSPECT_SEC = float(os.getenv("VI_FREEZE_SUSPECT_SEC", "10"))
 VI_CHECK_COOLDOWN_SEC = float(os.getenv("VI_CHECK_COOLDOWN_SEC", "60"))
+# Keep the existing price-flow buffer alive briefly after an early close so
+# the sell marker can be compared with the subsequent market path. This does
+# not run stop logic or send orders while CLOSED. With the normal 09:10:10
+# entry schedule the cutoff has already passed, so it only affects early or
+# manually-triggered experiments.
+F4_POST_CLOSE_OBSERVE_UNTIL = os.getenv(
+    "F4_POST_CLOSE_OBSERVE_UNTIL",
+    "09:10",
+)
+
+
+def _parse_observe_until(raw: str) -> tuple[int, int]:
+    """HH:MM 파싱. 오타가 관측 기능을 조용히 꺼선 안 되므로 실패 시
+    WARN 남기고 기본 09:10으로 폴백한다(주문 경로와 무관해 폴백이 안전)."""
+    try:
+        hour, minute = (int(v) for v in raw.split(":", 1))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError(raw)
+    except (TypeError, ValueError):
+        log("F4_OBSERVE_UNTIL_INVALID", level="WARN", value=raw, fallback="09:10")
+        return 9, 10
+    return hour, minute
+
+
+_OBSERVE_UNTIL = _parse_observe_until(F4_POST_CLOSE_OBSERVE_UNTIL)
 
 _SELL_TR = {"REAL": "TTTC0011U", "PAPER": "VTTC0011U"}
 _CCLD_TR = {"REAL": "TTTC0081R", "PAPER": "VTTC0081R"}
@@ -41,6 +66,27 @@ _closing_task: asyncio.Task | None = None
 _REARM_INTERVAL_SEC = 0.5
 _REARM_HOLDING_INTERVAL_SEC = 5.0
 _REARM_ERROR_INTERVAL_SEC = 5.0
+
+
+def _price_observation_active(now: datetime | None = None) -> bool:
+    """Return whether F4 should keep collecting prices for the current trade."""
+    s = state.get()
+    if s.position_status == "HOLDING":
+        return True
+    if s.position_status != "CLOSED" or not s.target_ticker or not s.entry_at:
+        return False
+
+    now = now or datetime.now(KST)
+    try:
+        entry_at = datetime.fromisoformat(s.entry_at)
+        if entry_at.tzinfo is None:
+            entry_at = entry_at.replace(tzinfo=KST)
+    except (TypeError, ValueError):
+        return False
+    cutoff = now.replace(
+        hour=_OBSERVE_UNTIL[0], minute=_OBSERVE_UNTIL[1], second=0, microsecond=0
+    )
+    return entry_at.astimezone(KST).date() == now.date() and now < cutoff
 
 
 async def run_forever() -> None:
@@ -90,13 +136,15 @@ async def run() -> None:
         await asyncio.sleep(0.5)
         s = state.get()
 
-    if s.position_status == "CLOSED" or not s.target_ticker:
+    if not s.target_ticker or not _price_observation_active():
         return
 
     ticker = s.target_ticker
     spike_filter = SpikeFilter()
 
     if os.getenv("DRY_RUN", "0") == "1":
+        if s.position_status == "CLOSED":
+            return
         await _run_dry_ticks(ticker, spike_filter)
         return
 
@@ -114,11 +162,14 @@ async def run() -> None:
 
     async def on_tick(tick: dict) -> None:
         nonlocal last_ws_tick_at
+        if not _price_observation_active():
+            return
         live.ws_connected = True
         last_ws_tick_at = time.monotonic()
         live.push_tick(tick["price"], ticker=ticker)
-        await _process_tick(tick["price"], spike_filter)
-        if vi_watch is not None:
+        if state.get().position_status == "HOLDING":
+            await _process_tick(tick["price"], spike_filter)
+        if state.get().position_status == "HOLDING" and vi_watch is not None:
             try:
                 await _handle_vi_events(
                     await vi_watch.on_price(tick["price"], "ws"), ticker)
@@ -128,7 +179,7 @@ async def run() -> None:
 
     ws_task = asyncio.create_task(kis_ws.subscribe(
         ticker, on_tick,
-        stop_if=lambda: state.get().position_status != "HOLDING",
+        stop_if=lambda: not _price_observation_active(),
     ))
     tasks = [ws_task]
     if F4_REST_BACKUP_ENABLED:
@@ -177,7 +228,7 @@ async def run() -> None:
 async def _run_rest_price_backup(
     ticker: str, spike_filter: SpikeFilter, is_ws_stale=None, vi_watch: ViWatch | None = None,
 ) -> None:
-    """REST backup price monitor while HOLDING. Poll only when WS is stale by default."""
+    """REST backup while holding or during the short post-close observation."""
     log(
         "F4_REST_BACKUP_START",
         level="INFO",
@@ -186,7 +237,7 @@ async def _run_rest_price_backup(
         only_when_ws_stale=F4_REST_ONLY_WHEN_WS_STALE,
         ws_stale_sec=F4_WS_STALE_SEC,
     )
-    while state.get().position_status == "HOLDING":
+    while _price_observation_active():
         if is_ws_stale is not None and not is_ws_stale():
             await asyncio.sleep(F4_REST_POLL_INTERVAL_SEC)
             continue
@@ -194,8 +245,9 @@ async def _run_rest_price_backup(
             price = await _fetch_current_price(ticker)
             if price > 0:
                 live.push_tick(price, ticker=ticker)
-                await _process_tick(price, spike_filter)
-                if vi_watch is not None:
+                if state.get().position_status == "HOLDING":
+                    await _process_tick(price, spike_filter)
+                if state.get().position_status == "HOLDING" and vi_watch is not None:
                     await _handle_vi_events(
                         await vi_watch.on_price(price, "rest"), ticker)
         except asyncio.CancelledError:

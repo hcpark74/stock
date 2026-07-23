@@ -13,6 +13,7 @@ from src.modules.f4_tracking import (
     STEP_SIZE,
     STEP_TRAIL,
     _execute_close,
+    _price_observation_active,
     _process_tick,
     _run_dry_ticks,
     _run_rest_price_backup,
@@ -66,6 +67,7 @@ def holding_state():
     s.trailing_active = False
     s.highest_step = 0.0
     s.trade_id = 0
+    s.entry_at = None
 
 
 # ── 스텝 갱신 정확성 ──────────────────────────────────────────────────
@@ -443,6 +445,64 @@ async def test_rest_backup_survives_fetch_error(monkeypatch):
     assert fetch.await_count == 2
     process_tick.assert_awaited_once()
     assert "F4_REST_BACKUP_ERROR" in [event for event, _ in events]
+
+
+def test_post_close_observation_stops_at_0910():
+    s = _state_mod.get()
+    s.position_status = "CLOSED"
+    s.entry_at = _kst(9, 1).isoformat()
+
+    assert _price_observation_active(_kst(9, 9)) is True
+    assert _price_observation_active(_kst(9, 10)) is False
+    assert _price_observation_active(_dt(2026, 6, 24, 9, 9, tzinfo=KST)) is False
+
+
+def test_price_observation_always_active_while_holding():
+    s = _state_mod.get()
+    s.position_status = "HOLDING"
+
+    assert _price_observation_active(_kst(14, 0)) is True
+
+
+def test_parse_observe_until_falls_back_on_invalid_value():
+    import src.modules.f4_tracking as f4
+
+    assert f4._parse_observe_until("09:10") == (9, 10)
+    assert f4._parse_observe_until("9:5") == (9, 5)
+    # 오타는 WARN 로그 후 기본 09:10으로 폴백 — 조용한 비활성 금지
+    assert f4._parse_observe_until("0910") == (9, 10)
+    assert f4._parse_observe_until("9:75") == (9, 10)
+    assert f4._parse_observe_until("24:00") == (9, 10)
+    assert f4._parse_observe_until("") == (9, 10)
+
+
+@pytest.mark.asyncio
+async def test_rest_backup_collects_after_close_without_running_stop_logic(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    s = _state_mod.get()
+    s.position_status = "CLOSED"
+    s.entry_at = _kst(9, 1).isoformat()
+    fetch = AsyncMock(return_value=ENTRY + 100)
+    process_tick = AsyncMock()
+    push_tick = MagicMock()
+
+    monkeypatch.setattr(
+        f4,
+        "_price_observation_active",
+        MagicMock(side_effect=[True, False]),
+    )
+    monkeypatch.setattr(f4, "_fetch_current_price", fetch)
+    monkeypatch.setattr(f4, "_process_tick", process_tick)
+    monkeypatch.setattr(f4.live, "push_tick", push_tick)
+    monkeypatch.setattr(f4.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(f4, "log", lambda *args, **kwargs: None)
+
+    await _run_rest_price_backup("005930", _spike_always_pass(), lambda: True)
+
+    fetch.assert_awaited_once_with("005930")
+    push_tick.assert_called_once_with(ENTRY + 100, ticker="005930")
+    process_tick.assert_not_awaited()
 
 
 @pytest.mark.asyncio
