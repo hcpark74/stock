@@ -421,12 +421,22 @@ F3  run()               → trades.open_trade()
 F4  _first_partial_exit()  → partial_exits.record()
                              orders.record_order(PARTIAL_SELL)
     _execute_close()        → orders.record_order(CLOSE_SELL)
-                             trades.close_trade()
+                             orders.update_order_fill(PARTIAL_FILL | FILLED)
+                             trades.close_trade() [전량 체결 확인 시]
 F5  execute()           → 잔고 재검증
                            orders.record_order(TIMEOUT_SELL, PENDING)
                            orders.update_order_fill(확인된 체결수량)
                            trades.close_trade(close_reason='TIMEOUT') [전량·체결가 확인 시]
 ```
+
+### F4 기록 규칙
+
+- 주문 응답에서 접수와 주문번호를 확인한 뒤 상태 파일은 `EXITING`으로 먼저 영속화한다.
+- 주문수량보다 확인된 누적 체결수량이 작으면 `orders.status=PARTIAL_FILL`과 실제 `fill_qty`를 기록한다.
+- 체결을 확인하지 못하면 `orders.status=PENDING`, `fill_price=NULL`, `fill_qty=NULL`로 유지한다.
+- 부분·미확인 체결에서는 `trades.status=OPEN`을 유지한다. 트리거 가격을 체결가로 대신 기록하지 않는다.
+- 요청수량 전량 체결을 확인한 경우에만 `orders.status=FILLED`와 `trades.close_trade()`를 확정한다.
+- DB 기록 실패는 매도 주문 실패와 분리하며, DB 오류만으로 같은 매도 주문을 다시 보내지 않는다.
 
 ### F5 기록 규칙
 
@@ -434,6 +444,14 @@ F5  execute()           → 잔고 재검증
 - 부분체결 주문은 `PARTIAL_FILL`과 `fill_qty < order_qty`로 기록하며, 취소 확정 뒤 전송한 잔량 주문은 별도 `orders` 행으로 남긴다.
 - 실제 잔고가 0이어도 체결가를 확인하지 못하면 `trades`를 임의 가격으로 닫지 않고 `TIMEOUT_CLOSE_UNVERIFIED` 이벤트로 수동 대조를 요청한다.
 - 주문 전송 성공 후 발생한 `orders`/`trades` DB 기록 오류는 매도 주문 실패와 분리한다. DB 오류만으로 동일 주문을 다시 보내지 않는다.
+
+### 상태 파일과 DB의 청산 책임
+
+- 상태 파일은 `position_status`, `close_reason`, `remaining_qty`를 저장한다.
+- `orders`는 KIS 주문번호, 주문수량, 실제 체결수량, 체결가와 PENDING/PARTIAL_FILL/FILLED 상태를 저장한다.
+- `trades`는 전량 체결과 체결가가 확인된 최종 청산만 CLOSED로 저장한다.
+- EXITING 재시작 시 상태 파일과 OPEN 거래·주문 행을 함께 대조할 수 있어야 하며,
+  자동 재매도보다 운영자 확인을 우선한다.
 
 ---
 

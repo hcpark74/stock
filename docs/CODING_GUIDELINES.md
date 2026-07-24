@@ -64,17 +64,22 @@ async def fetch_price(ticker: str) -> float:
   **청산 결정은 반드시 `position_status` 확인 후 atomic하게 처리**한다.
 
 ```python
-# Python / state.py → atomic check-and-set 패턴
-async def try_close(reason: str) -> bool:
-    if state["position_status"] != "HOLDING":
-        return False          # 이미 청산됨 — 중복 주문 방지
-    state["position_status"] = "CLOSED"
-    state["close_reason"] = reason
-    return True
+# Python / state.py → 청산 상태 전이 패턴
+if not await state.set_exiting(reason):
+    return False              # HOLDING이 아님 — 중복 주문 방지
+
+# 전량 체결을 확인한 뒤에만 호출
+await state.set_closed(reason)
 ```
 
-**주의**: `position_status` 확인과 `"CLOSED"` 세팅 사이에 `await`를 넣지 않는다.  
-asyncio는 단일 스레드이므로 `await` 없는 블록 내에서는 선점이 발생하지 않는다.
+**주의**:
+- 상태 전이는 `state.py`의 lock 안에서 수행한다.
+- F4의 `HOLDING → EXITING`은 주문 접수 확인 후 수행한다.
+- F5의 `HOLDING → EXITING`은 청산 수량 확정 후 첫 주문 전에 수행한다.
+- `EXITING → CLOSED`는 전량 체결 확인 후 수행한다.
+- 부분·미확인 체결은 `state.set_exit_remaining_qty()`로 잔량을 갱신하고 EXITING을 유지한다.
+- CLOSED 전환은 `remaining_qty=0`을 함께 보장한다.
+- 당일 EXITING 재시작은 자동 재매도하지 않고 주문·잔고 대사를 요구한다.
 
 ---
 
@@ -140,6 +145,9 @@ def on_tick(price: float) -> None:
 - `highest_step`은 절대 감소시키지 않는다.
 - `stop_price`는 `high_price`가 아닌 `highest_step`에서 계산한다.
 - 청산 주문은 `asyncio.create_task()`로 분리한다 (틱 핸들러 블로킹 금지).
+- WS와 REST 가격은 `_handle_price_tick()`에서 공통 처리한다.
+- CLOSED 관측 중에는 `live.push_tick()`만 허용하고 `_process_tick()`, VI, 주문 경로는 실행하지 않는다.
+- 관측 종료시각과 상태 판단은 `_price_observation_active()` 단일 게이트를 사용한다.
 
 ---
 
@@ -149,13 +157,17 @@ def on_tick(price: float) -> None:
 - 주문 ID는 `state["order_id"]`에 저장, 중복 전송 방지에 활용.
 - 체결 확인은 KIS REST API 폴링 또는 WebSocket 체결 이벤트로 수행.
 - 미체결 상태로 모듈별 체결 확인 기한을 초과하면 안전 재시도 또는 수동 확인 경로로 진입.
-- 주문 접수 후에는 즉시 PENDING으로 기록하고, DB 기록 실패와 주문 API 실패를 같은 예외 경로에서 처리하지 않는다.
-- F5 주문 ID는 DB의 PENDING 주문에도 보존해 중복 전송 진단에 활용한다.
+- 접수된 주문은 `orders`의 PENDING을 기본 상태로 기록하고, DB 기록 실패와 주문 API 실패를 같은 예외 경로에서 처리하지 않는다.
+- F5 주문 ID는 주문 발송 직후 DB의 PENDING 주문에 보존해 중복 전송 진단에 활용한다.
+- F4는 매도 주문 접수 후, F5는 첫 매도 주문 전에 상태를 EXITING으로 저장해
+  프로세스 내부와 재시작 후 중복 청산을 차단한다.
 - 매도 재시도 전에는 실제 잔고를 다시 조회한다. 잔고 조회 실패 상태에서 맹목적으로 재주문하지 않는다.
 - 잔고 조회 결과는 `None`과 `0`을 구분한다. `None`은 조회 실패, `0`은 실제 미보유이며 `value or fallback` 패턴을 사용하지 않는다.
 - 부분체결은 누적 체결수량이 요청수량에 도달할 때까지 기다리고, 타임아웃 뒤에는 실제 잔량만 후속 주문한다.
 - 전량 체결과 체결가를 확인하기 전에는 `trades`를 CLOSED로 확정하지 않는다. 체결가 미확인은 긴급 이벤트와 수동 대조 대상으로 남긴다.
 - 여러 주문으로 청산할 때 거래 단위 청산가는 체결금액/체결수량 기준 가중평균을 사용한다.
+- F4는 부분·미확인 체결을 자동 재주문하지 않고 EXITING과 잔량을 보존한다.
+- F5만 직전 주문 상태·취소 확정·실제 잔고를 확인한 뒤 최대 3회 잔량 재주문한다.
 
 ---
 
@@ -217,6 +229,8 @@ logger.log("TRAILING_STOP", level="INFO",
 ## 9-2. KIS 호출 및 진입 재시도 규칙
 
 - 모든 KIS REST 호출은 `src/api/kis_rest.py`의 전역 rate-limit 경로를 통한다.
+- KIS REST는 프로세스 수명 동안 공유 AsyncClient를 사용한다. 호출부에서 요청마다 별도 클라이언트를 만들지 않는다.
+- 애플리케이션 종료 시 `kis_rest.close_client()`로 연결 풀을 닫는다.
 - 호출 간격은 `KIS_RATE_INTERVAL_SEC`로 제어한다. 개별 모듈에서 별도 sleep으로 rate-limit을 흉내 내지 않는다.
 - F1 예상체결가 보강처럼 다수 종목을 조회할 때는 세마포어로 동시성을 제한한다.
 - F1 KOSPI/KOSDAQ처럼 시장 단위 조회를 연속 호출할 때는 `F1_MARKET_INTERVAL_SEC`를 사용한다.
@@ -227,6 +241,9 @@ logger.log("TRAILING_STOP", level="INFO",
 - F3 진입 재시도는 마지막 시도까지 미체결 주문 취소가 보장되어야 한다.
 - F3 실패 로그에는 주문번호, 주문가, 주문수량, 재시도 횟수, 체결조회 요약을 가능한 한 포함한다.
 - DRY_RUN 경로에서는 실제 주문, 실제 KIS API, 운영 DB를 호출하지 않는다.
+- `LATENCY_HIGH.latency_ms`는 실제 HTTP 왕복시간과 동일한 `network_ms`다.
+  `rate_wait_ms`, `client_setup_ms`, `local_overhead_ms`, `total_ms`를 함께 기록해
+  로컬 대기와 상류 API 지연을 구분한다.
 
 ---
 
@@ -277,6 +294,8 @@ task.add_done_callback(_guard)
 - `pytest` 사용, `tests/` 디렉터리에 모듈별 파일 작성.
 - KIS API 호출은 반드시 `unittest.mock.AsyncMock`으로 대체한다.
 - F4 Step Trailing 로직은 틱 시퀀스 단위 유닛 테스트를 필수로 작성한다.
+- F4 WS와 REST가 공용 틱 처리 헬퍼를 통하는지, CLOSED 관측 중에는 가격만 저장하는지 각각 테스트한다.
+- `F4_POST_CLOSE_OBSERVE_UNTIL` 오타와 손상된 `entry_at`의 1회 WARN을 테스트한다.
 - F5는 잔고 0, 잔고 조회 실패, 체결조회 타임아웃, 부분체결, DB 기록 실패를 각각 회귀 테스트한다.
 - 가격흐름은 5,000 tick 초과, 분 이력 보완, 종목 필터, 청산 후 마커, 다운샘플링을 Python/Node 테스트로 나눠 검증한다.
 

@@ -27,33 +27,40 @@
 시스템 전체에서 공유하는 State 객체는 다음 필드를 포함한다.
 
   state = {
+    "trading_date"      : str | None,   # 현재 상태의 거래일 YYYYMMDD
     "target_ticker"      : str | None,   # 락업된 종목 코드
-    "entry_price"        : float | None, # 체결 확인된 진입 단가 (1차 70% 체결가)
+    "target_name"        : str | None,   # 종목명
+    "target_candidates"  : list | None,  # F2/F3 후보 목록
+    "entry_price"        : float | None, # 체결 확인된 진입 단가
+    "entry_at"           : str | None,   # ISO 8601 진입 시각
     "entry_qty"          : int | None,   # 총 보유 수량 (1차 + 2차 합산)
     "remaining_qty"      : int | None,   # 현재 잔여 보유 수량
     "high_price"         : float | None, # 장중 최고가 (체결가 기준)
-    "position_status"    : str,          # IDLE | ENTERING | HOLDING | CLOSED
+    "position_status"    : str,          # IDLE | ENTERING | HOLDING | EXITING | CLOSED
     "close_reason"       : str | None,   # TRAILING | HARD_STOP | TIMEOUT
                                          # ENTRY_FAIL | SLIPPAGE_GUARD | GAP_CHANGED
     "order_id"           : str | None,   # 최근 발행된 주문 ID
     "trailing_active"    : bool,         # Step Trailing 활성화 여부 (첫 스텝 +2.5% 달성 후 True)
     "highest_step"       : float,        # 마지막으로 통과한 이익 스텝 수준 (0.025 단위, 예: 0.075)
+    "trade_id"           : int,          # DB trades.id (미기록 0)
     "daily_pnl_pct"      : float,        # 당일 누적 실현 손익률 (자본 대비 %, 청산 시 갱신)
     "day_skip"           : bool,         # 당일 거래 스킵 여부
-    "skip_reason"        : str | None,   # NO_TARGET | MACRO_KILL_SWITCH | DAILY_STOP | ...
-    "macro_snapshot"     : dict | None,  # F0 매크로 지표 스냅샷 및 판정 근거
   }
 
 ● position_status 전이 규칙:
   IDLE     → ENTERING (F3 1차 주문 전송 직전)
   ENTERING → HOLDING  (F3 1차 체결 확인 후; 2차 피라미딩은 HOLDING 상태에서 수행)
   ENTERING → IDLE     (F3 미체결 확정 시, close_reason = ENTRY_FAIL)
-  HOLDING  → CLOSED   (F4 또는 F5 잔여 전량 청산 체결 확인 후)
+  HOLDING  → EXITING  (F4 주문 접수 확인 후 또는 F5 청산 수량 확정 후·주문 전)
+  EXITING  → CLOSED   (요청수량 전량 체결 확인 후, remaining_qty = 0)
+  HOLDING  → CLOSED   (F5 사전 잔고조회에서 실제 미보유 확인 시)
 
 ● 중복 청산 방지:
   F4의 모든 청산 조건과 F5는 주문 전송 직전에 반드시
   position_status == "HOLDING" 여부를 확인한다.
-  CLOSED 상태이면 주문을 전송하지 않는다. (atomic check-and-set)
+  F4는 프로세스 내부 `_close_in_progress` 가드로 동시 청산을 차단하고,
+  주문 접수 후 atomic하게 EXITING으로 전환한다.
+  EXITING 또는 CLOSED 상태이면 신규 청산 주문을 전송하지 않는다.
 
 ● 초기값 (F3 체결 확인 시 설정):
   trailing_active = False, highest_step = 0.0
@@ -243,10 +250,10 @@ F4. 장중 추적 스탑 모듈 (09:00:00 ~ 10:59:59)
   조건: state["trailing_active"] == False  (첫 스텝 미달성 구간에서만 유효)
         AND 체결가 <= state["entry_price"] × 0.980
   처리:
-    position_status == "HOLDING" 확인 후 (atomic)
-    state["position_status"] = "CLOSED"
-    state["close_reason"]    = "HARD_STOP"
-    잔여 수량 전량 시장가 매도.
+    position_status == "HOLDING" 확인 후 잔여 수량 전량 시장가 매도.
+    주문 접수 확인 후 state["position_status"] = "EXITING" (atomic),
+    state["close_reason"] = "HARD_STOP"으로 저장.
+    요청수량 전량 체결 확인 후에만 CLOSED로 전환.
 
 ● [우선순위 2] Step Trailing (계단형 추적 익절):
 
@@ -268,10 +275,10 @@ F4. 장중 추적 스탑 모듈 (09:00:00 ~ 10:59:59)
                    (trailing_active == False이면 highest_step=0.0 → stop=entry×0.985 로 강제 발동)
 
   처리:
-    position_status == "HOLDING" 확인 후 (atomic)
-    state["position_status"] = "CLOSED"
-    state["close_reason"]    = "TRAILING"
-    잔여 수량 전량 시장가 매도.
+    position_status == "HOLDING" 확인 후 잔여 수량 전량 시장가 매도.
+    주문 접수 확인 후 state["position_status"] = "EXITING" (atomic),
+    state["close_reason"] = "TRAILING"으로 저장.
+    요청수량 전량 체결 확인 후에만 CLOSED로 전환.
 
   ▶ 예시 (진입가 100,000원):
     +2.5% 도달(102,500) → highest_step=0.025, stop=101,000원(+1.0%)
@@ -282,9 +289,25 @@ F4. 장중 추적 스탑 모듈 (09:00:00 ~ 10:59:59)
 
 ● 동일 틱 다중 조건 충족 시 우선순위: Hard Stop > Step Trailing
 
+● 체결 확인과 청산 후 가격 관측:
+  - 주문수량과 누적 체결수량을 비교해 FILLED와 PARTIAL_FILL을 구분한다.
+  - 부분체결이면 확인된 수량만큼 remaining_qty를 줄이고 EXITING을 유지한다.
+  - 체결 미확인이면 주문은 PENDING, 거래는 OPEN, 상태는 EXITING으로 유지하고
+    F4_CLOSE_PENDING CRIT 알림으로 주문·잔고 대사를 요청한다.
+  - 전량 체결 확인 시에만 trades를 닫고 state를 CLOSED로 전환하며
+    remaining_qty를 0으로 만든다.
+  - 조기·수동 진입 거래가 설정 시각 전에 청산되면
+    `F4_POST_CLOSE_OBSERVE_UNTIL`까지 WS/REST 가격을 차트용으로만 수집한다.
+    `_handle_price_tick` 공용 게이트는 CLOSED 중 스탑·주문·VI 처리를 실행하지 않는다.
+  - `F4_POST_CLOSE_OBSERVE_UNTIL` 오타와 손상된 `entry_at`은 WARN을 1회 기록하고,
+    오타는 09:10으로 폴백하며 손상 시 관측을 안전하게 중단한다.
+  - DRY_RUN은 결정론적 합성 틱으로 청산한 뒤 후속 가격 관측을 수행하지 않는다.
+
 ● WebSocket 연결 장애 시:
-  수신 중단 5초 이상 감지 시 자동 재연결 시도 (최대 3회).
-  재연결 실패 시 REST 폴링 Fallback → 실패 시 즉시 전량 매도. (§6-3 참조)
+  수신 중단 감지 시 지수 백오프로 재연결을 계속 시도.
+  REST 백업 폴러는 WebSocket 미연결·stale 구간에 현재가 조회를 병행.
+  한 모니터가 실패해도 다른 모니터를 유지하며, 전송 경로 장애만으로
+  체결 확인 없는 강제 CLOSED를 만들지 않음. (§6-3 참조)
 
 ──────────────────────────────────────────────────
 F5. 타임아웃 청산 스케줄러 (11:00:00)
@@ -301,11 +324,15 @@ F5. 타임아웃 청산 스케줄러 (11:00:00)
 ● 11:00:00 — Execute:
   1. state["position_status"] != "HOLDING" 이면 주문 전송 생략 (이미 청산됨).
   2. state["position_status"] == "HOLDING" 이면:
-     state["position_status"] = "CLOSED" (atomic)
-     state["close_reason"] = "TIMEOUT"
-     확인된 잔량 시장가 매도 주문 전송 후 최대 30초 동안 누적 체결을 조회.
+     오늘 유효한 pre-check 수량 또는 상태 잔량을 먼저 확정.
+     수량이 0이면 주문 없이 CLOSED로 전환하고 상태·계좌 불일치 CRIT 알림.
+     수량이 있으면 state["position_status"] = "EXITING" (atomic),
+     state["close_reason"] = "TIMEOUT"으로 저장한 뒤 시장가 매도 주문 전송.
+     주문 후 최대 30초 동안 누적 체결을 조회.
   3. 부분체결이면 확인된 체결수량을 기록하고, 실제 잔고를 재조회한 뒤 잔량만 후속 주문.
-  4. 전량 체결 및 체결가가 확인된 경우에만 trades 청산 이력을 확정.
+     확인된 잔량은 상태 파일에도 즉시 반영.
+  4. 전량 체결 및 체결가가 확인된 경우에만 trades 청산 이력을 확정하고
+     state를 CLOSED, remaining_qty를 0으로 변경.
 
 ● Retry 정책:
   주문 전송/체결 확인 실패 또는 부분체결 시 2초 간격으로 최대 3회 처리.
@@ -318,7 +345,8 @@ F5. 타임아웃 청산 스케줄러 (11:00:00)
 ● Retry 전부 실패 시:
   §5 알림 채널을 통해 즉시 긴급 알림 전송.
   로그에 TIMEOUT_ORDER_FAILED 이벤트 기록.
-  state["position_status"]는 CLOSED로 유지 (재시도 방지).
+  state["position_status"]는 EXITING으로 유지하고 확인된 remaining_qty를 저장.
+  재시작 시 자동 재매도하지 않고 주문·잔고 수동 대사를 요구.
   운영자가 수동 청산해야 함.
 
 ● 잔고 0이나 체결가 미확인 시:
@@ -331,12 +359,15 @@ F5. 타임아웃 청산 스케줄러 (11:00:00)
 
 ● 지연 시간(Latency):
   시장가 주문 REST API 응답 100ms 이내를 목표로 함.
-  실측이 200ms 초과 시 로그에 LATENCY_WARNING 기록.
-  500ms 초과 시 Telegram 알림 발송.
+  실제 HTTP 왕복 `network_ms`가 200ms를 초과하면 LATENCY_HIGH 로그를 기록하고,
+  500ms 초과는 WARN으로 기록한다.
+  각 로그는 `rate_wait_ms`, `client_setup_ms`, `local_overhead_ms`, `total_ms`를
+  함께 포함해 로컬 호출 제한 대기와 KIS 응답 지연을 구분한다.
+  KIS REST 연결은 프로세스 수명 동안 공유 AsyncClient의 연결 풀을 재사용한다.
 
 ● 예외 처리(Fail-Safe):
   F5 Retry 3회 전부 실패 시 긴급 알림 (§5 참조).
-  F4 WebSocket 장애 시 즉시 보수적 청산 (§F4 참조).
+  F4 WebSocket 장애 시 재연결과 REST 백업을 병행하고 모니터 오류를 CRIT로 기록.
 
 ● 로깅(Logging):
   모든 이벤트를 JSON Lines 형식으로 data/logs/YYYYMMDD.jsonl 에 적재.
@@ -557,10 +588,15 @@ Telegram Bot 구현 요건
   HARD_STOP                 | WARN   | 손절 청산: {ticker} @ {price}원 (진입 {entry}원)
   TIMEOUT_CLOSE             | INFO   | 11시 청산: {ticker} {qty}주
   TIMEOUT_ORDER_FAILED      | CRIT   | 11시 청산 실패! 수동 청산 필요. {ticker} {qty}주
+  F4_CLOSE_PENDING          | CRIT   | F4 매도 주문 부분·미확인 체결. 주문/잔고 대사 필요.
+  F4_ENTRY_AT_INVALID       | WARN   | 청산 후 관측용 진입시각 손상. 관측 중단.
+  F4_OBSERVE_UNTIL_INVALID  | WARN   | 청산 후 관측 종료시각 오타. 기본 09:10 사용.
   DAILY_STOP                | CRIT   | 일일 손실 한도 도달. 추가 거래 중단.
   LATENCY_HIGH              | WARN   | API 응답 {ms}ms 초과. 지연 감지.
-  WEBSOCKET_RECONNECT_FAIL  | CRIT   | WebSocket 재연결 실패. REST 폴링 전환 시도.
-  WEBSOCKET_FALLBACK        | WARN   | REST 폴링 모드로 전환.
+  WS_CONNECTED              | INFO   | WebSocket 연결 또는 재연결 성공.
+  WS_DISCONNECTED           | WARN/CRIT | WebSocket 연결 끊김. 연속 실패 횟수 포함.
+  F4_REST_BACKUP_START      | INFO   | REST 백업 가격 폴러 시작.
+  F4_MONITOR_TASK_ERROR     | CRIT   | WS/REST 모니터 태스크 비정상 종료.
   PROCESS_RESTART_DETECTED  | WARN   | 재시작 감지. 기존 포지션 복구 시도.
   NETWORK_DOWN              | CRIT   | 인터넷 연결 끊김. 복구 대기 중.
   PARTIAL_FILL              | WARN   | 부분 체결. {fill_qty}/{order_qty}주 체결.
@@ -622,13 +658,13 @@ Telegram Bot 구현 요건
 ● 감지 조건: 체결 데이터 수신 중단 5초 이상.
 
 ● 대응 순서:
-  1. WebSocket 재연결 시도 (최대 3회, 2초 간격).
-  2. 재연결 성공: F4 추적 재개, WEBSOCKET_RECONNECT 로그 기록.
-  3. 재연결 3회 전부 실패:
-     Fallback: REST API 폴링으로 전환 (1초 간격 현재가 조회).
-     Fallback 전환 성공: F4 추적 REST 방식으로 재개.
-     Fallback도 실패: 즉시 시장가 전량 매도 후 CLOSED 처리.
-     알림: WEBSOCKET_RECONNECT_FAIL 발송.
+  1. WebSocket 지수 백오프 재연결을 계속 시도.
+  2. 재연결 성공: F4 추적 재개, WS_CONNECTED 로그 기록.
+  3. WebSocket 미연결 또는 마지막 틱이 stale이면 REST API 백업 폴링을 사용.
+  4. WS/REST 태스크 중 하나가 실패해도 나머지 모니터는 유지.
+     모든 모니터가 끝났는데 상태가 HOLDING이면 `run_forever()`가 백오프 후
+     F4 사이클을 재시작.
+  5. 데이터 경로 장애 자체는 매도 체결 근거가 아니므로 자동 CLOSED 처리하지 않음.
 
 ──────────────────────────────────────────────────
 6-4. 주문/체결 장애
@@ -644,8 +680,10 @@ Telegram Bot 구현 요건
     미체결 잔량 취소 주문 전송.
     로그에 PARTIAL_FILL 이벤트 기록 (체결 수량, 미체결 수량 포함).
   F4/F5 매도 주문 부분 체결 시:
-    잔여 미체결 수량에 대해 즉시 재주문 (최대 3회).
-    3회 전부 실패 시: 긴급 알림 + 수동 처리 요청.
+    F4는 자동 재주문하지 않고 EXITING 상태와 확인된 잔량을 저장한 뒤
+    F4_CLOSE_PENDING 긴급 알림으로 수동 대사를 요청.
+    F5는 직전 주문 상태와 취소 확정, 실제 잔고를 확인한 뒤 잔량만 재주문 (최대 3회).
+    F5 3회 전부 실패 시 EXITING 유지 + 긴급 알림 + 수동 처리 요청.
 
 ● 매도 주문 거부 (잔고 오류, API 오류 등):
   오류 코드 분류:
@@ -703,26 +741,18 @@ Telegram Bot 구현 요건
   {
     "date"            : "YYYYMMDD",
     "ticker"          : "...",
+    "name"            : "...",
+    "target_candidates": list,
     "entry_price"     : float,
+    "entry_at"        : str | null,
     "entry_qty"       : int,
+    "remaining_qty"   : int,
     "high_price"      : float,
     "trailing_active" : bool,
     "highest_step"    : float,
-    "position_status" : "HOLDING | CLOSED",
-    "close_reason"    : null | "TRAILING | HARD_STOP | TIMEOUT | ...",
-    "day_skip"        : bool,
-    "skip_reason"     : null | "MACRO_KILL_SWITCH | DAILY_STOP | NO_TARGET | ...",
-    "macro_snapshot"  : null | {
-      "vix": float,
-      "nasdaq_return_pct": float,
-      "usd_krw": float,
-      "usd_krw_return_pct": float,
-      "usd_krw_ma20_deviation_pct": float,
-      "risk_score": int,
-      "triggered_rules": list[str],
-      "source": str,
-      "data_timestamp": str
-    }
+    "trade_id"        : int,
+    "position_status" : "HOLDING | EXITING | CLOSED",
+    "close_reason"    : null | "TRAILING | HARD_STOP | TIMEOUT | ..."
   }
   파일 손상 방지: 쓰기 시 임시 파일(today_state.tmp)에 먼저 저장 후 rename (atomic write).
 
@@ -732,21 +762,28 @@ Telegram Bot 구현 요건
   재시작 후 아래 복구 절차 자동 실행.
 
 ● 재시작 복구 절차:
+  기동 시 `daily_skips` DB의 MARKET_CLOSED/VI_ACTIVE를 먼저 확인해 day_skip을 복원하고,
+  이어서 아래 포지션 상태 복구를 수행한다.
   1. today_state.json 존재 확인.
-     파일 없음 또는 손상: KIS 잔고 조회 API로 직접 보유 종목 조회 → 보유 있으면 즉시 청산.
+     파일 없음 또는 손상: DB의 최근 OPEN 거래를 조회하고, 거래 정보가 완전하면
+     KIS 잔고로 실제 수량을 확인해 HOLDING 상태를 복원.
+     DB OPEN 거래와 실제 잔고가 불일치하면 자동 복구를 중단하고 CRIT 알림.
   2. date가 오늘 + position_status == "HOLDING":
      KIS 잔고 조회 API로 실제 보유 수량 확인.
      보유 수량 > 0: state 전체 복원 후 F4/F5 재개.
-     보유 수량 == 0: 이미 청산된 것으로 판단, CLOSED 처리 후 로그 기록.
-  3. date가 오늘 + day_skip == True:
-     skip_reason과 macro_snapshot을 복원하고 F1~F5 catch-up 및 신규 진입을 금지.
-     skip_reason == "MACRO_KILL_SWITCH"이면 PROCESS_RESTART_DETECTED 로그에
-     recovered_status="DAY_SKIP_RESTORED"를 남긴다.
-  4. position_status == "CLOSED": 복구 불필요, 정상 대기.
+     보유 수량 == 0: 상태 복원을 생략하고 NO_ACTUAL_HOLDING 경고 기록.
+     잔고 조회 실패: 자동 복구를 중단하고 수동 확인 요청.
+  3. date가 오늘 + position_status == "EXITING":
+     상태를 복원하고 당일 신규 진입과 자동 재매도를 차단.
+     PROCESS_RESTART_DETECTED에
+     recovered_status="EXITING_REQUIRES_RECONCILIATION"을 기록하고,
+     미체결 주문·체결내역·실제 잔고 수동 대사를 요청.
+  4. position_status == "CLOSED": 상태를 복원해 당일 재진입을 차단하고
+     UI 청산 차트·마커를 유지한 채 정상 대기.
   5. date가 오늘이 아님:
      position_status가 CLOSED/IDLE: 정상 종료된 파일 → 알림 없이 폐기
      (STALE_STATE_DISCARDED, INFO 로그만 기록).
-     그 외(HOLDING/ENTERING/누락·알 수 없는 상태): 전일 잔여 포지션 또는
+     그 외(HOLDING/ENTERING/EXITING/누락·알 수 없는 상태): 전일 잔여 포지션 또는
      파일 손상 의심 → 즉시 긴급 알림(STALE_POSITION_DETECTED) + 당일 자동
      진입 차단. 파일은 운영자 확인용 증거로 유지하되, 이후 당일 DB OPEN
      거래 복구의 persist가 덮어쓸 수 있으므로 차단 시점에
@@ -754,10 +791,12 @@ Telegram Bot 구현 요건
      사본 파일명의 날짜는 YYYYMMDD만 신뢰하고 그 외는 unknown_<해시>로
      치환한다. 사본 실패는 STALE_BACKUP_FAILED(CRIT) 로그만 남기고
      차단·알림·포지션 복구는 계속한다.
-  6. 알림: PROCESS_RESTART_DETECTED 이벤트 발송.
+  복구·차단·불일치 결과는 PROCESS_RESTART_DETECTED 또는
+  STALE_POSITION_DETECTED 이벤트로 기록하고 필요한 경우 알림.
 
 ● today_state.json 초기화:
-  매일 08:40 F1 실행 시작 시 해당 날짜로 신규 생성.
+  거래일 전환 시 인메모리 상태를 초기화하고, F3 체결 확인 또는 이후 상태 변경 시
+  해당 날짜의 today_state.json을 원자적으로 저장.
   장애 이벤트 전체 목록은 §6 알림 채널 참조.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -806,7 +845,8 @@ Telegram Bot 구현 요건
     "order_id", "error_code", "error_msg", "remaining_qty"
 
   LATENCY_HIGH:
-    "api_endpoint", "latency_ms"
+    "api_endpoint", "latency_ms", "network_ms", "rate_wait_ms",
+    "client_setup_ms", "local_overhead_ms", "total_ms"
 
   PRICE_SPIKE_FILTERED:
     "received_price", "prev_price", "change_pct"
@@ -1133,3 +1173,28 @@ Walk-Forward 방식을 필수 적용한다.
   - x축은 실제 시각이며 범위에 따라 1/2/5/10분 격자와 1/2/5/10/15/30/60분 라벨 간격을 적용한다.
   - 차트는 컨테이너 폭 100%를 사용하며, 당일 체결 주문은 `trade_marks` 매수/매도 마커로 표시한다.
   - 마지막 가격은 가격 점, 현재가, 마지막 매도 마커, 마지막 매수 마커 순으로 보완한다.
+
+---
+
+## 11. 2026-07-24 청산 상태·관측성 구현 업데이트
+
+### 청산 상태 머신
+
+- F4는 매도 접수 확인 후, F5는 청산 수량 확정 후 첫 주문 전에 `EXITING`을
+  영속화하고 전량 체결 확인 전에는 `CLOSED`로 확정하지 않는다.
+- 부분·미확인 체결은 `remaining_qty`와 OPEN 거래를 보존하며 운영자 대사 대상으로 남긴다.
+- 당일 `EXITING` 재시작은 자동 재매도하지 않고 신규 진입을 차단한다.
+
+### F4 가격 관측
+
+- WS와 REST는 `_handle_price_tick`을 공유한다.
+- CLOSED 관측 창에서는 차트 가격만 추가하고 `_process_tick`, VI, 주문 경로를 실행하지 않는다.
+- `F4_POST_CLOSE_OBSERVE_UNTIL`은 로깅 초기화 후 지연 파싱하며 오타는 1회 경고한다.
+- 손상된 `entry_at`은 값별 1회 WARN 후 관측을 중단한다.
+
+### KIS REST·F1 진단
+
+- KIS REST는 공유 AsyncClient로 연결 풀을 재사용하고 종료 시 명시적으로 닫는다.
+- `LATENCY_HIGH`는 실제 네트워크 지연과 로컬 rate-limit 대기·클라이언트 준비 시간을 분리한다.
+- F1 완료/진행 로그는 `processed_count`, `eligible_count`, `skipped_count`,
+  `quote_valid_count`, `quote_fallback_count`, `error_count`, `skip_reasons`를 포함한다.

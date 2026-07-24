@@ -545,6 +545,9 @@ F3_ENTRY_RETRY_DEADLINE=09:11:00
 F3_PRE_ORDER_QUIET_SEC=1.5
 F3_PYRAMID_AT=09:10:40
 F3_PYRAMID_FILL_SEC=10.0
+
+# 조기·수동 진입 거래의 청산 후 가격 관측 종료시각
+F4_POST_CLOSE_OBSERVE_UNTIL=09:10
 ```
 
 `F2_RETRY_F1_ON_FAIL`은 모의투자(`PAPER`) 실험용으로 env 예시에 활성화되어 있다. 실계좌(`REAL`) 코드 기본값은 비활성이지만, `.env`에 `F2_RETRY_F1_ON_FAIL=1`이 남아 있으면 명시적으로 켜지므로 REAL 전환 전에는 `0`으로 변경한다. F2 실패 후 재시도는 F1 deadline인 09:10 전까지만 수행하며, 데드라인까지 `F2_RETRY_F1_MIN_REMAINING_SEC`보다 적게 남았거나 `DRY_RUN=1`이면 재시도하지 않는다. 예약 F2 fallback 경로보다는 09:00 F1 직후 체이닝 경로에서 주로 의미가 있다.
@@ -554,14 +557,37 @@ F3_PYRAMID_FILL_SEC=10.0
 - 실계좌/모의계좌 주문 없이 F1 -> F4 흐름을 확인한다.
 - DRY_RUN 실행 시 로그, 상태, DB는 `data/dry_run/*` 경로를 사용한다.
 - 외부 KIS 인증, 주문, WebSocket을 건너뛰므로 안전한 회귀 테스트에 사용한다.
+- F4는 결정론적 합성 틱으로 청산한 뒤 종료하며, `F4_POST_CLOSE_OBSERVE_UNTIL`까지
+  청산 후 WS/REST 가격 관측을 계속하지 않는다.
 
 ### KIS rate limit 운영 기준
 
 - REST 호출은 `KIS_RATE_INTERVAL_SEC` 기준으로 전역 직렬화한다.
+- REST 연결은 프로세스 수명 동안 공유 AsyncClient의 연결 풀을 재사용하고,
+  정상 종료 시 `kis_rest.close_client()`로 닫는다.
+- `LATENCY_HIGH`의 `latency_ms`/`network_ms`는 실제 HTTP 왕복시간이다.
+  `rate_wait_ms`, `client_setup_ms`, `local_overhead_ms`, `total_ms`로 로컬 대기와
+  상류 API 지연을 분리한다.
 - F1 예상체결가 보강은 `F1_EXPECTED_QUOTE_CONCURRENCY`로 동시 작업 수를 제한한다.
 - F1 KOSPI/KOSDAQ 랭킹 조회 사이에는 `F1_MARKET_INTERVAL_SEC` 간격을 둔다.
 - F3 매수 주문 직전에는 `F3_PRE_ORDER_QUIET_SEC`만큼 대기해 직전 조회 호출과 주문 호출이 붙지 않게 한다.
 - KOSDAQ 랭킹 조회가 KIS 응답 코드 `OPSQ2001` 등으로 실패할 수 있으므로, F1 로그의 `market`, `rt_cd`, `msg_cd`를 함께 확인한다.
+- F1 진행·완료 로그의 `processed_count`, `eligible_count`, `skipped_count`,
+  `quote_valid_count`, `quote_fallback_count`, `error_count`, `skip_reasons`를 함께 확인한다.
+  `parsed_count`는 원본 응답 수가 아니라 적격 후보 수와 같은 의미다.
+
+### F4 청산 후 관측과 EXITING 운영
+
+- `F4_POST_CLOSE_OBSERVE_UNTIL`은 `HH:MM` 형식이다. 잘못된 값은 로깅 초기화 후
+  `F4_OBSERVE_UNTIL_INVALID` WARN을 1회 남기고 기본 `09:10`을 사용한다.
+- 조기·수동 진입 거래가 이 시각 전에 CLOSED가 되면 WS/REST는 차트용 가격만 수집한다.
+  CLOSED 중에는 스탑 계산, VI 처리, 매도 주문을 실행하지 않는다.
+- 상태 파일의 `entry_at`이 손상되면 `F4_ENTRY_AT_INVALID` WARN을 값별 1회 남기고
+  청산 후 관측을 중단한다.
+- 부분체결·체결 미확인·F5 재시도 실패는 `EXITING`으로 남는다.
+- 당일 EXITING 재시작은 `EXITING_REQUIRES_RECONCILIATION` CRIT 알림과 함께
+  자동 진입·자동 재매도를 차단한다. KIS 주문/체결 내역, 실제 잔고, DB OPEN 거래를
+  수동 대사한 뒤 상태를 정리한다.
 
 ### Web UI 메뉴/API 기준
 

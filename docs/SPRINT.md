@@ -3,7 +3,7 @@
 > **버전**: 1.0
 > **작성일**: 2026-06-23
 > **종료일**: 2026-07-08 (기준 스프린트 문서 종료)
-> **후속 갱신**: 2026-07-14 (운영 UI/F5 안정화 기록)
+> **후속 갱신**: 2026-07-24 (청산 상태·F4 관측·KIS 진단 안정화 기록)
 > **기준 브랜치**: main
 > **후속 문서**: [SPRINT_F3_F4_OPTIMIZATION.md](SPRINT_F3_F4_OPTIMIZATION.md)
 > **개발 도구 도입**: [SPRINT_KIS_MCP.md](SPRINT_KIS_MCP.md)
@@ -15,7 +15,7 @@ KIS MCP는 자동매매 런타임과 분리된 개발·사고 분석 도구로�
 
 ---
 
-## 최종 진행 현황 (2026-07-14 기준)
+## 최종 진행 현황 (2026-07-24 기준)
 
 ```text
 Sprint 0     ████████████████████  완료   기반 구조
@@ -25,9 +25,12 @@ Sprint 3     ████████████████████  완�
 Sprint 4     ████████████████████  완료   테스트 + Paper Trading 검증/안정화
 Sprint 5     ████████████████████  완료   FastAPI + UI 실데이터 연동
 후속 Sprint  ████████████████████  완료   F3 속도 최적화 + F4 상태 복구력 강화
+운영 안정화  ████████████████████  완료   EXITING + F4 관측 + KIS/F1 진단 보강
 ```
 
 > 후속 Sprint 세부 내용과 완료 검증은 [SPRINT_F3_F4_OPTIMIZATION.md](SPRINT_F3_F4_OPTIMIZATION.md)를 따른다 (2026-07-14 전체 테스트 320건 통과).
+
+> 2026-07-24 운영 안정화 완료 검증은 전체 Python 테스트 466건 통과를 기준으로 한다.
 
 > 아래의 스프린트별 세부 내용은 작성 당시의 히스토리로 보존한다. 최종 상태는 위 표를 따른다.
 
@@ -349,6 +352,42 @@ Sprint 5     ████████████████████  완�
 
 ---
 
+## 청산 상태·F4 관측·KIS 진단 안정화 (2026-07-24) [완료]
+
+### EXITING 상태와 청산 확정
+
+- [x] `HOLDING → EXITING → CLOSED` 상태 전이 추가
+- [x] F4 주문 접수 후·F5 첫 주문 전 EXITING 영속화
+- [x] 부분체결 수량만큼 `remaining_qty` 갱신
+- [x] 전량 체결 확인 시에만 CLOSED 전환 및 `remaining_qty=0`
+- [x] 체결 미확인 F4 거래·주문을 OPEN/PENDING으로 보존
+- [x] F5 재시도 실패 시 EXITING과 확인된 잔량 보존
+- [x] 당일 EXITING 재시작 시 자동 진입·재매도 차단 및 수동 대사 알림
+
+### F4 청산 후 가격 관측
+
+- [x] WS/REST 공용 `_handle_price_tick()` 도입
+- [x] CLOSED 관측 중 가격 저장만 허용하고 스탑·VI·주문 경로 차단
+- [x] `F4_POST_CLOSE_OBSERVE_UNTIL` 지연 파싱 및 오타 1회 WARN
+- [x] 손상된 `entry_at` 값별 1회 WARN 후 관측 중단
+- [x] DRY_RUN 청산 후 관측 스킵 문서화
+
+### KIS REST와 F1 관측성
+
+- [x] 프로세스 수명 공유 AsyncClient와 정상 종료 처리
+- [x] 네트워크·rate-limit 대기·클라이언트 준비·로컬 오버헤드 지연 분리
+- [x] F1 처리·적격·제외·예상가 성공/대체·오류·제외사유 통계 추가
+- [x] 누락된 F3/F4 운영 이벤트 한글 라벨 추가
+- [x] EXITING 상태의 API/UI 파이프라인 표시 유지
+
+### 검증
+
+- [x] 전체 Python 테스트 `466 passed`
+- [x] 변경 파일 `ruff check --ignore E501` 통과
+- [x] `git diff --check` 통과
+
+---
+
 ## 실계좌 전환 체크리스트
 
 Sprint 4까지 완료 + 아래 항목 모두 확인 후 진행.
@@ -372,10 +411,10 @@ Sprint 4까지 완료 + 아래 항목 모두 확인 후 진행.
 | `src/notifier.py` | ✅ 완료 | |
 | `src/scheduler.py` | ✅ 완료 | |
 | `src/db.py` | ✅ 완료 | CRUD 5개 함수 구현 |
-| `src/state.py` | ✅ 완료 | highest_step 반영 |
+| `src/state.py` | ✅ 완료 | highest_step + EXITING/remaining_qty 전이 |
 | `src/modules/f1_filter.py` | ✅ 완료 | FHPST01710000 구현 |
 | `src/modules/f2_lockup.py` | ✅ 로직 완성 | API 호출 없음 (F1 결과 사용) |
 | `src/modules/f3_entry.py` | ✅ 완료 | 7개 함수 + org_no 저장 |
-| `src/modules/f4_tracking.py` | ✅ 완료 | Step Trailing + REST fallback |
-| `src/modules/f5_timeout.py` | ✅ 완료 | precheck + execute 구현 |
-| `main.py` | ✅ 완료 | |
+| `src/modules/f4_tracking.py` | ✅ 완료 | Step Trailing + WS/REST 공용 관측 + EXITING |
+| `src/modules/f5_timeout.py` | ✅ 완료 | precheck + 부분체결/EXITING 청산 |
+| `main.py` | ✅ 완료 | EXITING 재시작 차단 + 공유 REST client 종료 |
