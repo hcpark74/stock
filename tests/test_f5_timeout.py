@@ -66,6 +66,8 @@ async def test_unconfirmed_fill_retries_only_with_verified_state(monkeypatch):
     assert record_order.await_count == 3
     update_fill.assert_not_awaited()             # 0원 체결 기록 금지
     close_trade.assert_not_awaited()
+    assert state.get().position_status == "EXITING"
+    assert state.get().remaining_qty == 10
     codes = [c.args[0] for c in send.await_args_list]
     assert "TIMEOUT_ORDER_FAILED" in codes
 
@@ -109,6 +111,8 @@ async def test_unverified_close_when_balance_zero_but_no_fill_data(monkeypatch):
 
     assert send_sell.await_count == 1
     close_trade.assert_not_awaited()
+    assert state.get().position_status == "EXITING"
+    assert state.get().remaining_qty == 0
     codes = [c.args[0] for c in send.await_args_list]
     assert "TIMEOUT_CLOSE_UNVERIFIED" in codes
 
@@ -330,6 +334,8 @@ async def test_precheck_zero_holdings_blocks_any_sell(monkeypatch):
 
     send_sell.assert_not_awaited()               # 잔고 0 — 매도 주문 자체를 내지 않음
     close_trade.assert_not_awaited()
+    assert state.get().position_status == "CLOSED"
+    assert state.get().remaining_qty == 0
     codes = [c.args[0] for c in send.await_args_list]
     assert "TIMEOUT_NO_HOLDINGS" in codes
 
@@ -362,6 +368,8 @@ async def test_partial_fills_close_at_weighted_average_price(monkeypatch):
         7, 10_080, "TIMEOUT", 0.8, 0.0,
         exit_qty=10, high_price=10_400.0,
     )  # 평균 청산가
+    assert state.get().position_status == "CLOSED"
+    assert state.get().remaining_qty == 0
     codes = [c.args[0] for c in send.await_args_list]
     assert "TIMEOUT_ORDER_FAILED" not in codes
 
@@ -430,6 +438,8 @@ async def test_confirmed_fill_closes_trade_once(monkeypatch):
         7, 10_100, "TIMEOUT", 1.0, 0.0,
         exit_qty=10, high_price=10_400.0,
     )
+    assert state.get().position_status == "CLOSED"
+    assert state.get().remaining_qty == 0
 
 
 async def test_exception_then_confirmed_fill_recovers(monkeypatch):

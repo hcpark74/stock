@@ -99,14 +99,30 @@ async def test_set_closed_keeps_tick_history_for_review():
     """청산 후에도 당일 가격흐름 차트를 보여주기 위해 tick 이력을 유지한다."""
     s = state.get()
     s.position_status = "HOLDING"
+    s.remaining_qty = 10
     live.push_tick(75_000.0, ticker="005930")
 
     changed = await state.set_closed("TRAILING")
 
     assert changed is True
+    assert s.position_status == "CLOSED"
+    assert s.remaining_qty == 0
     assert len(live.tick_history()) == 1
 
     live.clear_tick_history()
+
+
+async def test_exiting_blocks_daily_reset_until_reconciled():
+    s = state.get()
+    s.trading_date = "20260701"
+    s.position_status = "HOLDING"
+    s.remaining_qty = 10
+
+    assert await state.set_exiting("HARD_STOP") is True
+    assert s.position_status == "EXITING"
+    assert await state.ensure_trading_day("20260702") is False
+    assert s.trading_date == "20260701"
+    assert s.remaining_qty == 10
 
 
 async def test_target_candidates_persist_restore_round_trip(tmp_path):

@@ -132,6 +132,8 @@ def pipeline_from_logs(logs: list[dict], position_status: str) -> dict:
         return {"pipeline_stage": 2, "pipeline_failed": False}
     if position_status == "HOLDING":
         return {"pipeline_stage": 3, "pipeline_failed": False}
+    if position_status == "EXITING":
+        return {"pipeline_stage": 3, "pipeline_failed": True}
     if position_status == "CLOSED":
         return {"pipeline_stage": 4, "pipeline_failed": False}
 

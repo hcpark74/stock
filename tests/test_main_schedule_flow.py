@@ -724,6 +724,43 @@ async def test_recover_state_prefers_holding_state_file_over_db(monkeypatch):
     get_trade.assert_not_awaited()
     send.assert_awaited_once()
 
+
+async def test_recover_state_exiting_blocks_automatic_rearm(monkeypatch):
+    events = []
+    send = AsyncMock()
+    get_trade = AsyncMock()
+    today = main.datetime.now(main.KST).strftime("%Y%m%d")
+    data = {
+        "date": today,
+        "ticker": "000660",
+        "entry_price": 120000.0,
+        "entry_qty": 3,
+        "remaining_qty": 3,
+        "trade_id": 12,
+        "position_status": "EXITING",
+        "close_reason": "HARD_STOP",
+    }
+
+    monkeypatch.setattr(main.state, "load", lambda _state_dir: data)
+    monkeypatch.setattr(main.db, "get_trade_by_date", get_trade)
+    monkeypatch.setattr(main.notifier, "send", send)
+    monkeypatch.setattr(
+        main.logger,
+        "log",
+        lambda event, **kwargs: events.append((event, kwargs)),
+    )
+
+    await main._recover_state()
+
+    s = state_mod.get()
+    assert s.position_status == "EXITING"
+    assert s.remaining_qty == 3
+    assert s.day_skip is True
+    get_trade.assert_not_awaited()
+    send.assert_awaited_once()
+    assert events[-1][1]["recovered_status"] == "EXITING_REQUIRES_RECONCILIATION"
+
+
 async def test_recover_state_terminal_state_file_skips_db_fallback(monkeypatch):
     events = []
     get_trade = AsyncMock(return_value={

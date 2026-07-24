@@ -496,6 +496,29 @@ async def _recover_state() -> None:
             )
         data = None
 
+    if data is not None and data.get("position_status") == "EXITING":
+        state.restore_from(data)
+        state.get().day_skip = True
+        logger.log(
+            "PROCESS_RESTART_DETECTED",
+            level="CRIT",
+            recovered_status="EXITING_REQUIRES_RECONCILIATION",
+            recovery_source="STATE_FILE",
+            ticker=data.get("ticker"),
+            remaining_qty=data.get("remaining_qty"),
+            entry_blocked=True,
+        )
+        await notifier.send(
+            "PROCESS_RESTART_DETECTED",
+            level="CRIT",
+            message=(
+                f"재시작 시 청산 확인 대기 상태 발견: {data.get('ticker')} "
+                f"잔여={data.get('remaining_qty')}주. 미체결 주문과 실제 잔고 확인 필요"
+            ),
+            ticker=data.get("ticker"),
+        )
+        return
+
     if data is not None and data.get("position_status") == "HOLDING":
         actual_qty = await _verified_holding_qty(data.get("ticker"), "STATE_FILE")
         if actual_qty and actual_qty > 0:
@@ -881,6 +904,7 @@ async def main() -> None:
         if tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.gather(*tasks)
+        await kis_rest.close_client()
         await db.close()
         _clear_pid()
 

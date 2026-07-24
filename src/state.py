@@ -23,7 +23,7 @@ class State:
     entry_qty: int | None = None
     remaining_qty: int | None = None
     high_price: float | None = None
-    position_status: str = "IDLE"       # IDLE | ENTERING | HOLDING | CLOSED
+    position_status: str = "IDLE"       # IDLE | ENTERING | HOLDING | EXITING | CLOSED
     close_reason: str | None = None     # TRAILING | HARD_STOP | TIMEOUT
                                         # ENTRY_FAIL | SLIPPAGE_GUARD | GAP_CHANGED
                                         # VI_ACTIVE
@@ -69,7 +69,7 @@ async def ensure_trading_day(date_str: str) -> bool:
     async with _lock:
         if _state.trading_date == date_str:
             return False
-        if _state.position_status in {"ENTERING", "HOLDING"}:
+        if _state.position_status in {"ENTERING", "HOLDING", "EXITING"}:
             return False
         _clear_for_trading_day(date_str)
         return True
@@ -101,17 +101,37 @@ async def set_holding(entry_price: float, entry_qty: int, order_id: str) -> None
         _state.trade_id = 0
 
 
+async def set_exiting(reason: str) -> bool:
+    """HOLDING → EXITING (atomic). 매도 접수 후 중복 청산을 막는다."""
+    async with _lock:
+        if _state.position_status != "HOLDING":
+            return False
+        _state.position_status = "EXITING"
+        _state.close_reason = reason
+        return True
+
+
+async def set_exit_remaining_qty(remaining_qty: int) -> bool:
+    """EXITING 상태의 확인된 미체결/잔여수량을 갱신한다."""
+    async with _lock:
+        if _state.position_status != "EXITING":
+            return False
+        _state.remaining_qty = max(0, int(remaining_qty))
+        return True
+
+
 async def set_closed(reason: str) -> bool:
-    """HOLDING → CLOSED (atomic). 이중 청산 방지. 성공 시 True.
+    """HOLDING/EXITING → CLOSED (atomic). 완전 청산 시 잔여수량을 0으로 만든다.
 
     tick 이력은 지우지 않는다 — 청산 후에도 UI 가격흐름 차트를 유지하고,
     다음 거래일 시작 시 _clear_for_trading_day가 정리한다.
     """
     async with _lock:
-        if _state.position_status != "HOLDING":
+        if _state.position_status not in {"HOLDING", "EXITING"}:
             return False
         _state.position_status = "CLOSED"
         _state.close_reason = reason
+        _state.remaining_qty = 0
         return True
 
 

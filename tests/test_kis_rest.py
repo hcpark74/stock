@@ -160,7 +160,43 @@ async def test_latency_warning_reports_network_wait_and_total_times(monkeypatch)
     assert 599 <= fields["latency_ms"] <= 600
     assert fields["network_ms"] == fields["latency_ms"]
     assert 1099 <= fields["rate_wait_ms"] <= 1100
+    assert fields["client_setup_ms"] == 0
+    assert fields["local_overhead_ms"] == 0
     assert 1699 <= fields["total_ms"] <= 1700
+
+
+@pytest.mark.asyncio
+async def test_kis_rest_reuses_client_and_closes_it(monkeypatch):
+    class ReusableClient:
+        instances = 0
+        requests = 0
+        closes = 0
+        is_closed = False
+
+        def __init__(self, *args, **kwargs):
+            self.__class__.instances += 1
+
+        async def request(self, *args, **kwargs):
+            self.__class__.requests += 1
+            return _FakeResponse()
+
+        async def aclose(self):
+            self.__class__.closes += 1
+            self.is_closed = True
+
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 0.0)
+    monkeypatch.setattr(kis_rest, "_last_call_at", 0.0)
+    monkeypatch.setattr(kis_rest, "_client", None)
+    monkeypatch.setattr(kis_rest, "_client_factory", None)
+    monkeypatch.setattr(kis_rest.httpx, "AsyncClient", ReusableClient)
+
+    await kis_rest.get("/first")
+    await kis_rest.get("/second")
+    await kis_rest.close_client()
+
+    assert ReusableClient.instances == 1
+    assert ReusableClient.requests == 2
+    assert ReusableClient.closes == 1
 
 
 @pytest.mark.asyncio

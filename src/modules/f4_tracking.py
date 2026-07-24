@@ -41,20 +41,20 @@ F4_POST_CLOSE_OBSERVE_UNTIL = os.getenv(
 )
 
 
-def _parse_observe_until(raw: str) -> tuple[int, int]:
-    """HH:MM 파싱. 오타가 관측 기능을 조용히 꺼선 안 되므로 실패 시
-    WARN 남기고 기본 09:10으로 폴백한다(주문 경로와 무관해 폴백이 안전)."""
+def _parse_observe_until(raw: str) -> tuple[tuple[int, int], bool]:
+    """HH:MM을 파싱하고 기본값 사용 여부를 함께 반환한다."""
     try:
         hour, minute = (int(v) for v in raw.split(":", 1))
         if not (0 <= hour <= 23 and 0 <= minute <= 59):
             raise ValueError(raw)
     except (TypeError, ValueError):
-        log("F4_OBSERVE_UNTIL_INVALID", level="WARN", value=raw, fallback="09:10")
-        return 9, 10
-    return hour, minute
+        return (9, 10), True
+    return (hour, minute), False
 
 
-_OBSERVE_UNTIL = _parse_observe_until(F4_POST_CLOSE_OBSERVE_UNTIL)
+_OBSERVE_UNTIL: tuple[int, int] | None = None
+_observe_until_invalid_warned = False
+_invalid_entry_at_warned_value: str | None = None
 
 _SELL_TR = {"REAL": "TTTC0011U", "PAPER": "VTTC0011U"}
 _CCLD_TR = {"REAL": "TTTC0081R", "PAPER": "VTTC0081R"}
@@ -68,8 +68,27 @@ _REARM_HOLDING_INTERVAL_SEC = 5.0
 _REARM_ERROR_INTERVAL_SEC = 5.0
 
 
+def _get_observe_until() -> tuple[int, int]:
+    """로거 초기화 이후 처음 필요할 때 설정을 파싱하고 오타를 1회 경고한다."""
+    global _OBSERVE_UNTIL, _observe_until_invalid_warned
+    if _OBSERVE_UNTIL is None:
+        _OBSERVE_UNTIL, used_fallback = _parse_observe_until(
+            F4_POST_CLOSE_OBSERVE_UNTIL
+        )
+        if used_fallback and not _observe_until_invalid_warned:
+            log(
+                "F4_OBSERVE_UNTIL_INVALID",
+                level="WARN",
+                value=F4_POST_CLOSE_OBSERVE_UNTIL,
+                fallback="09:10",
+            )
+            _observe_until_invalid_warned = True
+    return _OBSERVE_UNTIL
+
+
 def _price_observation_active(now: datetime | None = None) -> bool:
     """Return whether F4 should keep collecting prices for the current trade."""
+    global _invalid_entry_at_warned_value
     s = state.get()
     if s.position_status == "HOLDING":
         return True
@@ -82,9 +101,20 @@ def _price_observation_active(now: datetime | None = None) -> bool:
         if entry_at.tzinfo is None:
             entry_at = entry_at.replace(tzinfo=KST)
     except (TypeError, ValueError):
+        invalid_value = str(s.entry_at)
+        if _invalid_entry_at_warned_value != invalid_value:
+            log(
+                "F4_ENTRY_AT_INVALID",
+                level="WARN",
+                ticker=s.target_ticker,
+                entry_at=invalid_value[:100],
+            )
+            _invalid_entry_at_warned_value = invalid_value
         return False
+    _invalid_entry_at_warned_value = None
+    observe_until = _get_observe_until()
     cutoff = now.replace(
-        hour=_OBSERVE_UNTIL[0], minute=_OBSERVE_UNTIL[1], second=0, microsecond=0
+        hour=observe_until[0], minute=observe_until[1], second=0, microsecond=0
     )
     return entry_at.astimezone(KST).date() == now.date() and now < cutoff
 
@@ -101,6 +131,7 @@ async def run_forever() -> None:
     않으므로 여기서 전파되면 손절 감시가 영구히 사라진다. CancelledError는
     Exception이 아니므로 잡히지 않고 그대로 전파된다(종료 경로).
     """
+    _get_observe_until()
     while True:
         try:
             await run()
@@ -162,20 +193,17 @@ async def run() -> None:
 
     async def on_tick(tick: dict) -> None:
         nonlocal last_ws_tick_at
-        if not _price_observation_active():
+        accepted = await _handle_price_tick(
+            tick["price"],
+            ticker,
+            spike_filter,
+            source="ws",
+            vi_watch=vi_watch,
+        )
+        if not accepted:
             return
         live.ws_connected = True
         last_ws_tick_at = time.monotonic()
-        live.push_tick(tick["price"], ticker=ticker)
-        if state.get().position_status == "HOLDING":
-            await _process_tick(tick["price"], spike_filter)
-        if state.get().position_status == "HOLDING" and vi_watch is not None:
-            try:
-                await _handle_vi_events(
-                    await vi_watch.on_price(tick["price"], "ws"), ticker)
-            except Exception as e:
-                # 관측 전용 — VI 감시 오류가 스탑 추적을 깨선 안 된다
-                log("VI_WATCH_ERROR", level="WARN", ticker=ticker, error=repr(e))
 
     ws_task = asyncio.create_task(kis_ws.subscribe(
         ticker, on_tick,
@@ -244,18 +272,57 @@ async def _run_rest_price_backup(
         try:
             price = await _fetch_current_price(ticker)
             if price > 0:
-                live.push_tick(price, ticker=ticker)
-                if state.get().position_status == "HOLDING":
-                    await _process_tick(price, spike_filter)
-                if state.get().position_status == "HOLDING" and vi_watch is not None:
-                    await _handle_vi_events(
-                        await vi_watch.on_price(price, "rest"), ticker)
+                await _handle_price_tick(
+                    price,
+                    ticker,
+                    spike_filter,
+                    source="rest",
+                    vi_watch=vi_watch,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as e:
             # 백업 폴러가 죽으면 WS까지 함께 취소되므로 절대 전파하지 않는다
             log("F4_REST_BACKUP_ERROR", level="WARN", ticker=ticker, error=repr(e))
         await asyncio.sleep(F4_REST_POLL_INTERVAL_SEC)
+
+
+async def _handle_price_tick(
+    price: float,
+    ticker: str,
+    spike_filter: SpikeFilter,
+    *,
+    source: str,
+    vi_watch: ViWatch | None = None,
+) -> bool:
+    """WS/REST 공용 가격 처리.
+
+    관측 창이 열려 있으면 가격은 저장하되, 주문 가능 로직과 VI 처리는
+    HOLDING 상태에서만 실행한다. 처리했으면 True, 관측 종료면 False.
+    """
+    if not _price_observation_active():
+        return False
+
+    live.push_tick(price, ticker=ticker)
+    if state.get().position_status != "HOLDING":
+        return True
+
+    await _process_tick(price, spike_filter)
+    if state.get().position_status != "HOLDING" or vi_watch is None:
+        return True
+
+    try:
+        await _handle_vi_events(await vi_watch.on_price(price, source), ticker)
+    except Exception as e:
+        # 관측 전용 — VI 감시 오류가 스탑 추적을 깨선 안 된다
+        log(
+            "VI_WATCH_ERROR",
+            level="WARN",
+            ticker=ticker,
+            source=source,
+            error=repr(e),
+        )
+    return True
 
 
 # ── VI 감지 (관측 전용 — PRD 외 가시성 기능) ─────────────────────────
@@ -504,6 +571,9 @@ async def _execute_close_impl(price: float, reason: str) -> bool:
     sell_id = ""
     exit_price = price
     fill_latency_ms: int | None = None
+    fill: dict | None = None
+    filled_qty = 0
+    full_fill_confirmed = False
     try:
         order_started_at = time.perf_counter()
         sell_resp = await _send_sell(s.target_ticker, qty, mode)
@@ -515,13 +585,35 @@ async def _execute_close_impl(price: float, reason: str) -> bool:
                 f"msg_cd={sell_resp.get('msg_cd')} msg1={sell_resp.get('msg1')} "
                 f"order_id={sell_id or '-'}"
             )
+        if not await state.set_exiting(reason):
+            raise RuntimeError(
+                f"failed to transition HOLDING to EXITING: "
+                f"status={state.get().position_status}"
+            )
+        try:
+            await state.persist(
+                os.getenv("STATE_DIR", "data/state"),
+                datetime.now(KST).strftime("%Y%m%d"),
+            )
+        except Exception as exc:
+            log(
+                "F4_STATE_PERSIST_ERROR",
+                level="WARN",
+                ticker=s.target_ticker,
+                phase="EXITING",
+                error=repr(exc),
+            )
         fill = await _poll_fill(sell_id, timeout_sec=30)
         if fill:
             exit_price = fill["fill_price"]
+            filled_qty = max(0, int(fill.get("fill_qty") or 0))
+            full_fill_confirmed = filled_qty >= qty
             fill_latency_ms = max(
                 0,
                 round((time.perf_counter() - order_started_at) * 1000),
             )
+            if not full_fill_confirmed:
+                await state.set_exit_remaining_qty(qty - filled_qty)
         else:
             log("F4_FILL_UNCONFIRMED", level="WARN", ticker=s.target_ticker,
                 order_id=sell_id)
@@ -555,21 +647,26 @@ async def _execute_close_impl(price: float, reason: str) -> bool:
                 await db.update_order_fill(
                     order_db_id,
                     exit_price,
-                    qty,
+                    filled_qty,
                     fill_latency_ms,
+                    status="FILLED" if full_fill_confirmed else "PARTIAL_FILL",
                 )
-            # fill 미확인 주문은 PENDING으로 남긴다 — 트리거가를 체결가로
-            # 기록하면 슬리피지 0%p 가짜 표본이 개선 통계에 섞인다.
-            await db.close_trade(
-                s.trade_id,
-                exit_price,
-                reason,
-                pnl_pct,
-                s.highest_step,
-                exit_qty=qty,
-                high_price=s.high_price,
-            )
+            if full_fill_confirmed:
+                await db.close_trade(
+                    s.trade_id,
+                    exit_price,
+                    reason,
+                    pnl_pct,
+                    s.highest_step,
+                    exit_qty=qty,
+                    high_price=s.high_price,
+                )
         except Exception as e:
+            record_action = (
+                "완전체결 확인으로 CLOSED 처리"
+                if full_fill_confirmed
+                else "체결 확인 대기 상태 유지"
+            )
             log(
                 "F4_CLOSE_RECORD_ERROR",
                 level="CRIT",
@@ -580,12 +677,49 @@ async def _execute_close_impl(price: float, reason: str) -> bool:
             await notifier.send(
                 "F4_CLOSE_RECORD_ERROR",
                 level="CRIT",
-                message=f"F4 매도 성공 후 DB 기록 실패: {s.target_ticker} order_id={sell_id} {repr(e)}. 재매도 방지를 위해 CLOSED 처리합니다.",
+                message=(
+                    f"F4 매도 후 DB 기록 실패: {s.target_ticker} "
+                    f"order_id={sell_id} {repr(e)}. "
+                    f"{record_action}"
+                ),
                 ticker=s.target_ticker,
             )
-            await state.set_closed(reason)
-            await state.persist(os.getenv("STATE_DIR", "data/state"), datetime.now(KST).strftime("%Y%m%d"))
+            if full_fill_confirmed:
+                await state.set_closed(reason)
+            await state.persist(
+                os.getenv("STATE_DIR", "data/state"),
+                datetime.now(KST).strftime("%Y%m%d"),
+            )
             return True
+
+    if not full_fill_confirmed:
+        remaining_qty = state.get().remaining_qty or qty
+        log(
+            "F4_CLOSE_PENDING",
+            level="CRIT",
+            ticker=s.target_ticker,
+            order_id=sell_id,
+            requested_qty=qty,
+            confirmed_fill_qty=filled_qty,
+            remaining_qty=remaining_qty,
+            reason=reason,
+        )
+        await notifier.send(
+            "F4_CLOSE_PENDING",
+            level="CRIT",
+            message=(
+                f"매도 주문 체결 확인 대기: {s.target_ticker} "
+                f"주문={qty}주 확인체결={filled_qty}주 잔여={remaining_qty}주. "
+                f"주문/잔고 확인 필요"
+            ),
+            ticker=s.target_ticker,
+        )
+        await state.persist(
+            os.getenv("STATE_DIR", "data/state"),
+            datetime.now(KST).strftime("%Y%m%d"),
+        )
+        return True
+
     event_name = "TRAILING_STOP" if reason == "TRAILING" else reason
     level = "INFO" if reason == "TRAILING" else "WARN"
 

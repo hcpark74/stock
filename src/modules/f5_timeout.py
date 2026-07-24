@@ -101,19 +101,36 @@ async def execute() -> None:
     if s.position_status != "HOLDING":
         return  # 이미 F4에서 청산됨
 
-    # REAL-BLOCKER: CLOSED currently doubles as an in-process duplicate-sell
-    # guard before broker fill confirmation. If liquidation later fails, the
-    # account can still hold shares while local state says CLOSED. Replace this
-    # with a persisted EXITING state before enabling REAL; see the checklist.
-    if not await state.set_closed("TIMEOUT"):
-        return
-
     ticker = s.target_ticker
     # precheck가 "오늘" 잔고 0을 확인했다면 매도할 수량이 없다 — 주문을 보내지 않는다.
     # 날짜가 다른(전일) precheck 값은 무시하고 상태 파일 수량으로 진행한다.
     today_str = datetime.now(KST).strftime("%Y%m%d")
     prefetch_valid = _prefetch_qty is not None and _prefetch_date == today_str
     qty = _prefetch_qty if prefetch_valid else (s.remaining_qty or 0)
+    state_qty = s.remaining_qty
+
+    if qty <= 0:
+        # 오늘 precheck로 실제 미보유를 확인했거나 상태 수량 자체가 0이다.
+        # 주문 없이 CLOSED로 확정하되 DB 거래는 운영자가 대조할 수 있도록 열어 둔다.
+        if not await state.set_closed("TIMEOUT"):
+            return
+        log("TIMEOUT_NO_HOLDINGS", level="CRIT", ticker=ticker, state_qty=state_qty)
+        await notifier.send(
+            "TIMEOUT_NO_HOLDINGS", level="CRIT",
+            message=(
+                f"11시 청산: {ticker} 실제 잔고가 0이라 매도 주문을 내지 않았습니다. "
+                "상태 파일과 계좌가 불일치합니다. 보유/체결 내역을 수동 확인하세요."
+            ),
+            ticker=ticker,
+        )
+        await state.persist(os.getenv("STATE_DIR", "data/state"), today_str)
+        return
+
+    # 매도 진행 중에는 중복 청산을 막되, 전량 체결 확인 전까지 CLOSED로 확정하지 않는다.
+    if not await state.set_exiting("TIMEOUT"):
+        return
+    await state.persist(os.getenv("STATE_DIR", "data/state"), today_str)
+
     mode = os.getenv("KIS_MODE", "PAPER")
     entry = s.entry_price or 0.0
     remaining = qty
@@ -140,6 +157,8 @@ async def execute() -> None:
         remaining = max(0, remaining - delta)
         order_recorded_qty = cum_qty
         order_recorded_amt = cum_amt
+        await state.set_exit_remaining_qty(remaining)
+        await state.persist(os.getenv("STATE_DIR", "data/state"), today_str)
         if order_db_id:
             fill_status = "FILLED" if cum_qty >= order_sent_qty else "PARTIAL_FILL"
             avg_price = round(cum_amt / cum_qty) if cum_qty else 0
@@ -197,6 +216,8 @@ async def execute() -> None:
                     await asyncio.sleep(_RETRY_INTERVAL)
                 continue
             remaining = min(remaining, verified)
+            await state.set_exit_remaining_qty(remaining)
+            await state.persist(os.getenv("STATE_DIR", "data/state"), today_str)
             if remaining <= 0:
                 break
             if not order_known:
@@ -292,21 +313,6 @@ async def execute() -> None:
                 fill_latency_ms=fill_latency_ms,
             )
             return
-        if qty <= 0:
-            # precheck에서 잔고 0 확인 — 애초에 매도할 수량이 없었다.
-            log("TIMEOUT_NO_HOLDINGS", level="CRIT", ticker=ticker,
-                state_qty=s.remaining_qty)
-            await notifier.send(
-                "TIMEOUT_NO_HOLDINGS", level="CRIT",
-                message=(
-                    f"11시 청산: {ticker} 실제 잔고가 0이라 매도 주문을 내지 않았습니다. "
-                    "상태 파일과 계좌가 불일치합니다. 보유/체결 내역을 수동 확인하세요."
-                ),
-                ticker=ticker,
-            )
-            await state.persist(os.getenv("STATE_DIR", "data/state"),
-                                datetime.now(KST).strftime("%Y%m%d"))
-            return
         # 잔고는 0인데 체결가를 한 번도 확인하지 못한 경우 — 거래를 임의 가격으로
         # 닫지 않고 운영자 확인을 요청한다 (DB trade는 OPEN으로 남아 대조 가능).
         log("TIMEOUT_CLOSE_UNVERIFIED", level="CRIT", ticker=ticker,
@@ -323,8 +329,10 @@ async def execute() -> None:
                             datetime.now(KST).strftime("%Y%m%d"))
         return
 
-    # 의도적으로 state.persist를 호출하지 않는다 — 디스크는 HOLDING으로 남아,
-    # 크래시 후 재시작하면 잔고 재검증을 거쳐 F4 추적을 재개할 수 있다.
+    # 전량 체결을 확인하지 못했으므로 EXITING과 확인된 잔량을 보존한다.
+    # 재시작 시 자동 재매도하지 않고 주문/잔고 대조를 요구해 이중 매도를 막는다.
+    await state.set_exit_remaining_qty(remaining)
+    await state.persist(os.getenv("STATE_DIR", "data/state"), today_str)
     log("TIMEOUT_ORDER_FAILED", level="CRIT", ticker=ticker,
         attempt_count=_RETRY, last_error_code="", last_error_msg="Max retries exceeded")
     await notifier.send("TIMEOUT_ORDER_FAILED", level="CRIT",
@@ -342,6 +350,13 @@ async def _finalize_close(
     fill_latency_ms: int | None = None,
 ) -> None:
     """전량 체결 확인 후 거래 종료 기록. DB 실패는 재매도 사유가 아니므로 격리한다."""
+    if not await state.set_closed("TIMEOUT"):
+        log(
+            "TIMEOUT_STATE_CLOSE_FAILED",
+            level="CRIT",
+            ticker=ticker,
+            position_status=state.get().position_status,
+        )
     pnl_pct = round((exit_price / entry - 1) * 100, 2) if (entry and exit_price) else 0.0
     if s.trade_id:
         try:

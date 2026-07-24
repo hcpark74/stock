@@ -250,7 +250,7 @@ def _summary_with_trade_anchor(summary: dict, logs: list[dict], current_state=No
             or getattr(current_state, "entry_price", None)
         )
         status_now = getattr(current_state, "position_status", None)
-        if has_trade and status_now in {"ENTERING", "HOLDING", "CLOSED"}:
+        if has_trade and status_now in {"ENTERING", "HOLDING", "EXITING", "CLOSED"}:
             ticker = getattr(current_state, "target_ticker", None)
             name = getattr(current_state, "target_name", None)
 
@@ -516,19 +516,19 @@ async def api_status() -> JSONResponse:
         # 청산(CLOSED) 후에도 당일 리뷰용으로 tick 이력을 유지해 내려준다.
         "tick_history": (
             live.tick_history(s.target_ticker, since=s.entry_at)
-            if s.position_status in ("HOLDING", "CLOSED") else []
+            if s.position_status in ("HOLDING", "EXITING", "CLOSED") else []
         ),
         "minute_price_history": (
             live.minute_price_history(s.target_ticker, since=s.entry_at)
-            if s.position_status in ("HOLDING", "CLOSED") else []
+            if s.position_status in ("HOLDING", "EXITING", "CLOSED") else []
         ),
         "trade_marks": (
             await _today_trade_marks()
-            if s.position_status in ("HOLDING", "CLOSED") else []
+            if s.position_status in ("HOLDING", "EXITING", "CLOSED") else []
         ),
         "vi_events": (
             live.vi_events
-            if s.position_status in ("HOLDING", "CLOSED") else []
+            if s.position_status in ("HOLDING", "EXITING", "CLOSED") else []
         ),
         **_pipeline_from_logs(logs, s.position_status),
     })

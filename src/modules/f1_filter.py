@@ -264,7 +264,7 @@ async def _fetch_all_premarket() -> list[dict]:
             output_count=len(output),
             concurrency=max(1, F1_EXPECTED_QUOTE_CONCURRENCY),
         )
-        candidates = await _parse_candidates_concurrently(
+        candidates, parse_stats = await _parse_candidates_concurrently(
             output,
             market,
             market_cfg["quote_market"],
@@ -275,6 +275,7 @@ async def _fetch_all_premarket() -> list[dict]:
             market=market,
             output_count=len(output),
             parsed_count=len(candidates),
+            **parse_stats,
         )
         parsed_count = len(candidates)
         zero_gap_count = sum(1 for c in candidates if abs(c.get("gap_pct", 0.0)) < 0.000001)
@@ -301,24 +302,45 @@ async def _parse_candidates_concurrently(
     items: list[dict],
     market: str,
     quote_market: str = "J",
-) -> list[dict]:
+) -> tuple[list[dict], dict]:
     concurrency = max(1, F1_EXPECTED_QUOTE_CONCURRENCY)
     semaphore = asyncio.Semaphore(concurrency)
     total = len(items)
     completed = 0
     parsed_count = 0
+    quote_valid_count = 0
+    quote_fallback_count = 0
+    error_count = 0
+    skip_reasons: dict[str, int] = {}
     progress_every = max(1, F1_PROGRESS_LOG_EVERY)
 
     async def parse_one(item: dict) -> dict | None:
-        nonlocal completed, parsed_count
-        async with semaphore:
-            try:
-                candidate = await _parse_candidate(item, market, quote_market)
-            except (KeyError, ValueError, ZeroDivisionError):
-                candidate = None
+        nonlocal completed, parsed_count, quote_valid_count, quote_fallback_count, error_count
+        skip_reason = _candidate_skip_reason(item)
+        candidate = None
+        if skip_reason is not None:
+            skip_reasons[skip_reason] = skip_reasons.get(skip_reason, 0) + 1
+        else:
+            async with semaphore:
+                try:
+                    candidate = await _parse_candidate(item, market, quote_market)
+                except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
+                    error_count += 1
+                    log(
+                        "F1_CANDIDATE_PARSE_ERROR",
+                        level="WARN",
+                        ticker=item.get("stck_shrn_iscd") or item.get("mksc_shrn_iscd"),
+                        market=market,
+                        reason=exc.__class__.__name__,
+                        error=str(exc)[:200],
+                    )
         completed += 1
         if candidate is not None:
             parsed_count += 1
+            if candidate.get("gap_source") == "expected.antc_cnpr":
+                quote_valid_count += 1
+            else:
+                quote_fallback_count += 1
         if total and (completed == total or completed % progress_every == 0):
             log(
                 "F1_EXPECTED_QUOTE_PROGRESS",
@@ -327,24 +349,36 @@ async def _parse_candidates_concurrently(
                 completed=completed,
                 total=total,
                 parsed_count=parsed_count,
+                eligible_count=parsed_count,
+                skipped_count=sum(skip_reasons.values()),
+                quote_valid_count=quote_valid_count,
+                quote_fallback_count=quote_fallback_count,
+                error_count=error_count,
+                skip_reasons=dict(sorted(skip_reasons.items())),
                 progress_pct=round((completed / total) * 100, 1),
             )
         return candidate
 
     parsed = await asyncio.gather(*(parse_one(item) for item in items))
-    return [candidate for candidate in parsed if candidate is not None]
+    candidates = [candidate for candidate in parsed if candidate is not None]
+    return candidates, {
+        "processed_count": total,
+        "eligible_count": len(candidates),
+        "skipped_count": sum(skip_reasons.values()),
+        "quote_valid_count": quote_valid_count,
+        "quote_fallback_count": quote_fallback_count,
+        "error_count": error_count,
+        "skip_reasons": dict(sorted(skip_reasons.items())),
+    }
 
 
 async def _parse_candidate(item: dict, market: str = "J", quote_market: str = "J") -> dict | None:
     ticker = item.get("stck_shrn_iscd") or item.get("mksc_shrn_iscd")
     name = item.get("hts_kor_isnm", "")
-    if not _is_common_stock_candidate(ticker, name):
+    if _candidate_skip_reason(item) is not None:
         return None
-
     ranking_gap_pct = _to_float(item.get("prdy_ctrt"))
     ranking_price = _to_float(item.get("stck_prpr"))
-    if ranking_price <= 0:
-        return None
 
     prev_close = ranking_price / (1 + ranking_gap_pct / 100)
     expected_price = ranking_price
@@ -397,6 +431,21 @@ async def _parse_candidate(item: dict, market: str = "J", quote_market: str = "J
     }
     candidate.update(_classify_gap_candidate(candidate))
     return candidate
+
+
+def _candidate_skip_reason(item: dict) -> str | None:
+    ticker = item.get("stck_shrn_iscd") or item.get("mksc_shrn_iscd")
+    if not ticker or len(ticker) != 6 or not ticker.isdigit():
+        return "INVALID_TICKER"
+
+    name = str(item.get("hts_kor_isnm") or "")
+    upper_name = name.upper()
+    if any(keyword in upper_name for keyword in _EXCLUDED_PRODUCT_KEYWORDS):
+        return "EXCLUDED_PRODUCT"
+
+    if _to_float(item.get("stck_prpr")) <= 0:
+        return "INVALID_RANKING_PRICE"
+    return None
 
 
 async def _fetch_expected_quote(ticker: str, market: str = "J") -> dict | None:

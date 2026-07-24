@@ -22,6 +22,9 @@ _TRANSIENT_RETRY_BASE_SEC = float(os.getenv("KIS_TRANSIENT_RETRY_BASE_SEC", "1.0
 _TRANSIENT_RETRY_MAX_SEC = float(os.getenv("KIS_TRANSIENT_RETRY_MAX_SEC", "8.0"))
 _TIMEOUT = 15.0        # 잔고조회 등 느린 API 대응 (문서: "조회속도가 느린 API")
 _rate_lock = asyncio.Lock()
+_client_lock = asyncio.Lock()
+_client: httpx.AsyncClient | None = None
+_client_factory: object | None = None
 SEND_GUARD_BLOCKED_MSG_CD = "LOCAL_SEND_GUARD_BLOCKED"
 
 
@@ -69,6 +72,36 @@ def _headers(tr_id: str = "") -> dict:
     }
 
 
+async def _get_client() -> httpx.AsyncClient:
+    """프로세스 수명 동안 HTTP 연결 풀을 재사용한다."""
+    global _client, _client_factory
+    factory = httpx.AsyncClient
+    async with _client_lock:
+        is_closed = bool(getattr(_client, "is_closed", False)) if _client is not None else True
+        if _client is None or is_closed or _client_factory is not factory:
+            old_client = _client
+            if old_client is not None:
+                close = getattr(old_client, "aclose", None)
+                if close is not None:
+                    await close()
+            _client = factory()
+            _client_factory = factory
+        return _client
+
+
+async def close_client() -> None:
+    """공유 REST 클라이언트를 정상 종료한다."""
+    global _client, _client_factory
+    async with _client_lock:
+        client = _client
+        _client = None
+        _client_factory = None
+        if client is not None:
+            close = getattr(client, "aclose", None)
+            if close is not None:
+                await close()
+
+
 async def _request(
     method: str,
     path: str,
@@ -103,18 +136,31 @@ async def _request(
     rate_wait_ms = int((request_ready_at - total_start) * 1000)
 
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            # Rate-limit wait and client setup can consume the remaining order window.
-            # Evaluate at the last local point before handing the request to httpx.
-            if send_guard is not None and not send_guard():
-                return {
-                    "rt_cd": "1",
-                    "msg_cd": SEND_GUARD_BLOCKED_MSG_CD,
-                    "msg1": "request blocked by send guard",
-                }
-            request_start = time.monotonic()
-            resp = await client.request(method, url, headers=_headers(tr_id), **kwargs)
-            request_end = time.monotonic()
+        if send_guard is not None and not send_guard():
+            return {
+                "rt_cd": "1",
+                "msg_cd": SEND_GUARD_BLOCKED_MSG_CD,
+                "msg1": "request blocked by send guard",
+            }
+        client = await _get_client()
+        client_ready_at = time.monotonic()
+        client_setup_ms = int((client_ready_at - request_ready_at) * 1000)
+        # 클라이언트 준비 중 주문 마감이 지날 수 있으므로 전송 직전에 다시 검사한다.
+        if send_guard is not None and not send_guard():
+            return {
+                "rt_cd": "1",
+                "msg_cd": SEND_GUARD_BLOCKED_MSG_CD,
+                "msg1": "request blocked by send guard",
+            }
+        request_start = time.monotonic()
+        resp = await client.request(
+            method,
+            url,
+            headers=_headers(tr_id),
+            timeout=timeout,
+            **kwargs,
+        )
+        request_end = time.monotonic()
     except httpx.HTTPError as exc:
         # 주문 등 POST는 서버 도달 후 응답만 유실됐을 수 있어(예: ReadTimeout)
         # 재전송 시 중복 주문 위험 — 요청 미전송이 보장되는 ConnectError만 재시도.
@@ -163,10 +209,13 @@ async def _request(
     # upstream API latency.
     network_ms = int((request_end - request_start) * 1000)
     total_ms = int((request_end - total_start) * 1000)
+    local_overhead_ms = max(0, total_ms - network_ms - rate_wait_ms)
     latency_fields = {
         "latency_ms": network_ms,
         "network_ms": network_ms,
         "rate_wait_ms": rate_wait_ms,
+        "client_setup_ms": client_setup_ms,
+        "local_overhead_ms": local_overhead_ms,
         "total_ms": total_ms,
     }
 

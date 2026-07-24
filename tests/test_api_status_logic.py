@@ -116,6 +116,13 @@ def test_pipeline_live_position_status_takes_precedence():
     assert pipeline == {"pipeline_stage": 3, "pipeline_failed": False}
 
 
+def test_pipeline_exiting_is_visible_as_unresolved_close():
+    assert status_logic.pipeline_from_logs([], "EXITING") == {
+        "pipeline_stage": 3,
+        "pipeline_failed": True,
+    }
+
+
 def test_f3_detail_from_event_labels_internal_reasons():
     assert status_logic.f3_detail_from_event({"event": "GAP_CHANGED", "reason": "BELOW_MIN"}) == "갭 하한 미달"
     assert status_logic.f3_detail_from_event({"event": "GAP_CHANGED", "reason": "ABOVE_MAX"}) == "갭 상한 초과"

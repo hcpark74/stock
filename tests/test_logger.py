@@ -1,6 +1,6 @@
 import logging
 
-from src.utils.logger import log, normalize_level
+from src.utils.logger import event_label, log, normalize_level
 
 
 def test_normalize_level_maps_legacy_names_to_standard_levels():
@@ -64,3 +64,13 @@ def test_log_infers_current_target_name():
 
     assert records[-2]._extra["name"] == "삼성전자"
     assert records[-1]._extra["name"] is None
+
+
+def test_f3_operational_events_have_human_readable_labels():
+    assert event_label("F3_FINAL_PICK") != "F3_FINAL_PICK(F3_FINAL_PICK)"
+    assert event_label("F3_RECHECK_BATCH_TIMING") != (
+        "F3_RECHECK_BATCH_TIMING(F3_RECHECK_BATCH_TIMING)"
+    )
+    assert event_label("F4_ENTRY_AT_INVALID") != (
+        "F4_ENTRY_AT_INVALID(F4_ENTRY_AT_INVALID)"
+    )

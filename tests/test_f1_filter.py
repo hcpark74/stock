@@ -7,10 +7,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src import state as _state_mod
 import src.modules.f1_filter as f1_mod
+from src import state as _state_mod
 from src.modules.f1_filter import GAP_MAX, GAP_MIN, _fetch_all_premarket, run
-
 
 # ── 헬퍼 ──────────────────────────────────────────────────────────────
 
@@ -376,6 +375,9 @@ async def test_fetch_all_premarket_logs_progress_while_fetching(monkeypatch):
     progress = [kwargs for event, kwargs in events if event == "F1_EXPECTED_QUOTE_PROGRESS"]
     assert progress[-1]["completed"] == 3
     assert progress[-1]["total"] == 3
+    assert progress[-1]["eligible_count"] == 3
+    assert progress[-1]["quote_fallback_count"] == 3
+    assert progress[-1]["error_count"] == 0
 
 
 def test_save_candidate_snapshot_rotates_old_files(tmp_path, monkeypatch):
@@ -494,6 +496,8 @@ async def test_day_skip_returns_early():
 
 async def test_fetch_excludes_etf_etn_leverage_inverse_products():
     """KIS 원본 응답에서 ETF/ETN/레버리지/인버스 상품은 F1 후보에서 제외."""
+    events = []
+
     async def fake_get(*args, **kwargs):
         input_iscd = kwargs["params"]["fid_input_iscd"]
         if input_iscd == "1001":
@@ -533,10 +537,23 @@ async def test_fetch_excludes_etf_etn_leverage_inverse_products():
 
     with (
         patch("src.api.kis_rest.get", new=fake_get),
-        patch("src.modules.f1_filter._fetch_expected_quote", new_callable=AsyncMock, return_value=None),
+        patch(
+            "src.modules.f1_filter._fetch_expected_quote",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
         patch("src.modules.f1_filter.F1_MARKET_INTERVAL_SEC", 0),
+        patch("src.modules.f1_filter.log", lambda event, **kwargs: events.append((event, kwargs))),
     ):
         result = await _fetch_all_premarket()
 
     assert [c["ticker"] for c in result] == ["005930"]
+    done = [fields for event, fields in events if event == "F1_EXPECTED_QUOTE_DONE"][0]
+    assert done["processed_count"] == 3
+    assert done["eligible_count"] == 1
+    assert done["skipped_count"] == 2
+    assert done["skip_reasons"] == {
+        "EXCLUDED_PRODUCT": 1,
+        "INVALID_TICKER": 1,
+    }
     assert result[0]["name"] == "삼성전자"

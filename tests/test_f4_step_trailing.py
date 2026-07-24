@@ -1,8 +1,7 @@
 """F4 Step Trailing 로직 유닛 테스트."""
 import asyncio
-import math
 from datetime import datetime as _dt
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -13,6 +12,8 @@ from src.modules.f4_tracking import (
     STEP_SIZE,
     STEP_TRAIL,
     _execute_close,
+    _get_observe_until,
+    _handle_price_tick,
     _price_observation_active,
     _process_tick,
     _run_dry_ticks,
@@ -464,21 +465,145 @@ def test_price_observation_always_active_while_holding():
     assert _price_observation_active(_kst(14, 0)) is True
 
 
-def test_parse_observe_until_falls_back_on_invalid_value():
+def test_parse_observe_until_reports_fallback_on_invalid_value():
     import src.modules.f4_tracking as f4
 
-    assert f4._parse_observe_until("09:10") == (9, 10)
-    assert f4._parse_observe_until("9:5") == (9, 5)
-    # 오타는 WARN 로그 후 기본 09:10으로 폴백 — 조용한 비활성 금지
-    assert f4._parse_observe_until("0910") == (9, 10)
-    assert f4._parse_observe_until("9:75") == (9, 10)
-    assert f4._parse_observe_until("24:00") == (9, 10)
-    assert f4._parse_observe_until("") == (9, 10)
+    assert f4._parse_observe_until("09:10") == ((9, 10), False)
+    assert f4._parse_observe_until("9:5") == ((9, 5), False)
+    assert f4._parse_observe_until("0910") == ((9, 10), True)
+    assert f4._parse_observe_until("9:75") == ((9, 10), True)
+    assert f4._parse_observe_until("24:00") == ((9, 10), True)
+    assert f4._parse_observe_until("") == ((9, 10), True)
+
+
+def test_observe_until_invalid_warns_once_when_runtime_config_is_loaded(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    events = []
+    monkeypatch.setattr(f4, "F4_POST_CLOSE_OBSERVE_UNTIL", "not-a-time")
+    monkeypatch.setattr(f4, "_OBSERVE_UNTIL", None)
+    monkeypatch.setattr(f4, "_observe_until_invalid_warned", False)
+    monkeypatch.setattr(f4, "log", lambda event, **kwargs: events.append((event, kwargs)))
+
+    assert _get_observe_until() == (9, 10)
+    assert _get_observe_until() == (9, 10)
+
+    warnings = [fields for event, fields in events if event == "F4_OBSERVE_UNTIL_INVALID"]
+    assert warnings == [{"level": "WARN", "value": "not-a-time", "fallback": "09:10"}]
+
+
+def test_invalid_entry_at_disables_observation_and_warns_once(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    s = _state_mod.get()
+    s.position_status = "CLOSED"
+    s.target_ticker = "005930"
+    s.entry_at = "broken-entry-time"
+    events = []
+    monkeypatch.setattr(f4, "_invalid_entry_at_warned_value", None)
+    monkeypatch.setattr(f4, "log", lambda event, **kwargs: events.append((event, kwargs)))
+
+    assert _price_observation_active(_kst(9, 9)) is False
+    assert _price_observation_active(_kst(9, 9)) is False
+
+    warnings = [fields for event, fields in events if event == "F4_ENTRY_AT_INVALID"]
+    assert warnings == [{
+        "level": "WARN",
+        "ticker": "005930",
+        "entry_at": "broken-entry-time",
+    }]
+
+
+@pytest.mark.asyncio
+async def test_ws_tick_after_close_only_records_price(monkeypatch):
+    """CLOSED 관측 중 WS 틱은 차트에만 저장하고 스탑·주문 경로로 보내지 않는다."""
+    import src.modules.f4_tracking as f4
+
+    s = _state_mod.get()
+    s.position_status = "CLOSED"
+    process_tick = AsyncMock()
+    push_tick = MagicMock()
+    vi_watch = MagicMock()
+    vi_watch.on_price = AsyncMock()
+
+    monkeypatch.setattr(f4, "_price_observation_active", lambda: True)
+    monkeypatch.setattr(f4, "_process_tick", process_tick)
+    monkeypatch.setattr(f4.live, "push_tick", push_tick)
+
+    accepted = await _handle_price_tick(
+        ENTRY + 100,
+        "005930",
+        _spike_always_pass(),
+        source="ws",
+        vi_watch=vi_watch,
+    )
+
+    assert accepted is True
+    push_tick.assert_called_once_with(ENTRY + 100, ticker="005930")
+    process_tick.assert_not_awaited()
+    vi_watch.on_price.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ws_tick_outside_observation_is_ignored(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    process_tick = AsyncMock()
+    push_tick = MagicMock()
+    monkeypatch.setattr(f4, "_price_observation_active", lambda: False)
+    monkeypatch.setattr(f4, "_process_tick", process_tick)
+    monkeypatch.setattr(f4.live, "push_tick", push_tick)
+
+    accepted = await _handle_price_tick(
+        ENTRY,
+        "005930",
+        _spike_always_pass(),
+        source="ws",
+    )
+
+    assert accepted is False
+    push_tick.assert_not_called()
+    process_tick.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_routes_websocket_ticks_through_shared_handler(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    handle_tick = AsyncMock(return_value=True)
+
+    async def fake_subscribe(ticker, on_tick, *, stop_if=None):
+        assert ticker == "005930"
+        assert stop_if is not None
+        await on_tick({"price": ENTRY + 50})
+
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setattr(f4, "F4_REST_BACKUP_ENABLED", False)
+    monkeypatch.setattr(f4, "_handle_price_tick", handle_tick)
+    monkeypatch.setattr(f4, "_make_vi_watch", lambda _ticker: None)
+    monkeypatch.setattr(f4.kis_ws, "subscribe", fake_subscribe)
+
+    await f4.run()
+
+    handle_tick.assert_awaited_once_with(
+        ENTRY + 50,
+        "005930",
+        ANY,
+        source="ws",
+        vi_watch=None,
+    )
 
 
 @pytest.mark.asyncio
 async def test_rest_backup_collects_after_close_without_running_stop_logic(monkeypatch):
     import src.modules.f4_tracking as f4
+
+    fixed_now = _kst(9, 9)
+
+    class FixedDateTime(_dt):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now
 
     s = _state_mod.get()
     s.position_status = "CLOSED"
@@ -487,15 +612,15 @@ async def test_rest_backup_collects_after_close_without_running_stop_logic(monke
     process_tick = AsyncMock()
     push_tick = MagicMock()
 
-    monkeypatch.setattr(
-        f4,
-        "_price_observation_active",
-        MagicMock(side_effect=[True, False]),
-    )
+    async def stop_after_sleep(_seconds):
+        s.position_status = "IDLE"
+
+    monkeypatch.setattr(f4, "datetime", FixedDateTime)
+    monkeypatch.setattr(f4, "_OBSERVE_UNTIL", (9, 10))
     monkeypatch.setattr(f4, "_fetch_current_price", fetch)
     monkeypatch.setattr(f4, "_process_tick", process_tick)
     monkeypatch.setattr(f4.live, "push_tick", push_tick)
-    monkeypatch.setattr(f4.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(f4.asyncio, "sleep", AsyncMock(side_effect=stop_after_sleep))
     monkeypatch.setattr(f4, "log", lambda *args, **kwargs: None)
 
     await _run_rest_price_backup("005930", _spike_always_pass(), lambda: True)
@@ -666,6 +791,8 @@ async def test_execute_close_separates_trigger_price_and_measures_latency(monkey
     result = await _execute_close(ENTRY * 0.98, "HARD_STOP")
 
     assert result is True
+    assert _state_mod.get().position_status == "CLOSED"
+    assert _state_mod.get().remaining_qty == 0
     assert record_order.await_args.args[4] == 0.0
     assert record_order.await_args.kwargs["trigger_price"] == ENTRY * 0.98
     assert update_order_fill.await_args.args[1] == 9_750.0
@@ -700,16 +827,51 @@ async def test_execute_close_keeps_order_pending_when_fill_unconfirmed(monkeypat
     monkeypatch.setattr("src.modules.f4_tracking.db.update_order_fill", update_order_fill)
     monkeypatch.setattr("src.modules.f4_tracking.db.close_trade", close_trade)
     monkeypatch.setattr("src.modules.f4_tracking.state.persist", AsyncMock())
-    monkeypatch.setattr("src.modules.f4_tracking.notifier.send", AsyncMock())
+    notify = AsyncMock()
+    monkeypatch.setattr("src.modules.f4_tracking.notifier.send", notify)
 
     result = await _execute_close(ENTRY * 0.98, "HARD_STOP")
 
     # 주문 기록은 남지만 체결 미확인이므로 FILLED로 갱신하지 않는다 —
     # 트리거가=체결가인 0%p 가짜 슬리피지 표본을 막는다.
     assert result is True
+    assert _state_mod.get().position_status == "EXITING"
+    assert _state_mod.get().remaining_qty == 100
     record_order.assert_awaited_once()
     update_order_fill.assert_not_awaited()
-    close_trade.assert_awaited_once()
+    close_trade.assert_not_awaited()
+    assert notify.await_args.args[0] == "F4_CLOSE_PENDING"
+
+
+@pytest.mark.asyncio
+async def test_execute_close_keeps_partial_fill_in_exiting_state(monkeypatch):
+    _state_mod.get().trade_id = 123
+    record_order = AsyncMock(return_value=9)
+    update_order_fill = AsyncMock()
+    close_trade = AsyncMock()
+
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setattr(
+        "src.modules.f4_tracking._send_sell",
+        AsyncMock(return_value={"rt_cd": "0", "output": {"ODNO": "SELL001"}}),
+    )
+    monkeypatch.setattr(
+        "src.modules.f4_tracking._poll_fill",
+        AsyncMock(return_value={"fill_price": 9_800.0, "fill_qty": 40}),
+    )
+    monkeypatch.setattr("src.modules.f4_tracking.db.record_order", record_order)
+    monkeypatch.setattr("src.modules.f4_tracking.db.update_order_fill", update_order_fill)
+    monkeypatch.setattr("src.modules.f4_tracking.db.close_trade", close_trade)
+    monkeypatch.setattr("src.modules.f4_tracking.state.persist", AsyncMock())
+    monkeypatch.setattr("src.modules.f4_tracking.notifier.send", AsyncMock())
+
+    result = await _execute_close(ENTRY * 0.98, "HARD_STOP")
+
+    assert result is True
+    assert _state_mod.get().position_status == "EXITING"
+    assert _state_mod.get().remaining_qty == 60
+    assert update_order_fill.await_args.kwargs["status"] == "PARTIAL_FILL"
+    close_trade.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -787,9 +949,10 @@ async def test_execute_close_closes_state_when_db_recording_fails_after_sell(mon
     assert result is True
     assert _state_mod.get().position_status == "CLOSED"
     assert _state_mod.get().close_reason == "HARD_STOP"
+    assert _state_mod.get().remaining_qty == 0
     assert "F4_CLOSE_RECORD_ERROR" in [event for event, _ in events]
     notify.assert_awaited_once()
-    persist.assert_awaited_once()
+    assert persist.await_count == 2  # EXITING 접수 직후 + CLOSED 확정 후
     close_trade.assert_not_awaited()
 
 @pytest.mark.asyncio
