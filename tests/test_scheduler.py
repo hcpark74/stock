@@ -10,7 +10,9 @@ async def _noop() -> None:
 def test_scheduler_times_are_single_sourced_from_schedule_times():
     """스케줄 시각 상수는 schedule_times가 단일 출처 — 복제 시 UI 표시가 어긋난다."""
     for name in (
-        "F1_H", "F1_M", "F2_H", "F2_M", "F3_H", "F3_M", "F3_S",
+        "F1_H", "F1_M",
+        "PAPER_FAST_PROBE_H", "PAPER_FAST_PROBE_M", "PAPER_FAST_PROBE_S",
+        "F2_H", "F2_M", "F3_H", "F3_M", "F3_S",
         "F3_FILL_DEADLINE_H", "F3_FILL_DEADLINE_M",
         "F5_PRECHECK_H", "F5_PRECHECK_M", "F5_PRECHECK_S",
         "F5_EXEC_H", "F5_EXEC_M", "F5_EXEC_S",
@@ -22,6 +24,7 @@ async def test_scheduler_jobs_allow_short_startup_misfires():
     scheduler = build(
         token_refresh=_noop,
         ntp_check=_noop,
+        paper_fast_probe=_noop,
         f1=_noop,
         f2=_noop,
         f3=_noop,
@@ -35,6 +38,7 @@ async def test_scheduler_jobs_allow_short_startup_misfires():
         assert set(jobs) == {
             "token_refresh",
             "ntp_check",
+            "paper_fast_probe",
             "f1_filter",
             "f2_lockup",
             "f3_entry",
@@ -50,6 +54,9 @@ async def test_scheduler_jobs_allow_short_startup_misfires():
         )
         assert str(jobs["ntp_check"].trigger) == (
             "cron[day_of_week='mon-fri', hour='8', minute='30', second='10']"
+        )
+        assert str(jobs["paper_fast_probe"].trigger) == (
+            "cron[day_of_week='mon-fri', hour='8', minute='59', second='45']"
         )
     finally:
         scheduler.shutdown(wait=False)

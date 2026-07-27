@@ -19,7 +19,14 @@ import uvicorn  # noqa: E402
 
 from src import db, notifier, state  # noqa: E402
 from src.api import auth, kis_rest, server  # noqa: E402
-from src.modules import f1_filter, f2_lockup, f3_entry, f4_tracking, f5_timeout  # noqa: E402
+from src.modules import (  # noqa: E402
+    f1_filter,
+    f2_lockup,
+    f3_entry,
+    f4_tracking,
+    f5_timeout,
+    paper_fast_probe,
+)
 from src.scheduler import (  # noqa: E402
     F1_H,
     F1_M,
@@ -249,10 +256,27 @@ async def job_f1() -> None:
     await _ensure_trading_day()
     if _is_market_closed_today():
         return
+    try:
+        await paper_fast_probe.observe_open_boundary()
+    except Exception as exc:
+        logger.log(
+            "PAPER_FAST_PROBE_ERROR",
+            level="WARN",
+            phase="OPEN",
+            reason="UNHANDLED",
+            error=repr(exc),
+        )
     if await _skip_entry_pipeline_if_trade_exists("JOB_F1"):
         return
     _f1_result = await f1_filter.run()
     await _run_f2_f3_after_f1(immediate=_past_f3_schedule())
+
+
+async def job_paper_fast_probe() -> None:
+    await _ensure_trading_day()
+    if _is_market_closed_today():
+        return
+    await paper_fast_probe.prepare()
 
 
 async def job_f2() -> None:
@@ -918,6 +942,7 @@ async def main() -> None:
         scheduler = build(
             token_refresh=job_token_refresh,
             ntp_check=job_ntp_check,
+            paper_fast_probe=job_paper_fast_probe,
             f1=job_f1,
             f2=job_f2,
             f3=job_f3,

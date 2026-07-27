@@ -6,6 +6,7 @@ apscheduler 의존이 없는 순수 모듈이므로 어디서든 안전하게 im
 """
 
 F1_H, F1_M = 9, 0
+PAPER_FAST_PROBE_H, PAPER_FAST_PROBE_M, PAPER_FAST_PROBE_S = 8, 59, 45
 F2_H, F2_M = 9, 10
 F3_H, F3_M, F3_S = 9, 10, 10
 F3_FILL_DEADLINE_H, F3_FILL_DEADLINE_M = 9, 11

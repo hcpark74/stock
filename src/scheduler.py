@@ -23,6 +23,9 @@ from src.schedule_times import (  # noqa: F401 — main.py가 이 모듈 경유�
     F5_PRECHECK_H,
     F5_PRECHECK_M,
     F5_PRECHECK_S,
+    PAPER_FAST_PROBE_H,
+    PAPER_FAST_PROBE_M,
+    PAPER_FAST_PROBE_S,
 )
 
 KST = pytz.timezone("Asia/Seoul")
@@ -37,6 +40,7 @@ TRADING_DAYS_OF_WEEK = "mon-fri"
 def build(
     token_refresh: Job,
     ntp_check: Job,
+    paper_fast_probe: Job,
     f1: Job,
     f2: Job,
     f3: Job,
@@ -62,6 +66,16 @@ def build(
     # 08:29:30 — KIS 토큰 선제 갱신, 08:30:10 — NTP 검증
     scheduler.add_job(token_refresh, cron(hour=8, minute=29, second=30), id="token_refresh")
     scheduler.add_job(ntp_check,     cron(hour=8, minute=30, second=10), id="ntp_check")
+
+    scheduler.add_job(
+        paper_fast_probe,
+        cron(
+            hour=PAPER_FAST_PROBE_H,
+            minute=PAPER_FAST_PROBE_M,
+            second=PAPER_FAST_PROBE_S,
+        ),
+        id="paper_fast_probe",
+    )
 
     # F1 — 갭/유동성 필터링
     scheduler.add_job(f1, cron(hour=F1_H, minute=F1_M, second=0), id="f1_filter")

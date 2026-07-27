@@ -190,6 +190,12 @@ F1_MIN_CANDIDATES=10
 F1_EXPECTED_QUOTE_CONCURRENCY=1
 F1_MARKET_INTERVAL_SEC=3.0
 
+# PAPER 전용 Fast Path 관측 프로브(매매 판단/주문에는 영향 없음)
+PAPER_FAST_PROBE=0
+PAPER_FAST_PROBE_DIR=data/paper_fast_probe
+PAPER_FAST_PROBE_OPEN_OFFSET_MS=300
+PAPER_FAST_PROBE_OPEN_MAX_LATENESS_MS=2500
+
 # ── F2: 후보 전멸 시 F1 재시도 ─────────────────
 # 1이면 F2에서 후보가 모두 탈락했을 때 F1 스캔을 다시 시도 (PAPER 실험용)
 F2_RETRY_F1_ON_FAIL=1
@@ -224,6 +230,9 @@ F3_LIMIT_FILL_TIMEOUT_SEC=2.0
 F3_PYRAMID_AT=09:10:40
 F3_PYRAMID_FILL_SEC=10.0
 ```
+
+PAPER Fast Path 관측 범위와 다음 거래일 판정 기준은
+[`docs/PAPER_FAST_PATH_PROBE.md`](docs/PAPER_FAST_PATH_PROBE.md)를 참고하세요.
 
 `F2_RETRY_F1_ON_FAIL`은 모의투자(`PAPER`) 실험용으로 기본 예시에 활성화되어 있습니다. 실계좌(`REAL`) 코드 기본값은 비활성이지만, `.env`에 `F2_RETRY_F1_ON_FAIL=1`이 남아 있으면 명시적으로 켜지므로 REAL 전환 전에는 `0`으로 바꾸세요. F2에서 후보가 모두 제외되면 09:10 전까지만 F1을 다시 시도하며, 데드라인까지 `F2_RETRY_F1_MIN_REMAINING_SEC`보다 적게 남았거나 `DRY_RUN=1`이면 재시도하지 않습니다. 예약된 F2 시각도 09:10이므로 이 재시도는 주로 09:00 F1 직후 체이닝 경로에서 의미가 있습니다.
 

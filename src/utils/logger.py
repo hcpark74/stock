@@ -69,6 +69,22 @@ EVENT_LABELS = {
     "F1_SNAPSHOT_SAVED": "F1 후보 스냅샷 저장(F1 Snapshot Saved)",
     "F1_SNAPSHOT_SAVE_ERROR": "F1 후보 스냅샷 저장 오류(F1 Snapshot Save Error)",
     "F1_SNAPSHOT_ROTATE_ERROR": "F1 후보 스냅샷 정리 오류(F1 Snapshot Rotate Error)",
+    "PAPER_FAST_PROBE_PREOPEN_START": (
+        "PAPER Fast Path 장전 관측 시작(Paper Fast Probe Preopen Start)"
+    ),
+    "PAPER_FAST_PROBE_RANKING": "PAPER Fast Path 순위 관측(Paper Fast Probe Ranking)",
+    "PAPER_FAST_PROBE_MULTI": "PAPER Fast Path 멀티시세 관측(Paper Fast Probe Multi)",
+    "PAPER_FAST_PROBE_PREOPEN_DONE": (
+        "PAPER Fast Path 장전 관측 완료(Paper Fast Probe Preopen Done)"
+    ),
+    "PAPER_FAST_PROBE_OPEN_MULTI": (
+        "PAPER Fast Path 개장 멀티시세 관측(Paper Fast Probe Open Multi)"
+    ),
+    "PAPER_FAST_PROBE_OPEN_DONE": "PAPER Fast Path 개장 관측 완료(Paper Fast Probe Open Done)",
+    "PAPER_FAST_PROBE_OPEN_SKIPPED": (
+        "PAPER Fast Path 개장 관측 생략(Paper Fast Probe Open Skipped)"
+    ),
+    "PAPER_FAST_PROBE_ERROR": "PAPER Fast Path 관측 오류(Paper Fast Probe Error)",
     "NO_TARGET": "대상 종목 없음(No Target)",
     "F2_SKIPPED": "F2 종목 잠금 생략(F2 Skipped)",
     "VI_FILTER_ALL_EXCLUDED": "VI 필터 전부 제외(VI Filter All Excluded)",
@@ -245,5 +261,12 @@ def log(event: str, level: str = "info", ticker: str | None = None, **kwargs) ->
     lvl = getattr(logging, py_level, logging.INFO)
     label = event_label(event)
     name = kwargs.pop("name", None) or _target_name_for(ticker)
-    extra = {"event": event, "event_label": label, "ticker": ticker, "name": name, "level": normalized_level, **kwargs}
+    extra = {
+        "event": event,
+        "event_label": label,
+        "ticker": ticker,
+        "name": name,
+        "level": normalized_level,
+        **kwargs,
+    }
     logger.log(lvl, label, extra={"_extra": extra})
