@@ -23,6 +23,7 @@ def _clear_state() -> None:
     s.trade_id = 0
     s.daily_pnl_pct = 0.0
     s.day_skip = False
+    s.pending_entry = None
 
 
 @pytest.fixture(autouse=True)
@@ -149,6 +150,40 @@ async def test_target_candidates_persist_restore_round_trip(tmp_path):
         {"ticker": "005930", "expected_amount": 10_000.0},
         {"ticker": "000660", "expected_amount": 9_000.0},
     ]
+
+
+async def test_pending_entry_persist_restore_round_trip(tmp_path):
+    s = state.get()
+    s.trading_date = "20260727"
+    s.target_ticker = "006340"
+    s.position_status = "ENTERING"
+    pending = {
+        "order_id": "0000000937",
+        "org_no": "001",
+        "ticker": "006340",
+        "requested_qty": 48,
+        "limit_price": 14_510,
+        "anchor_price": 14_440,
+        "prev_close": 13_730,
+    }
+    await state.set_pending_entry(pending)
+
+    await state.persist(str(tmp_path), "20260727")
+    _clear_state()
+    state.restore_from(state.load(str(tmp_path)))
+
+    assert state.get().position_status == "ENTERING"
+    assert state.get().pending_entry == pending
+
+
+async def test_set_holding_clears_pending_entry():
+    s = state.get()
+    s.position_status = "ENTERING"
+    await state.set_pending_entry({"order_id": "0000000937"})
+
+    await state.set_holding(14_500, 19, "0000000937")
+
+    assert s.pending_entry is None
 
 
 def test_restore_from_legacy_state_without_target_candidates():

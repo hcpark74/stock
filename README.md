@@ -210,12 +210,24 @@ F3_ENTRY_RETRY_FILL_SEC=8.0
 F3_ENTRY_RETRY_DEADLINE=09:11:00
 # 주문 직전 가격 급변이 없는지 확인하는 대기 시간(초)
 F3_PRE_ORDER_QUIET_SEC=1.5
+# 1이면 최종 1호 매도호가를 재조회한 뒤 가격 상한 지정가로만 진입
+F3_LIMIT_BUY_ENABLED=1
+# 재검증 기준가 대비 허용 슬리피지(0.005 = 0.5%)
+F3_MAX_ENTRY_SLIPPAGE_RATIO=0.005
+# 최종 호가를 주문 전송에 사용할 수 있는 최대 나이(ms)
+# PAPER는 1.1초 API 호출 간격을 통과하도록 1500ms 권장(코드 기본값도 1500ms).
+# REAL의 코드 기본값은 500ms이며, 공용 .env 예시는 PAPER 기준이다.
+F3_FINAL_QUOTE_MAX_AGE_MS=1500
+# 상한 지정가 체결 대기 시간(초). 이후 잔량은 취소하고 체결분만 보유
+F3_LIMIT_FILL_TIMEOUT_SEC=2.0
 # 추가 매수(피라미딩) 실행 시각과 체결 대기 시간(초)
 F3_PYRAMID_AT=09:10:40
 F3_PYRAMID_FILL_SEC=10.0
 ```
 
 `F2_RETRY_F1_ON_FAIL`은 모의투자(`PAPER`) 실험용으로 기본 예시에 활성화되어 있습니다. 실계좌(`REAL`) 코드 기본값은 비활성이지만, `.env`에 `F2_RETRY_F1_ON_FAIL=1`이 남아 있으면 명시적으로 켜지므로 REAL 전환 전에는 `0`으로 바꾸세요. F2에서 후보가 모두 제외되면 09:10 전까지만 F1을 다시 시도하며, 데드라인까지 `F2_RETRY_F1_MIN_REMAINING_SEC`보다 적게 남았거나 `DRY_RUN=1`이면 재시도하지 않습니다. 예약된 F2 시각도 09:10이므로 이 재시도는 주로 09:00 F1 직후 체이닝 경로에서 의미가 있습니다.
+
+`F3_LIMIT_BUY_ENABLED`의 코드 기본값은 활성(`1`)입니다. `F3_FINAL_QUOTE_MAX_AGE_MS`를 직접 설정하지 않으면 PAPER는 1500ms, REAL은 500ms를 사용합니다. PAPER에서 1~1499ms를 지정하면 1.1초 REST 호출 간격과 충돌하지 않도록 유효값을 1500ms로 올리며, `0`은 신선도 가드 비활성 의미로 그대로 유지합니다. 공용 `.env` 예시는 PAPER 기준이므로 REAL 전환 시 더 엄격한 500ms를 원하면 명시적으로 변경하세요. `antc_cnpr` 우선순위는 아직 변경하지 않았고, `F3_RECHECK_QUOTE_FIELDS` 로그로 `antc_cnpr`·`stck_prpr`의 실제 응답을 먼저 관측하는 단계입니다.
 
 ### 실행
 

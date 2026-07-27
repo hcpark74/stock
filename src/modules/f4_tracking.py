@@ -466,6 +466,13 @@ async def _trigger_close(price: float, reason: str) -> None:
             if _closing_task is close_task:
                 _closing_task = None
 
+
+async def close_now(price: float, reason: str) -> bool:
+    """F3 비상가드 등 외부 모듈이 동일한 확인 청산 경로를 사용한다."""
+    await _trigger_close(price, reason)
+    return state.get().position_status in {"EXITING", "CLOSED"}
+
+
 async def _persist_tracking_state(force: bool = False) -> bool:
     """Persist in-trade trailing progress with a small throttle."""
     global _last_state_persist_at
@@ -638,7 +645,7 @@ async def _execute_close_impl(price: float, reason: str) -> bool:
                 "SELL",
                 qty,
                 0.0,
-                "CLOSE_SELL",
+                "SLIPPAGE_SELL" if reason == "SLIPPAGE_GUARD" else "CLOSE_SELL",
                 s.target_ticker,
                 s.target_name,
                 trigger_price=price,

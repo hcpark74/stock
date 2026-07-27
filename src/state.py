@@ -33,6 +33,7 @@ class State:
     trade_id: int = 0                   # DB trades.id (0 = 미기록)
     daily_pnl_pct: float = 0.0
     day_skip: bool = False
+    pending_entry: dict | None = None   # 접수 후 체결/취소 대조 전인 매수 주문
 
 
 _state = State()
@@ -62,6 +63,7 @@ def _clear_for_trading_day(date_str: str) -> None:
     _state.trade_id = 0
     _state.daily_pnl_pct = 0.0
     _state.day_skip = False
+    _state.pending_entry = None
 
 
 async def ensure_trading_day(date_str: str) -> bool:
@@ -99,6 +101,23 @@ async def set_holding(entry_price: float, entry_qty: int, order_id: str) -> None
         _state.trailing_active = False
         _state.highest_step = 0.0
         _state.trade_id = 0
+        _state.pending_entry = None
+
+
+async def set_pending_entry(pending: dict) -> None:
+    """ENTERING 주문 식별자를 영속 복구용으로 보관한다."""
+    async with _lock:
+        if _state.position_status not in {"ENTERING", "HOLDING"}:
+            raise RuntimeError(
+                f"pending entry requires ENTERING/HOLDING, got {_state.position_status}"
+            )
+        _state.pending_entry = dict(pending)
+
+
+async def clear_pending_entry() -> None:
+    """체결 완료 또는 취소 확정 후 pending 주문 정보를 제거한다."""
+    async with _lock:
+        _state.pending_entry = None
 
 
 async def set_exiting(reason: str) -> bool:
@@ -145,6 +164,7 @@ async def reset_to_idle(reason: str) -> None:
         _state.target_candidates = None
         _state.entry_at = None
         _state.order_id = None
+        _state.pending_entry = None
         live.clear_tick_history()
 
 
@@ -175,6 +195,7 @@ async def persist(state_dir: str, date_str: str) -> None:
         "trade_id": _state.trade_id,
         "position_status": _state.position_status,
         "close_reason": _state.close_reason,
+        "pending_entry": _state.pending_entry,
     }
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(dst)
@@ -235,3 +256,5 @@ def restore_from(data: dict) -> None:
     _state.trade_id = data.get("trade_id", 0)
     _state.position_status = data.get("position_status", "IDLE")
     _state.close_reason = data.get("close_reason")
+    pending = data.get("pending_entry")
+    _state.pending_entry = dict(pending) if isinstance(pending, dict) else None

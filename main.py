@@ -496,6 +496,42 @@ async def _recover_state() -> None:
             )
         data = None
 
+    if data is not None and isinstance(data.get("pending_entry"), dict):
+        state.restore_from(data)
+        logger.log(
+            "PROCESS_RESTART_DETECTED",
+            level="CRIT",
+            recovered_status="PENDING_ENTRY_RECONCILIATION",
+            recovery_source="STATE_FILE",
+            ticker=data.get("ticker"),
+            order_id=data.get("pending_entry", {}).get("order_id"),
+            entry_blocked=True,
+        )
+        await f3_entry.recover_pending_entry()
+        return
+
+    if data is not None and data.get("position_status") == "ENTERING":
+        state.restore_from(data)
+        state.get().day_skip = True
+        logger.log(
+            "PROCESS_RESTART_DETECTED",
+            level="CRIT",
+            recovered_status="ENTERING_WITHOUT_PENDING_ORDER",
+            recovery_source="STATE_FILE",
+            ticker=data.get("ticker"),
+            entry_blocked=True,
+        )
+        await notifier.send(
+            "PROCESS_RESTART_DETECTED",
+            level="CRIT",
+            message=(
+                f"재시작 시 주문 식별자 없는 ENTERING 상태 발견: "
+                f"{data.get('ticker')}. 계좌 주문/잔고 확인 필요"
+            ),
+            ticker=data.get("ticker"),
+        )
+        return
+
     if data is not None and data.get("position_status") == "EXITING":
         state.restore_from(data)
         state.get().day_skip = True

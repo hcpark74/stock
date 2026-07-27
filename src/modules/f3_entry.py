@@ -1,10 +1,14 @@
 """F3. 진입 주문 모듈 (09:10 이후) — PRD §F3"""
 
+from __future__ import annotations
+
 import asyncio
 import os
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from src import db, notifier, state
@@ -35,6 +39,41 @@ F3_ENTRY_FIRST_FILL_SEC = float(os.getenv("F3_ENTRY_FIRST_FILL_SEC", "12.0"))
 F3_ENTRY_RETRY_FILL_SEC = float(os.getenv("F3_ENTRY_RETRY_FILL_SEC", "8.0"))
 F3_ENTRY_RETRY_DEADLINE = os.getenv("F3_ENTRY_RETRY_DEADLINE", "09:11:00")
 F3_PRE_ORDER_QUIET_SEC = float(os.getenv("F3_PRE_ORDER_QUIET_SEC", "1.5"))
+F3_LIMIT_BUY_ENABLED = os.getenv("F3_LIMIT_BUY_ENABLED", "1") == "1"
+F3_MAX_ENTRY_SLIPPAGE_RATIO = max(
+    0.0,
+    float(os.getenv("F3_MAX_ENTRY_SLIPPAGE_RATIO", "0.005")),
+)
+
+
+def _default_final_quote_max_age_ms(mode: str) -> int:
+    """PAPER 1.1초 호출 간격을 통과시키되 REAL은 더 엄격하게 유지한다."""
+    return 1_500 if mode == "PAPER" else 500
+
+
+def _effective_final_quote_max_age_ms(mode: str, configured_ms: int) -> int:
+    """PAPER에서 양수 신선도 가드가 REST 호출 간격보다 짧아지지 않게 한다."""
+    configured_ms = max(0, configured_ms)
+    if mode == "PAPER" and configured_ms > 0:
+        return max(configured_ms, _default_final_quote_max_age_ms(mode))
+    return configured_ms
+
+
+_KIS_MODE = os.getenv("KIS_MODE", "PAPER")
+_F3_FINAL_QUOTE_MAX_AGE_MS_CONFIGURED = int(
+    os.getenv(
+        "F3_FINAL_QUOTE_MAX_AGE_MS",
+        str(_default_final_quote_max_age_ms(_KIS_MODE)),
+    )
+)
+F3_FINAL_QUOTE_MAX_AGE_MS = _effective_final_quote_max_age_ms(
+    _KIS_MODE,
+    _F3_FINAL_QUOTE_MAX_AGE_MS_CONFIGURED,
+)
+F3_LIMIT_FILL_TIMEOUT_SEC = max(
+    0.1,
+    float(os.getenv("F3_LIMIT_FILL_TIMEOUT_SEC", "2.0")),
+)
 F3_RECHECK_MAX_ATTEMPTS = max(1, int(os.getenv("F3_RECHECK_MAX_ATTEMPTS", "3")))
 F3_RECHECK_RETRY_DELAY_SEC = float(os.getenv("F3_RECHECK_RETRY_DELAY_SEC", "1.0"))
 F3_RECHECK_BATCH_TIMEOUT_SEC = float(os.getenv("F3_RECHECK_BATCH_TIMEOUT_SEC", "0"))
@@ -57,6 +96,67 @@ def _fill_gap_reaches_max(fill_gap: float) -> bool:
     return fill_gap >= GAP_MAX_FILL
 
 
+def _tick_size(price: float, api_tick_size: float = 0.0) -> int:
+    """KRX 주권 호가단위. API aspr_unit이 유효하면 그 값을 우선한다."""
+    if api_tick_size > 0:
+        return max(1, int(api_tick_size))
+    if price < 2_000:
+        return 1
+    if price < 5_000:
+        return 5
+    if price < 20_000:
+        return 10
+    if price < 50_000:
+        return 50
+    if price < 200_000:
+        return 100
+    if price < 500_000:
+        return 500
+    return 1_000
+
+
+def _floor_to_tick(price: float, api_tick_size: float = 0.0) -> float:
+    tick = _tick_size(price, api_tick_size)
+    return float(int(price // tick) * tick)
+
+
+def _strict_gap_cap(prev_close: float, api_tick_size: float = 0.0) -> float:
+    """GAP_MAX_ORDER 미만인 마지막 유효 매수가를 반환한다."""
+    raw_cap = prev_close * (1 + GAP_MAX_ORDER)
+    cap = _floor_to_tick(raw_cap, api_tick_size)
+    tick = _tick_size(cap or raw_cap, api_tick_size)
+    # 부동소수점 비율 비교는 10,650/10,000이 0.065보다 작게 표현될 수
+    # 있다. 원 단위 상한 자체와 비교해 정확히 경계에 놓인 호가는 한 틱 내린다.
+    if prev_close > 0 and cap >= raw_cap:
+        cap -= tick
+    return max(0.0, cap)
+
+
+def _entry_limit_price(
+    anchor_price: float,
+    prev_close: float,
+    api_tick_size: float = 0.0,
+) -> tuple[float, float, float]:
+    """슬리피지 상한과 갭 상한 중 더 낮은 유효 호가를 선택한다."""
+    slippage_cap = _floor_to_tick(
+        anchor_price * (1 + F3_MAX_ENTRY_SLIPPAGE_RATIO),
+        api_tick_size,
+    )
+    gap_cap = _strict_gap_cap(prev_close, api_tick_size)
+    return min(slippage_cap, gap_cap), slippage_cap, gap_cap
+
+
+def _quote_age_ms(quote: EntryQuote) -> int:
+    return max(0, round((time.monotonic() - quote.fetched_monotonic) * 1000))
+
+
+def _quote_is_fresh(quote: EntryQuote) -> bool:
+    return (
+        F3_FINAL_QUOTE_MAX_AGE_MS <= 0
+        or _quote_age_ms(quote) <= F3_FINAL_QUOTE_MAX_AGE_MS
+    )
+
+
 # KIS TR ID (PAPER/REAL 분기) — 신TR 기준
 _BUY_TR    = {"REAL": "TTTC0012U", "PAPER": "VTTC0012U"}
 _SELL_TR   = {"REAL": "TTTC0011U", "PAPER": "VTTC0011U"}
@@ -67,10 +167,61 @@ _BUY_PSBL_TR = {"REAL": "TTTC8908R", "PAPER": "VTTC8908R"}
 
 _last_fill_poll_summary: dict = {}
 _pending_buy_org_no: str = ""  # 매수 주문 후 저장, 취소 시 사용
-_CANDIDATE_RETRY_REASONS = {"ORDER_REJECTED", "BUYABLE_QTY_ZERO", "QTY_ZERO", "VI_ACTIVE"}
-_EXPECTED_CANDIDATE_REJECTIONS = {"BUYABLE_QTY_ZERO", "QTY_ZERO", "VI_ACTIVE"}
+_CANDIDATE_RETRY_REASONS = {
+    "ORDER_REJECTED",
+    "BUYABLE_QTY_ZERO",
+    "QTY_ZERO",
+    "VI_ACTIVE",
+    "PRICE_CAP_EXCEEDED",
+    "FINAL_QUOTE_UNAVAILABLE",
+    "FINAL_QUOTE_STALE",
+    "GAP_CHANGED",
+}
+_EXPECTED_CANDIDATE_REJECTIONS = {
+    "BUYABLE_QTY_ZERO",
+    "QTY_ZERO",
+    "VI_ACTIVE",
+    "PRICE_CAP_EXCEEDED",
+    "GAP_CHANGED",
+}
 # KIS "모의투자 영업일이 아닙니다" — CTCA0903R이 모의투자 미지원이라 주문 거부가 유일한 휴장 신호
 _MARKET_CLOSED_MSG_CD = "40100000"
+
+
+@dataclass(frozen=True)
+class EntryQuote:
+    ask_price: float
+    ask_qty: int
+    antc_price: float
+    fetched_monotonic: float
+    rt_cd: str
+    msg_cd: str
+    msg1: str
+
+
+@dataclass(frozen=True)
+class FillSnapshot:
+    status: Literal["UNFILLED", "PARTIAL", "FILLED"]
+    order_qty: int
+    fill_qty: int
+    remaining_qty: int
+    fill_price: float
+
+    def as_fill(self) -> dict:
+        return {
+            "status": self.status,
+            "order_qty": self.order_qty,
+            "fill_qty": self.fill_qty,
+            "remaining_qty": self.remaining_qty,
+            "fill_price": self.fill_price,
+        }
+
+
+def _more_complete_fill(first: dict | None, second: dict | None) -> dict | None:
+    """취소 경쟁 중 누적체결이 증가할 수 있으므로 더 큰 누적값을 선택한다."""
+    first_qty = int((first or {}).get("fill_qty") or 0)
+    second_qty = int((second or {}).get("fill_qty") or 0)
+    return second if second_qty >= first_qty else first
 
 
 def _is_market_closed_rejection(resp: dict) -> bool:
@@ -227,10 +378,270 @@ async def run(force: bool = False) -> None:
     )
 
 
+async def _fail_pending_entry_recovery(
+    pending: dict,
+    *,
+    ticker: str | None,
+    order_id: str | None,
+    reason: str,
+    error: Exception | None = None,
+) -> bool:
+    """복구 실패 상태를 보존하고 신규 진입을 fail-closed로 차단한다."""
+    state.get().day_skip = True
+    log(
+        "PENDING_ENTRY_RECOVERY_FAILED",
+        level="CRIT",
+        ticker=ticker,
+        order_id=order_id,
+        reason=reason,
+        error=repr(error) if error is not None else None,
+        pending_entry=pending,
+    )
+    await notifier.send(
+        "ENTRY_CANCEL_UNCONFIRMED",
+        level="CRIT",
+        message=(
+            f"재시작 매수 주문 복구 실패({reason}): "
+            f"{ticker or '-'} 주문 {order_id or '-'}. 신규 진입을 차단했습니다."
+        ),
+        ticker=ticker,
+    )
+    try:
+        await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
+    except Exception as persist_error:
+        log(
+            "ENTRY_PENDING_PERSIST_ERROR",
+            level="CRIT",
+            ticker=ticker,
+            order_id=order_id,
+            error=repr(persist_error),
+        )
+    try:
+        await db.record_skip(
+            _today(),
+            "ENTRY_FAIL",
+            f"reason=PENDING_ENTRY_{reason},order_id={order_id or ''}",
+        )
+    except Exception as db_error:
+        log(
+            "PENDING_ENTRY_RECOVERY_FAILED",
+            level="CRIT",
+            ticker=ticker,
+            order_id=order_id,
+            reason="SKIP_RECORD_FAILED",
+            error=repr(db_error),
+        )
+    return False
+
+
+async def recover_pending_entry() -> bool:
+    """재시작 시 살아 있을 수 있는 매수 주문을 취소·최종 대조한다."""
+    s = state.get()
+    pending = s.pending_entry or {}
+    order_id = str(pending.get("order_id") or "")
+    org_no = str(pending.get("org_no") or "")
+    ticker = str(pending.get("ticker") or s.target_ticker or "")
+    requested_qty = int(pending.get("requested_qty") or 0)
+    phase = str(pending.get("phase") or "ENTRY")
+    mode = os.getenv("KIS_MODE", "PAPER")
+    if not order_id or not ticker or requested_qty <= 0:
+        return await _fail_pending_entry_recovery(
+            pending,
+            ticker=ticker or None,
+            order_id=order_id or None,
+            reason="INVALID_PENDING_STATE",
+        )
+
+    try:
+        fill = await _fetch_order_fill_snapshot(
+            order_id,
+            ticker=ticker,
+            expected_qty=requested_qty,
+        )
+        cancel_outcome = "FILLED"
+        if not fill or int(fill.get("fill_qty") or 0) < requested_qty:
+            cancel_outcome, fill = await _cancel_entry_order_confirmed(
+                order_id,
+                org_no,
+                mode,
+                ticker,
+                int(pending.get("attempt") or 1),
+                int(pending.get("attempt") or 1),
+                expected_qty=requested_qty,
+                known_fill=fill,
+            )
+    except Exception as exc:
+        return await _fail_pending_entry_recovery(
+            pending,
+            ticker=ticker,
+            order_id=order_id,
+            reason="RECONCILIATION_ERROR",
+            error=exc,
+        )
+
+    if not fill or int(fill.get("fill_qty") or 0) < requested_qty:
+        if cancel_outcome != "CANCELLED" and not (
+            fill and int(fill.get("fill_qty") or 0) >= requested_qty
+        ):
+            return await _fail_pending_entry_recovery(
+                pending,
+                ticker=ticker,
+                order_id=order_id,
+                reason="CANCEL_UNCONFIRMED",
+            )
+
+    fill_qty = int((fill or {}).get("fill_qty") or 0)
+    if fill_qty <= 0:
+        await state.clear_pending_entry()
+        if phase == "PYRAMID" and s.position_status == "HOLDING":
+            await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
+            log(
+                "PENDING_ENTRY_RECOVERED",
+                level="WARN",
+                ticker=ticker,
+                order_id=order_id,
+                recovered_status="PYRAMID_CANCELLED_NO_FILL",
+            )
+            return True
+        await state.reset_to_idle("ENTRY_FAIL")
+        state.get().day_skip = True
+        await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
+        await db.record_skip(
+            _today(),
+            "ENTRY_FAIL",
+            f"reason=PENDING_ENTRY_RECOVERED_NO_FILL,order_id={order_id}",
+        )
+        log(
+            "PENDING_ENTRY_RECOVERED",
+            level="WARN",
+            ticker=ticker,
+            order_id=order_id,
+            recovered_status="CANCELLED_NO_FILL",
+        )
+        return True
+
+    fill_price = float(fill.get("fill_price") or 0)
+    if fill_price <= 0:
+        return await _fail_pending_entry_recovery(
+            pending,
+            ticker=ticker,
+            order_id=order_id,
+            reason="INVALID_FILL_PRICE",
+        )
+    limit_price = float(pending.get("limit_price") or 0)
+    anchor_price = float(pending.get("anchor_price") or 0)
+    prev_close = float(pending.get("prev_close") or 0)
+    partial = fill_qty < requested_qty
+
+    existing_order = await db.get_order_by_kis_id(
+        order_id,
+        date=_today(),
+        ticker=ticker,
+    )
+    if phase == "PYRAMID" and s.position_status == "HOLDING" and s.trade_id:
+        s.entry_qty = int(s.entry_qty or 0) + fill_qty
+        s.remaining_qty = int(s.remaining_qty or 0) + fill_qty
+        order_db_id = int(existing_order["id"]) if existing_order else (
+            await db.record_order(
+                s.trade_id,
+                order_id,
+                "BUY",
+                requested_qty,
+                limit_price,
+                "PYRAMID_BUY",
+                ticker,
+                s.target_name,
+                trigger_price=anchor_price,
+            )
+        )
+        await db.update_order_fill(
+            order_db_id,
+            fill_price,
+            fill_qty,
+            None,
+            status="PARTIAL_FILL" if partial else "FILLED",
+        )
+        await db.mark_pyramided(s.trade_id)
+    else:
+        existing_trade = await db.get_trade_by_date(_today())
+        if existing_trade and existing_trade.get("ticker") != ticker:
+            return await _fail_pending_entry_recovery(
+                pending,
+                ticker=ticker,
+                order_id=order_id,
+                reason="TRADE_TICKER_CONFLICT",
+            )
+        await state.set_holding(fill_price, fill_qty, order_id)
+        trade_id = await db.open_trade(
+            _today(),
+            ticker,
+            fill_price,
+            fill_qty,
+            name=state.get().target_name,
+        )
+        state.get().trade_id = trade_id
+        order_db_id = int(existing_order["id"]) if existing_order else (
+            await db.record_order(
+                trade_id,
+                order_id,
+                "BUY",
+                requested_qty,
+                limit_price,
+                "FIRST_BUY",
+                ticker,
+                state.get().target_name,
+                trigger_price=anchor_price,
+            )
+        )
+        await db.update_order_fill(
+            order_db_id,
+            fill_price,
+            fill_qty,
+            None,
+            status="PARTIAL_FILL" if partial else "FILLED",
+        )
+
+    await state.clear_pending_entry()
+    await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
+    log(
+        "PENDING_ENTRY_RECOVERED",
+        level="CRIT",
+        ticker=ticker,
+        order_id=order_id,
+        recovered_status="PARTIAL_HOLDING" if partial else "HOLDING",
+        requested_qty=requested_qty,
+        fill_qty=fill_qty,
+        fill_price=fill_price,
+        cancel_outcome=cancel_outcome,
+    )
+    await notifier.send(
+        "PROCESS_RESTART_DETECTED",
+        level="CRIT",
+        message=f"재시작 매수 주문 대조 완료: {ticker} {fill_qty}주 @ {fill_price:g}",
+        ticker=ticker,
+    )
+
+    guard_breached = (
+        (prev_close > 0 and _fill_gap_reaches_max(fill_price / prev_close - 1))
+        or (limit_price > 0 and fill_price > limit_price)
+        or (
+            anchor_price > 0
+            and fill_price / anchor_price - 1 > F3_MAX_ENTRY_SLIPPAGE_RATIO
+        )
+    )
+    if guard_breached:
+        state.get().day_skip = True
+        from src.modules import f4_tracking
+
+        await f4_tracking.close_now(fill_price, "SLIPPAGE_GUARD")
+    return True
+
+
 async def _run_single(force: bool = False, picked: dict | None = None, allow_candidate_retry: bool = False) -> str | None:
     """
-    갭 재검증 후 설정된 시각에 배정 수량 100% 시장가 매수,
-    체결 확인 / 슬리피지 가드, 2차 30% 피라미딩을 수행한다.
+    갭 재검증 후 설정된 시각에 배정 수량을 가격 상한 지정가로 매수하고,
+    체결 확인 / 잔량 취소 / 슬리피지 가드 / 선택적 피라미딩을 수행한다.
+    F3_LIMIT_BUY_ENABLED=0일 때만 하위 호환용 시장가 경로를 사용한다.
     force=True: FORCE_CATCHUP 모드. 시각 제약 없이 실행, fill 마감을 실행 시점 +30초로 설정.
     """
     s = state.get()
@@ -442,6 +853,8 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
     max_attempts = F3_ENTRY_MAX_ATTEMPTS if not force else 1
     last_run_attempt = 0
     last_entry_fail_reason = "UNFILLED"
+    submitted_order_price = 0.0
+    fill_was_partial = False
     for attempt in range(1, max_attempts + 1):
         if attempt > 1:
             if not _before_deadline(_entry_retry_deadline()):
@@ -623,17 +1036,112 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
             await _block_entry_deadline_passed(ticker, "AT_ORDER")
             return
 
+        entry_quote: EntryQuote | None = None
+        slippage_cap = 0.0
+        gap_cap = 0.0
+        if F3_LIMIT_BUY_ENABLED:
+            entry_quote = await _fetch_final_entry_quote(ticker)
+            if entry_quote is None:
+                return await _reject_final_entry_price(
+                    ticker,
+                    "FINAL_QUOTE_UNAVAILABLE",
+                    allow_candidate_retry=allow_candidate_retry,
+                    anchor_price=expected_price,
+                    prev_close=prev_close,
+                )
+
+            quote_age_ms = _quote_age_ms(entry_quote)
+            if not _quote_is_fresh(entry_quote):
+                return await _reject_final_entry_price(
+                    ticker,
+                    "FINAL_QUOTE_STALE",
+                    allow_candidate_retry=allow_candidate_retry,
+                    anchor_price=expected_price,
+                    prev_close=prev_close,
+                    ask_price=entry_quote.ask_price,
+                    quote_age_ms=quote_age_ms,
+                )
+
+            submitted_order_price, slippage_cap, gap_cap = _entry_limit_price(
+                expected_price,
+                prev_close,
+            )
+            fresh_gap = (entry_quote.ask_price / prev_close) - 1
+            if not _gap_in_order_range(fresh_gap):
+                return await _reject_final_entry_price(
+                    ticker,
+                    "GAP_CHANGED",
+                    allow_candidate_retry=allow_candidate_retry,
+                    anchor_price=expected_price,
+                    prev_close=prev_close,
+                    ask_price=entry_quote.ask_price,
+                    limit_price=submitted_order_price,
+                    quote_age_ms=quote_age_ms,
+                    fresh_gap=fresh_gap,
+                )
+            if entry_quote.ask_price > submitted_order_price:
+                return await _reject_final_entry_price(
+                    ticker,
+                    "PRICE_CAP_EXCEEDED",
+                    allow_candidate_retry=allow_candidate_retry,
+                    anchor_price=expected_price,
+                    prev_close=prev_close,
+                    ask_price=entry_quote.ask_price,
+                    limit_price=submitted_order_price,
+                    quote_age_ms=quote_age_ms,
+                    fresh_gap=fresh_gap,
+                )
+            log(
+                "ENTRY_PRICE_APPROVED",
+                level="INFO",
+                ticker=ticker,
+                anchor_price=expected_price,
+                ask_price=entry_quote.ask_price,
+                ask_qty=entry_quote.ask_qty,
+                limit_price=submitted_order_price,
+                slippage_cap_price=slippage_cap,
+                gap_cap_price=gap_cap,
+                quote_age_ms=quote_age_ms,
+                entry_attempt=attempt,
+            )
+        else:
+            submitted_order_price = 0.0
+
+        def _send_allowed() -> bool:
+            deadline_ok = force or _before_deadline(_entry_retry_deadline())
+            quote_ok = entry_quote is None or _quote_is_fresh(entry_quote)
+            return deadline_ok and quote_ok
+
         order_started_at = time.perf_counter()
-        if force:
+        if F3_LIMIT_BUY_ENABLED:
+            order_resp = await _send_buy(
+                ticker,
+                first_qty,
+                mode,
+                limit_price=submitted_order_price,
+                send_guard=_send_allowed,
+            )
+        elif force:
             order_resp = await _send_buy(ticker, first_qty, mode)
         else:
             order_resp = await _send_buy(
                 ticker,
                 first_qty,
                 mode,
-                send_guard=lambda: _before_deadline(_entry_retry_deadline()),
+                send_guard=_send_allowed,
             )
         if order_resp.get("msg_cd") == kis_rest.SEND_GUARD_BLOCKED_MSG_CD:
+            if entry_quote is not None and not _quote_is_fresh(entry_quote):
+                return await _reject_final_entry_price(
+                    ticker,
+                    "FINAL_QUOTE_STALE",
+                    allow_candidate_retry=allow_candidate_retry,
+                    anchor_price=expected_price,
+                    prev_close=prev_close,
+                    ask_price=entry_quote.ask_price,
+                    limit_price=submitted_order_price,
+                    quote_age_ms=_quote_age_ms(entry_quote),
+                )
             await state.reset_to_idle("ENTRY_FAIL")
             await _block_entry_deadline_passed(ticker, "AT_HTTP_SEND")
             return
@@ -645,10 +1153,12 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
             ticker=ticker,
             order_id=order_id,
             org_no=_pending_buy_org_no,
-            order_price=0.0,
+            order_price=submitted_order_price,
             trigger_price=expected_price,
             order_qty=first_qty,
-            order_type="MARKET",
+            order_type="LIMIT" if F3_LIMIT_BUY_ENABLED else "MARKET",
+            slippage_cap_price=slippage_cap or None,
+            gap_cap_price=gap_cap or None,
             mode=mode,
             entry_attempt=attempt,
             max_attempts=max_attempts,
@@ -715,30 +1225,90 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
             )
             return "ORDER_REJECTED"
 
-        fill_deadline = _entry_fill_deadline(attempt, force)
-        fill = await _poll_fill(order_id, deadline=fill_deadline, ticker=ticker)
-        if fill:
+        if F3_LIMIT_BUY_ENABLED:
+            await state.set_pending_entry({
+                "order_id": order_id,
+                "org_no": _pending_buy_org_no,
+                "ticker": ticker,
+                "requested_qty": first_qty,
+                "limit_price": submitted_order_price,
+                "anchor_price": expected_price,
+                "prev_close": prev_close,
+                "attempt": attempt,
+                "sent_at": datetime.now(KST).isoformat(),
+            })
+            try:
+                await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
+            except Exception as exc:
+                log(
+                    "ENTRY_PENDING_PERSIST_ERROR",
+                    level="CRIT",
+                    ticker=ticker,
+                    order_id=order_id,
+                    error=repr(exc),
+                )
+                await notifier.send(
+                    "ENTRY_CANCEL_UNCONFIRMED",
+                    level="CRIT",
+                    message=(
+                        f"진입 주문 복구정보 저장 실패. 주문 {order_id}를 취소·확인합니다."
+                    ),
+                    ticker=ticker,
+                )
+
+        fill_deadline = (
+            _deadline_after_seconds(F3_LIMIT_FILL_TIMEOUT_SEC)
+            if F3_LIMIT_BUY_ENABLED
+            else _entry_fill_deadline(attempt, force)
+        )
+        fill = await _poll_fill(
+            order_id,
+            deadline=fill_deadline,
+            ticker=ticker,
+            expected_qty=first_qty,
+        )
+        if fill and int(fill.get("fill_qty") or 0) >= first_qty:
             fill_latency_ms = max(
                 0,
                 round((time.perf_counter() - order_started_at) * 1000),
             )
+            await state.clear_pending_entry()
             break
 
         cancel_outcome, late_fill = await _cancel_entry_order_confirmed(
-            order_id, _pending_buy_org_no, mode, ticker, attempt, max_attempts,
+            order_id,
+            _pending_buy_org_no,
+            mode,
+            ticker,
+            attempt,
+            max_attempts,
+            expected_qty=first_qty,
+            known_fill=fill,
         )
         if late_fill:
-            # 취소 거부 원인이 기체결 — 재주문 없이 체결 처리로 넘어간다.
+            # 부분체결 잔량 취소 또는 취소 경쟁 중 체결. 재주문하지 않는다.
             fill = late_fill
             fill_latency_ms = max(
                 0,
                 round((time.perf_counter() - order_started_at) * 1000),
             )
+            fill_was_partial = int(fill.get("fill_qty") or 0) < first_qty
+            await state.clear_pending_entry()
+            log(
+                "ENTRY_FILL_RECONCILED",
+                level="WARN" if fill_was_partial else "INFO",
+                ticker=ticker,
+                order_id=order_id,
+                order_qty=first_qty,
+                fill_qty=fill.get("fill_qty"),
+                remaining_qty=max(0, first_qty - int(fill.get("fill_qty") or 0)),
+                cancel_outcome=cancel_outcome,
+            )
             break
         if cancel_outcome != "CANCELLED":
             # 취소 확인 실패 — 미체결 주문이 살아 있을 수 있다. 재주문·후보
             # 전환·IDLE 전환 모두 금지하고(중복 포지션 위험) ENTERING을 유지한
-            # 채 운영자 수동 확인으로 넘긴다.
+            # 채 pending 복구 경로로 즉시 한 번 더 대조한다.
             state.get().day_skip = True
             _log_entry_blocked(
                 ticker,
@@ -747,6 +1317,9 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
                 entry_attempt=attempt,
                 max_attempts=max_attempts,
             )
+            if F3_LIMIT_BUY_ENABLED and state.get().pending_entry:
+                await recover_pending_entry()
+                return
             await notifier.send(
                 "ENTRY_CANCEL_UNCONFIRMED",
                 level="ERROR",
@@ -762,6 +1335,8 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
                 f"reason=CANCEL_UNCONFIRMED,order_id={order_id},entry_attempt={attempt}",
             )
             return
+        await state.clear_pending_entry()
+        await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
         if attempt < max_attempts and F3_ENTRY_CANCEL_RELEASE_WAIT_SEC > 0:
             log(
                 "ENTRY_CANCEL_RELEASE_WAIT",
@@ -796,60 +1371,104 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
     fill_price: float = fill["fill_price"]
     fill_qty: int = fill["fill_qty"]
 
-    # ── 슬리피지 가드: 체결가 기준 갭이 체결 상한을 벗어나면 청산 ────
-    fill_gap = (fill_price / prev_close) - 1
-    if _fill_gap_reaches_max(fill_gap):
-        slippage_pct = (fill_price / expected_price - 1) * 100
-        log("SLIPPAGE_GUARD", level="WARN", ticker=ticker,
-            expected_price=expected_price, fill_price=fill_price,
-            prev_close=prev_close,
-            fill_gap_pct=round(fill_gap * 100, 3),
-            gap_max_pct=round(GAP_MAX_FILL * 100, 2),
-            slippage_pct=round(slippage_pct, 3))
-        await notifier.send(
-            "SLIPPAGE_GUARD", level="WARN",
-            message=(
-                f"체결가 갭 {fill_gap * 100:.2f}%가 상한 "
-                f"{GAP_MAX_FILL * 100:.1f}% 이상. 즉시 청산."
-            ),
-            ticker=ticker)
-        await _send_sell(ticker, fill_qty, mode)
-        s.day_skip = True
-        s.close_reason = "SLIPPAGE_GUARD"
-        await db.record_skip(
-            _today(), "SLIPPAGE_GUARD",
-            f"expected={expected_price},fill={fill_price},"
-            f"prev_close={prev_close},fill_gap_pct={round(fill_gap * 100, 3)}",
-        )
-        return
-
     # ── HOLDING 전환 + DB 기록 + 영속화 ──────────────────────────────
     await state.set_holding(fill_price, fill_qty, order_id)
     trade_id = await db.open_trade(
         _today(), ticker, fill_price, fill_qty, name=state.get().target_name,
     )
     state.get().trade_id = trade_id
-    # 시장가 주문의 제출 가격은 0이고, 슬리피지 기준 예상가는 trigger_price에 분리한다.
     order_db_id = await db.record_order(
         trade_id,
         order_id,
         "BUY",
-        fill_qty,
-        0.0,
+        first_qty,
+        submitted_order_price,
         "FIRST_BUY",
         ticker,
         state.get().target_name,
         trigger_price=expected_price,
     )
-    await db.update_order_fill(order_db_id, fill_price, fill_qty, fill_latency_ms)
+    await db.update_order_fill(
+        order_db_id,
+        fill_price,
+        fill_qty,
+        fill_latency_ms,
+        status="PARTIAL_FILL" if fill_was_partial or fill_qty < first_qty else "FILLED",
+    )
     await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
     log("ENTRY_EXECUTED", level="INFO", ticker=ticker,
-        order_id=order_id, order_price=0.0, trigger_price=expected_price,
+        order_id=order_id, order_price=submitted_order_price, trigger_price=expected_price,
         order_qty=first_qty, fill_price=fill_price, fill_qty=fill_qty,
+        remaining_order_qty=max(0, first_qty - fill_qty),
+        partial_fill=fill_was_partial or fill_qty < first_qty,
         fill_latency_ms=fill_latency_ms)
     await notifier.send("ENTRY_EXECUTED", level="INFO",
                         message=f"진입: {ticker} {fill_qty}주 @ {fill_price:,}원",
                         ticker=ticker)
+
+    # ── 체결 후 이중 가드. 포지션/DB를 먼저 기록한 뒤 확인 가능한 청산 경로 사용 ──
+    fill_gap = (fill_price / prev_close) - 1
+    direct_slippage = (fill_price / expected_price) - 1
+    limit_breached = (
+        F3_LIMIT_BUY_ENABLED
+        and submitted_order_price > 0
+        and fill_price > submitted_order_price
+    )
+    direct_slippage_breached = (
+        F3_LIMIT_BUY_ENABLED
+        and direct_slippage > F3_MAX_ENTRY_SLIPPAGE_RATIO
+    )
+    if (
+        _fill_gap_reaches_max(fill_gap)
+        or limit_breached
+        or direct_slippage_breached
+    ):
+        reasons = []
+        if _fill_gap_reaches_max(fill_gap):
+            reasons.append("FILL_GAP")
+        if limit_breached:
+            reasons.append("LIMIT_PRICE")
+        if direct_slippage_breached:
+            reasons.append("DIRECT_SLIPPAGE")
+        log(
+            "SLIPPAGE_GUARD",
+            level="WARN",
+            ticker=ticker,
+            expected_price=expected_price,
+            submitted_limit_price=submitted_order_price,
+            fill_price=fill_price,
+            prev_close=prev_close,
+            fill_gap_pct=round(fill_gap * 100, 3),
+            gap_max_pct=round(GAP_MAX_FILL * 100, 2),
+            slippage_pct=round(direct_slippage * 100, 3),
+            slippage_max_pct=round(F3_MAX_ENTRY_SLIPPAGE_RATIO * 100, 3),
+            guard_reasons=reasons,
+        )
+        state.get().day_skip = True
+        await notifier.send(
+            "SLIPPAGE_GUARD",
+            level="WARN",
+            message=(
+                f"체결 안전상한 위반({','.join(reasons)}). "
+                f"{ticker} {fill_qty}주 확인 청산을 시작합니다."
+            ),
+            ticker=ticker,
+        )
+        await db.record_skip(
+            _today(),
+            "SLIPPAGE_GUARD",
+            (
+                f"expected={expected_price},limit={submitted_order_price},"
+                f"fill={fill_price},prev_close={prev_close},"
+                f"fill_gap_pct={round(fill_gap * 100, 3)},"
+                f"slippage_pct={round(direct_slippage * 100, 3)},"
+                f"reasons={'+'.join(reasons)}"
+            ),
+        )
+        from src.modules import f4_tracking
+
+        await f4_tracking.close_now(fill_price, "SLIPPAGE_GUARD")
+        return
 
     # 2nd buy is inactive while FIRST_RATIO is 1.00.
     if second_qty <= 0:
@@ -871,14 +1490,118 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
     current_price = await _fetch_current_price(ticker)
     if second_qty > 0 and current_price and current_price >= fill_price * (1 + PYRAMID_MIN_UP):
         await _pre_order_quiet_wait(ticker, 1, 1, current_price, second_qty, phase="PYRAMID")
+        py_limit_price = 0.0
+        if F3_LIMIT_BUY_ENABLED:
+            py_quote = await _fetch_final_entry_quote(ticker)
+            if py_quote is None:
+                log(
+                    "PYRAMID_SKIPPED",
+                    level="WARN",
+                    ticker=ticker,
+                    reason="FINAL_QUOTE_UNAVAILABLE",
+                )
+                return
+            py_limit_price, py_slippage_cap, py_gap_cap = _entry_limit_price(
+                current_price,
+                prev_close,
+            )
+            py_gap = (py_quote.ask_price / prev_close) - 1
+            if (
+                not _quote_is_fresh(py_quote)
+                or not _gap_in_order_range(py_gap)
+                or py_quote.ask_price > py_limit_price
+            ):
+                log(
+                    "PYRAMID_SKIPPED",
+                    level="INFO",
+                    ticker=ticker,
+                    reason="PRICE_CAP_EXCEEDED",
+                    anchor_price=current_price,
+                    ask_price=py_quote.ask_price,
+                    limit_price=py_limit_price,
+                    slippage_cap_price=py_slippage_cap,
+                    gap_cap_price=py_gap_cap,
+                    quote_age_ms=_quote_age_ms(py_quote),
+                )
+                return
         py_order_started_at = time.perf_counter()
-        py_resp = await _send_buy(ticker, second_qty, mode)
+        if F3_LIMIT_BUY_ENABLED:
+            py_resp = await _send_buy(
+                ticker,
+                second_qty,
+                mode,
+                limit_price=py_limit_price,
+                send_guard=lambda: _quote_is_fresh(py_quote),
+            )
+        else:
+            py_resp = await _send_buy(ticker, second_qty, mode)
         py_id     = py_resp.get("output", {}).get("ODNO", "")
         py_org_no = py_resp.get("output", {}).get("KRX_FWDG_ORD_ORGNO", "")
-        py_fill = await _poll_fill(py_id, deadline=_pyramid_fill_deadline(), ticker=ticker)
+        if not py_id or str(py_resp.get("rt_cd", "0")) != "0":
+            log(
+                "PYRAMID_SKIPPED",
+                level="WARN",
+                ticker=ticker,
+                reason="ORDER_REJECTED",
+                rt_cd=py_resp.get("rt_cd"),
+                msg_cd=py_resp.get("msg_cd"),
+                msg1=py_resp.get("msg1"),
+            )
+            return
+        if F3_LIMIT_BUY_ENABLED:
+            await state.set_pending_entry({
+                "order_id": py_id,
+                "org_no": py_org_no,
+                "ticker": ticker,
+                "requested_qty": second_qty,
+                "limit_price": py_limit_price,
+                "anchor_price": current_price,
+                "prev_close": prev_close,
+                "attempt": 1,
+                "phase": "PYRAMID",
+                "sent_at": datetime.now(KST).isoformat(),
+            })
+            await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
+        py_fill = await _poll_fill(
+            py_id,
+            deadline=(
+                _deadline_after_seconds(F3_LIMIT_FILL_TIMEOUT_SEC)
+                if F3_LIMIT_BUY_ENABLED
+                else _pyramid_fill_deadline()
+            ),
+            ticker=ticker,
+            expected_qty=second_qty,
+        )
+        py_full = bool(py_fill and int(py_fill.get("fill_qty") or 0) >= second_qty)
+        if not py_full:
+            cancel_outcome, reconciled = await _cancel_entry_order_confirmed(
+                py_id,
+                py_org_no,
+                mode,
+                ticker,
+                1,
+                1,
+                expected_qty=second_qty,
+                known_fill=py_fill,
+            )
+            py_fill = reconciled
+            if cancel_outcome != "CANCELLED" and not (
+                py_fill and int(py_fill.get("fill_qty") or 0) >= second_qty
+            ):
+                state.get().day_skip = True
+                if F3_LIMIT_BUY_ENABLED and state.get().pending_entry:
+                    await recover_pending_entry()
+                    return
+                await notifier.send(
+                    "ENTRY_CANCEL_UNCONFIRMED",
+                    level="ERROR",
+                    message=f"피라미딩 주문 취소 확인 실패: {ticker} {py_id}",
+                    ticker=ticker,
+                )
+                return
+        await state.clear_pending_entry()
+        await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
         if not py_fill:
-            if py_id and py_org_no:
-                await _cancel_order(py_id, py_org_no, mode)
             log("PYRAMID_TIMEOUT", level="WARN", ticker=ticker, py_id=py_id)
         if py_fill:
             py_fill_latency_ms = max(
@@ -889,8 +1612,8 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
             s.entry_qty = (s.entry_qty or 0) + py_fill["fill_qty"]
             s.remaining_qty = (s.remaining_qty or 0) + py_fill["fill_qty"]
             py_order_db_id = await db.record_order(
-                trade_id, py_id, "BUY", py_fill["fill_qty"],
-                0.0, "PYRAMID_BUY", ticker, s.target_name,
+                trade_id, py_id, "BUY", second_qty,
+                py_limit_price, "PYRAMID_BUY", ticker, s.target_name,
                 trigger_price=current_price,
             )
             await db.update_order_fill(
@@ -898,6 +1621,11 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
                 py_fill["fill_price"],
                 py_fill["fill_qty"],
                 py_fill_latency_ms,
+                status=(
+                    "FILLED"
+                    if int(py_fill.get("fill_qty") or 0) >= second_qty
+                    else "PARTIAL_FILL"
+                ),
             )
             await db.mark_pyramided(trade_id)
             await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
@@ -905,7 +1633,7 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
                 "PYRAMID_EXECUTED",
                 level="INFO",
                 ticker=ticker,
-                order_price=0.0,
+                order_price=py_limit_price,
                 trigger_price=current_price,
                 fill_price=py_fill["fill_price"],
                 fill_qty=py_fill["fill_qty"],
@@ -935,6 +1663,9 @@ async def _cancel_entry_order_confirmed(
     ticker: str,
     attempt: int,
     max_attempts: int,
+    *,
+    expected_qty: int | None = None,
+    known_fill: dict | None = None,
 ) -> tuple[str, dict | None]:
     """진입 주문 취소를 '확인'까지 수행한다.
 
@@ -957,14 +1688,27 @@ async def _cancel_entry_order_confirmed(
         msg1=cancel_resp.get("msg1"),
     )
     if str(cancel_resp.get("rt_cd", "0")) == "0":
-        return "CANCELLED", None
+        reconciled = _more_complete_fill(
+            known_fill,
+            await _fetch_order_fill_snapshot(
+                order_id,
+                ticker=ticker,
+                expected_qty=expected_qty,
+            ),
+        )
+        return "CANCELLED", reconciled
 
     fill = await _poll_fill(
         order_id,
         deadline=_deadline_after_seconds(F3_ENTRY_CANCEL_CONFIRM_FILL_SEC),
         ticker=ticker,
+        expected_qty=expected_qty,
     )
-    if fill:
+    fill = _more_complete_fill(known_fill, fill)
+    if fill and (
+        expected_qty is None
+        or int(fill.get("fill_qty") or 0) >= expected_qty
+    ):
         log(
             "ENTRY_CANCEL_REJECTED_FILLED",
             level="WARN",
@@ -989,7 +1733,15 @@ async def _cancel_entry_order_confirmed(
         msg1=retry_resp.get("msg1"),
     )
     if str(retry_resp.get("rt_cd", "0")) == "0":
-        return "CANCELLED", None
+        reconciled = _more_complete_fill(
+            fill,
+            await _fetch_order_fill_snapshot(
+                order_id,
+                ticker=ticker,
+                expected_qty=expected_qty,
+            ),
+        )
+        return "CANCELLED", reconciled
 
     log(
         "ENTRY_CANCEL_UNCONFIRMED",
@@ -1111,6 +1863,70 @@ async def _block_entry_deadline_passed(ticker: str | None, stage: str) -> None:
         "ENTRY_FAIL",
         f"reason=ENTRY_DEADLINE_PASSED,stage={stage},ticker={ticker}",
     )
+
+
+async def _reject_final_entry_price(
+    ticker: str,
+    reason: str,
+    *,
+    allow_candidate_retry: bool,
+    anchor_price: float,
+    prev_close: float,
+    ask_price: float = 0.0,
+    limit_price: float = 0.0,
+    quote_age_ms: int | None = None,
+    fresh_gap: float | None = None,
+) -> str:
+    """살아 있는 주문이 없을 때 최종 가격검사를 fail-closed로 종료한다."""
+    await state.reset_to_idle(reason)
+    level = "INFO" if allow_candidate_retry else "WARN"
+    log(
+        "ENTRY_PRICE_BLOCKED",
+        level=level,
+        ticker=ticker,
+        reason=reason,
+        anchor_price=anchor_price,
+        prev_close=prev_close,
+        ask_price=ask_price,
+        limit_price=limit_price,
+        quote_age_ms=quote_age_ms,
+        fresh_gap_pct=(
+            round(fresh_gap * 100, 3) if fresh_gap is not None else None
+        ),
+        candidate_retry=allow_candidate_retry,
+    )
+    _log_entry_blocked(
+        ticker,
+        reason,
+        level=level,
+        anchor_price=anchor_price,
+        ask_price=ask_price,
+        limit_price=limit_price,
+        candidate_retry=allow_candidate_retry,
+    )
+    if allow_candidate_retry:
+        return reason
+
+    state.get().day_skip = True
+    state.get().close_reason = "GAP_CHANGED" if reason == "GAP_CHANGED" else "ENTRY_FAIL"
+    await notifier.send(
+        "ENTRY_FAIL",
+        level="WARN",
+        message=(
+            f"진입 직전 가격 안전검사 차단: {ticker} "
+            f"reason={reason} ask={ask_price:g} cap={limit_price:g}"
+        ),
+        ticker=ticker,
+    )
+    await db.record_skip(
+        _today(),
+        "GAP_CHANGED" if reason == "GAP_CHANGED" else "ENTRY_FAIL",
+        (
+            f"reason={reason},anchor={anchor_price},ask={ask_price},"
+            f"limit={limit_price},quote_age_ms={quote_age_ms}"
+        ),
+    )
+    return reason
 
 
 async def _alert_balance_query_failed(ticker: str | None, candidates: list[str]) -> None:
@@ -1647,10 +2463,25 @@ async def _fetch_expected_price(
             params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker},
         )
         out = resp.get("output", {}) if isinstance(resp.get("output"), dict) else {}
-        expected = float(out.get("antc_cnpr") or out.get("stck_prpr") or 0)
+        antc_price = float(out.get("antc_cnpr") or 0)
+        current_price = float(out.get("stck_prpr") or 0)
+        expected = antc_price or current_price
         prev_close = float(out.get("stck_prdy_clpr") or 0)
         effective_prev_close = prev_close if prev_close > 0 else fallback_prev_close
         last_expected, last_prev_close = expected, effective_prev_close
+        log(
+            "F3_RECHECK_QUOTE_FIELDS",
+            level="DEBUG",
+            ticker=ticker,
+            attempt=attempt,
+            antc_cnpr=antc_price,
+            stck_prpr=current_price,
+            selected_price=expected,
+            selected_source="antc_cnpr" if antc_price > 0 else "stck_prpr",
+            prev_close=effective_prev_close,
+            rt_cd=resp.get("rt_cd"),
+            msg_cd=resp.get("msg_cd"),
+        )
         if expected and effective_prev_close > 0:
             if attempt > 1:
                 log(
@@ -1688,6 +2519,66 @@ async def _fetch_current_price(ticker: str) -> float:
         params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker},
     )
     return float(resp.get("output", {}).get("stck_prpr") or 0)
+
+
+async def _fetch_final_entry_quote(ticker: str) -> EntryQuote | None:
+    """주문 직전 최우선 매도호가를 조회한다. 누락 시 fail-closed."""
+    started = time.monotonic()
+    try:
+        resp = await kis_rest.get(
+            "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn",
+            tr_id="FHKST01010200",
+            params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker},
+        )
+    except Exception as exc:
+        log(
+            "F3_FINAL_QUOTE_ERROR",
+            level="WARN",
+            ticker=ticker,
+            error=repr(exc),
+        )
+        return None
+
+    out1 = resp.get("output1", {})
+    if isinstance(out1, list):
+        out1 = out1[0] if out1 else {}
+    if not isinstance(out1, dict):
+        out1 = {}
+    out2 = resp.get("output2", {})
+    if isinstance(out2, list):
+        out2 = out2[0] if out2 else {}
+    if not isinstance(out2, dict):
+        out2 = {}
+
+    ask_price = float(out1.get("askp1") or 0)
+    ask_qty = int(float(out1.get("askp_rsqn1") or 0))
+    antc_price = float(out2.get("antc_cnpr") or 0)
+    elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
+    log(
+        "F3_FINAL_QUOTE",
+        level="INFO" if ask_price > 0 else "WARN",
+        ticker=ticker,
+        ask_price=ask_price,
+        ask_qty=ask_qty,
+        antc_price=antc_price,
+        elapsed_ms=elapsed_ms,
+        quote_max_age_ms=F3_FINAL_QUOTE_MAX_AGE_MS,
+        quote_max_age_configured_ms=_F3_FINAL_QUOTE_MAX_AGE_MS_CONFIGURED,
+        rt_cd=resp.get("rt_cd"),
+        msg_cd=resp.get("msg_cd"),
+        msg1=resp.get("msg1"),
+    )
+    if str(resp.get("rt_cd", "0")) != "0" or ask_price <= 0:
+        return None
+    return EntryQuote(
+        ask_price=ask_price,
+        ask_qty=ask_qty,
+        antc_price=antc_price,
+        fetched_monotonic=time.monotonic(),
+        rt_cd=str(resp.get("rt_cd") or ""),
+        msg_cd=str(resp.get("msg_cd") or ""),
+        msg1=str(resp.get("msg1") or ""),
+    )
 
 
 async def _fetch_available_cash() -> float | None:
@@ -1818,9 +2709,11 @@ async def _send_buy(
     ticker: str,
     qty: int,
     mode: str,
+    limit_price: float | None = None,
     send_guard: Callable[[], bool] | None = None,
 ) -> dict:
-    """시장가 매수 주문 (ORD_DVSN=01)."""
+    """지정가 상한 매수. limit_price=None일 때만 레거시 시장가."""
+    is_limit = limit_price is not None and limit_price > 0
     return await kis_rest.post(
         "/uapi/domestic-stock/v1/trading/order-cash",
         tr_id=_BUY_TR[mode],
@@ -1829,9 +2722,9 @@ async def _send_buy(
             "CANO": kis_rest.account_no(),
             "ACNT_PRDT_CD": kis_rest.account_cd(),
             "PDNO": ticker,
-            "ORD_DVSN": "01",
+            "ORD_DVSN": "00" if is_limit else "01",
             "ORD_QTY": str(qty),
-            "ORD_UNPR": "0",
+            "ORD_UNPR": str(int(limit_price)) if is_limit else "0",
         },
     )
 
@@ -1862,11 +2755,13 @@ async def _cancel_order(order_id: str, org_no: str, mode: str) -> dict:
             "ACNT_PRDT_CD": kis_rest.account_cd(),
             "KRX_FWDG_ORD_ORGNO": org_no,
             "ORGN_ODNO": order_id,
-            "ORD_DVSN": "01",
+            # KIS 정정취소 공식 예제의 주문구분(00)과 필수 거래소 코드를 사용한다.
+            "ORD_DVSN": "00",
             "RVSE_CNCL_DVSN_CD": "02",
             "ORD_QTY": "0",
             "ORD_UNPR": "0",
             "QTY_ALL_ORD_YN": "Y",
+            "EXCG_ID_DVSN_CD": "KRX",
         },
     )
 
@@ -1875,13 +2770,13 @@ async def _poll_fill(
     order_id: str,
     deadline: tuple[int, int, int],
     ticker: str | None = None,
+    expected_qty: int | None = None,
 ) -> dict | None:
-    """주문 체결을 1초 간격으로 폴링. deadline(시, 분, 초) 도달 시 None."""
+    """전량체결까지 폴링하고, 마감 시 확인된 부분체결을 반환한다."""
     global _last_fill_poll_summary
     h, m, s = deadline
-    mode = os.getenv("KIS_MODE", "PAPER")
-    today = datetime.now(KST).strftime("%Y%m%d")
     attempts = 0
+    latest_fill: dict | None = None
     _last_fill_poll_summary = {
         "poll_attempts": 0,
         "poll_deadline": f"{h:02d}:{m:02d}:{s:02d}",
@@ -1899,57 +2794,130 @@ async def _poll_fill(
         if now >= now.replace(hour=h, minute=m, second=s, microsecond=0):
             log("ENTRY_FILL_POLL_TIMEOUT", level="WARN", ticker=ticker,
                 order_id=order_id, **_last_fill_poll_summary)
-            return None
+            if latest_fill and expected_qty is None:
+                return {
+                    "fill_price": latest_fill["fill_price"],
+                    "fill_qty": latest_fill["fill_qty"],
+                }
+            return latest_fill
         try:
             attempts += 1
-            resp = await kis_rest.get(
-                "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
-                tr_id=_CCLD_TR[mode],
-                params={
-                    "CANO": kis_rest.account_no(),
-                    "ACNT_PRDT_CD": kis_rest.account_cd(),
-                    "INQR_STRT_DT": today,
-                    "INQR_END_DT": today,
-                    "SLL_BUY_DVSN_CD": "00",
-                    "INQR_DVSN": "00",
-                    "PDNO": "",
-                    "CCLD_DVSN": "00",
-                    "ORD_GNO_BRNO": "",
-                    "ODNO": order_id,
-                    "INQR_DVSN_3": "00",
-                    "INQR_DVSN_1": "",
-                    "EXCG_ID_DVSN_CD": "KRX",
-                    "CTX_AREA_FK100": "",
-                    "CTX_AREA_NK100": "",
-                },
+            latest = await _fetch_order_fill_snapshot(
+                order_id,
+                ticker=ticker,
+                expected_qty=expected_qty,
+                update_poll_summary=True,
             )
-            rows = resp.get("output1", []) or []
-            _last_fill_poll_summary.update({
-                "poll_attempts": attempts,
-                "poll_last_rt_cd": resp.get("rt_cd"),
-                "poll_last_msg_cd": resp.get("msg_cd"),
-                "poll_last_msg1": resp.get("msg1"),
-                "poll_last_output_count": len(rows),
-                "poll_last_matched": False,
-                "poll_last_error": None,
-            })
-            for item in rows:
-                if item.get("odno") == order_id:
-                    tot_qty = int(item.get("tot_ccld_qty") or 0)
-                    tot_amt = float(item.get("tot_ccld_amt") or 0)
-                    _last_fill_poll_summary.update({
-                        "poll_last_matched": True,
-                        "poll_last_ccld_qty": tot_qty,
-                        "poll_last_ccld_amt": tot_amt,
-                    })
-                    if tot_qty > 0:
+            _last_fill_poll_summary["poll_attempts"] = attempts
+            latest_fill = _more_complete_fill(latest_fill, latest)
+            if latest_fill:
+                fill_qty = int(latest_fill.get("fill_qty") or 0)
+                if expected_qty is None or fill_qty >= expected_qty:
+                    if expected_qty is None:
                         return {
-                            "fill_price": round(tot_amt / tot_qty),
-                            "fill_qty": tot_qty,
+                            "fill_price": latest_fill["fill_price"],
+                            "fill_qty": fill_qty,
                         }
+                    return latest_fill
+                log(
+                    "ENTRY_PARTIAL_FILL",
+                    level="INFO",
+                    ticker=ticker,
+                    order_id=order_id,
+                    order_qty=expected_qty,
+                    fill_qty=fill_qty,
+                    remaining_qty=max(0, expected_qty - fill_qty),
+                    fill_price=latest_fill.get("fill_price"),
+                )
         except Exception as exc:
             _last_fill_poll_summary.update({
                 "poll_attempts": attempts,
                 "poll_last_error": str(exc)[:160],
             })
         await asyncio.sleep(1)
+
+
+async def _fetch_order_fill_snapshot(
+    order_id: str,
+    *,
+    ticker: str | None = None,
+    expected_qty: int | None = None,
+    update_poll_summary: bool = False,
+) -> dict | None:
+    """KIS 주문행 한 번 조회. 누적체결과 잔량을 일관된 형태로 반환한다."""
+    mode = os.getenv("KIS_MODE", "PAPER")
+    today = datetime.now(KST).strftime("%Y%m%d")
+    resp = await kis_rest.get(
+        "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
+        tr_id=_CCLD_TR[mode],
+        params={
+            "CANO": kis_rest.account_no(),
+            "ACNT_PRDT_CD": kis_rest.account_cd(),
+            "INQR_STRT_DT": today,
+            "INQR_END_DT": today,
+            "SLL_BUY_DVSN_CD": "00",
+            "INQR_DVSN": "00",
+            "PDNO": "",
+            "CCLD_DVSN": "00",
+            "ORD_GNO_BRNO": "",
+            "ODNO": order_id,
+            "INQR_DVSN_3": "00",
+            "INQR_DVSN_1": "",
+            "EXCG_ID_DVSN_CD": "KRX",
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": "",
+        },
+    )
+    rows = resp.get("output1", []) or []
+    if isinstance(rows, dict):
+        rows = [rows]
+    if update_poll_summary:
+        _last_fill_poll_summary.update({
+            "poll_last_rt_cd": resp.get("rt_cd"),
+            "poll_last_msg_cd": resp.get("msg_cd"),
+            "poll_last_msg1": resp.get("msg1"),
+            "poll_last_output_count": len(rows),
+            "poll_last_matched": False,
+            "poll_last_error": None,
+        })
+    for item in rows:
+        if str(item.get("odno") or "") != str(order_id):
+            continue
+        order_qty = int(
+            float(
+                item.get("ord_qty")
+                or item.get("tot_ord_qty")
+                or expected_qty
+                or 0
+            )
+        )
+        fill_qty = int(float(item.get("tot_ccld_qty") or 0))
+        remaining_qty = int(
+            float(item.get("rmn_qty") or max(0, order_qty - fill_qty))
+        )
+        total_amount = float(item.get("tot_ccld_amt") or 0)
+        avg_price = float(item.get("avg_prvs") or 0)
+        if fill_qty > 0 and total_amount > 0:
+            avg_price = round(total_amount / fill_qty)
+        status: Literal["UNFILLED", "PARTIAL", "FILLED"]
+        if fill_qty <= 0:
+            status = "UNFILLED"
+        elif remaining_qty <= 0 or (order_qty > 0 and fill_qty >= order_qty):
+            status = "FILLED"
+        else:
+            status = "PARTIAL"
+        snapshot = FillSnapshot(
+            status=status,
+            order_qty=order_qty,
+            fill_qty=fill_qty,
+            remaining_qty=max(0, remaining_qty),
+            fill_price=avg_price,
+        )
+        if update_poll_summary:
+            _last_fill_poll_summary.update({
+                "poll_last_matched": True,
+                "poll_last_ccld_qty": fill_qty,
+                "poll_last_ccld_amt": total_amount,
+            })
+        return snapshot.as_fill() if fill_qty > 0 else None
+    return None

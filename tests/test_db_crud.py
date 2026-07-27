@@ -112,6 +112,37 @@ async def test_record_order_separates_submitted_and_trigger_price(mem):
     assert row["trigger_price"] == pytest.approx(75_000.0)
 
 
+async def test_get_order_by_kis_id_filters_trading_date_and_ticker(mem):
+    trade_id = await db.open_trade("20260623", "005930", 75_000.0, 10)
+    order_id = await db.record_order(
+        trade_id,
+        "0000000937",
+        "BUY",
+        10,
+        75_000.0,
+        "FIRST_BUY",
+        "005930",
+    )
+
+    found = await db.get_order_by_kis_id(
+        "0000000937",
+        date="20260623",
+        ticker="005930",
+    )
+
+    assert found["id"] == order_id
+    assert await db.get_order_by_kis_id(
+        "0000000937",
+        date="20260624",
+        ticker="005930",
+    ) is None
+    assert await db.get_order_by_kis_id(
+        "0000000937",
+        date="20260623",
+        ticker="000660",
+    ) is None
+
+
 # ── update_order_fill ─────────────────────────────────────────────────
 
 async def test_update_order_fill_sets_filled(mem):

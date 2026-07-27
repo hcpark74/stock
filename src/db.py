@@ -328,6 +328,35 @@ async def get_trade_by_date(date: str) -> dict | None:
     return dict(row) if row else None
 
 
+async def get_order_by_kis_id(
+    kis_order_id: str,
+    *,
+    date: str | None = None,
+    ticker: str | None = None,
+) -> dict | None:
+    """재시작 복구 시 같은 KIS 주문을 DB에 중복 기록하지 않도록 조회한다."""
+    conn = get()
+    filters = ["o.kis_order_id=?"]
+    params: list[object] = [kis_order_id]
+    if date is not None:
+        filters.append("t.date=?")
+        params.append(date)
+    if ticker is not None:
+        filters.append("o.ticker=?")
+        params.append(ticker)
+    async with conn.execute(
+        f"""SELECT o.*
+              FROM orders AS o
+              JOIN trades AS t ON t.id=o.trade_id
+             WHERE {' AND '.join(filters)}
+             ORDER BY o.id DESC
+             LIMIT 1""",
+        tuple(params),
+    ) as cur:
+        row = await cur.fetchone()
+    return dict(row) if row else None
+
+
 async def record_order(
     trade_id: int,
     kis_order_id: str,

@@ -18,6 +18,7 @@ def reset_main_flow(monkeypatch):
     s.target_ticker = None
     s.target_candidates = None
     s.position_status = "IDLE"
+    s.pending_entry = None
     main._f1_result = []
     main._f2_done = False
     main._f3_started = False
@@ -29,6 +30,7 @@ def reset_main_flow(monkeypatch):
     s.target_ticker = None
     s.target_candidates = None
     s.position_status = "IDLE"
+    s.pending_entry = None
     main._f1_result = []
     main._f2_done = False
     main._f3_started = False
@@ -635,6 +637,38 @@ async def test_trading_day_rollover_resets_chain_flags(monkeypatch):
     assert main._f2_done is False
     assert main._f3_started is False
     assert main._is_market_closed_today() is False
+
+
+async def test_recover_state_reconciles_today_pending_entry_before_db_fallback(monkeypatch):
+    today = main.datetime.now(main.KST).strftime("%Y%m%d")
+    data = {
+        "date": today,
+        "ticker": "006340",
+        "position_status": "ENTERING",
+        "pending_entry": {
+            "order_id": "0000000937",
+            "org_no": "001",
+            "ticker": "006340",
+            "requested_qty": 48,
+            "limit_price": 14_510,
+            "anchor_price": 14_440,
+            "prev_close": 13_730,
+        },
+    }
+    recover_pending = AsyncMock(return_value=True)
+    db_fallback = AsyncMock()
+    monkeypatch.setattr(main.state, "load", lambda _state_dir: data)
+    monkeypatch.setattr(main.f3_entry, "recover_pending_entry", recover_pending)
+    monkeypatch.setattr(main.db, "get_trade_by_date", db_fallback)
+    monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
+
+    await main._recover_state()
+
+    recover_pending.assert_awaited_once()
+    db_fallback.assert_not_awaited()
+    assert state_mod.get().position_status == "ENTERING"
+    assert state_mod.get().pending_entry["order_id"] == "0000000937"
+
 
 async def test_recover_state_uses_db_open_trade_when_state_file_missing(monkeypatch):
     events = []
