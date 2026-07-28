@@ -1,3 +1,4 @@
+import asyncio
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock
 
@@ -87,6 +88,113 @@ async def test_restore_market_closed_ignores_other_skip_reasons(tmp_path):
         await db.close()
 
 
+async def test_daily_rollover_reconciles_stale_entering_after_zero_balance(monkeypatch):
+    s = state_mod.get()
+    s.trading_date = "20260727"
+    s.target_ticker = "006340"
+    s.position_status = "ENTERING"
+    s.day_skip = True
+    s.pending_entry = None
+    backup = MagicMock(return_value=True)
+    discard = MagicMock()
+    events = []
+
+    monkeypatch.setattr(main, "_ensure_trading_day", _REAL_ENSURE_TRADING_DAY)
+    monkeypatch.setattr(main, "_today", lambda: "20260728")
+    monkeypatch.setattr(main, "_verified_holding_qty", AsyncMock(return_value=0))
+    monkeypatch.setattr(main.state, "backup_stale", backup)
+    monkeypatch.setattr(main.state, "discard", discard)
+    monkeypatch.setattr(main.notifier, "send", AsyncMock())
+    monkeypatch.setattr(
+        main.logger,
+        "log",
+        lambda event, **kwargs: events.append((event, kwargs)),
+    )
+
+    await main._ensure_trading_day()
+
+    assert s.trading_date == "20260728"
+    assert s.position_status == "IDLE"
+    assert s.day_skip is False
+    backup.assert_called_once_with(main.STATE_DIR, "20260727")
+    discard.assert_called_once_with(main.STATE_DIR)
+    assert any(event == "STALE_ACTIVE_RECONCILED" for event, _ in events)
+    assert any(event == "DAILY_STATE_RESET" for event, _ in events)
+
+
+async def test_daily_rollover_keeps_stale_entering_when_holding_exists(monkeypatch):
+    s = state_mod.get()
+    s.trading_date = "20260727"
+    s.target_ticker = "006340"
+    s.position_status = "ENTERING"
+    s.day_skip = True
+    s.pending_entry = None
+
+    monkeypatch.setattr(main, "_ensure_trading_day", _REAL_ENSURE_TRADING_DAY)
+    monkeypatch.setattr(main, "_today", lambda: "20260728")
+    monkeypatch.setattr(main, "_verified_holding_qty", AsyncMock(return_value=3))
+    monkeypatch.setattr(main.state, "backup_stale", MagicMock())
+    monkeypatch.setattr(main.state, "discard", MagicMock())
+    monkeypatch.setattr(main.notifier, "send", AsyncMock())
+    monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
+
+    await main._ensure_trading_day()
+
+    assert s.trading_date == "20260727"
+    assert s.position_status == "ENTERING"
+    assert s.day_skip is True
+    main.state.backup_stale.assert_not_called()
+    main.state.discard.assert_not_called()
+
+
+async def test_daily_rollover_reconciles_stale_holding_after_zero_balance(monkeypatch):
+    s = state_mod.get()
+    s.trading_date = "20260727"
+    s.target_ticker = "006340"
+    s.position_status = "HOLDING"
+    s.remaining_qty = 7
+    s.day_skip = True
+
+    monkeypatch.setattr(main, "_ensure_trading_day", _REAL_ENSURE_TRADING_DAY)
+    monkeypatch.setattr(main, "_today", lambda: "20260728")
+    monkeypatch.setattr(main, "_verified_holding_qty", AsyncMock(return_value=0))
+    monkeypatch.setattr(main.state, "backup_stale", MagicMock(return_value=True))
+    monkeypatch.setattr(main.state, "discard", MagicMock())
+    monkeypatch.setattr(main.notifier, "send", AsyncMock())
+    monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
+
+    await main._ensure_trading_day()
+
+    assert s.trading_date == "20260728"
+    assert s.position_status == "IDLE"
+    assert s.remaining_qty is None
+    assert s.day_skip is False
+
+
+async def test_daily_rollover_reconciles_stale_pending_entry_after_zero_balance(monkeypatch):
+    s = state_mod.get()
+    s.trading_date = "20260727"
+    s.target_ticker = "006340"
+    s.position_status = "ENTERING"
+    s.pending_entry = {"order_id": "0000000937"}
+    s.day_skip = True
+
+    monkeypatch.setattr(main, "_ensure_trading_day", _REAL_ENSURE_TRADING_DAY)
+    monkeypatch.setattr(main, "_today", lambda: "20260728")
+    monkeypatch.setattr(main, "_verified_holding_qty", AsyncMock(return_value=0))
+    monkeypatch.setattr(main.state, "backup_stale", MagicMock(return_value=True))
+    monkeypatch.setattr(main.state, "discard", MagicMock())
+    monkeypatch.setattr(main.notifier, "send", AsyncMock())
+    monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
+
+    await main._ensure_trading_day()
+
+    assert s.trading_date == "20260728"
+    assert s.position_status == "IDLE"
+    assert s.pending_entry is None
+    assert s.day_skip is False
+
+
 async def test_job_f1_runs_f3_without_force_before_f3_schedule(monkeypatch):
     async def fake_f2_run(candidates):
         assert candidates == [{"ticker": "005930"}]
@@ -118,6 +226,79 @@ async def test_job_f1_runs_f3_with_force_after_f3_schedule(monkeypatch):
     await main.job_f1()
 
     f3_run.assert_awaited_once_with(force=True)
+
+
+async def test_job_f1_bounds_probe_timeout_and_continues(monkeypatch):
+    async def never_finishes():
+        await asyncio.Event().wait()
+
+    events = []
+    monkeypatch.setattr(main, "PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC", 0.01)
+    monkeypatch.setattr(
+        main,
+        "_skip_entry_pipeline_if_trade_exists",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        main.paper_fast_probe,
+        "observe_open_boundary",
+        AsyncMock(side_effect=never_finishes),
+    )
+    monkeypatch.setattr(main.f1_filter, "run", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        main.logger,
+        "log",
+        lambda event, **kwargs: events.append((event, kwargs)),
+    )
+
+    await main.job_f1()
+
+    main.f1_filter.run.assert_awaited_once()
+    assert any(
+        event == "PAPER_FAST_PROBE_ERROR"
+        and fields.get("reason") == "TIMEOUT"
+        for event, fields in events
+    )
+
+
+async def test_job_f1_checks_existing_trade_before_probe(monkeypatch):
+    observe = AsyncMock()
+    f1_run = AsyncMock()
+    monkeypatch.setattr(
+        main,
+        "_skip_entry_pipeline_if_trade_exists",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(main.paper_fast_probe, "observe_open_boundary", observe)
+    monkeypatch.setattr(main.f1_filter, "run", f1_run)
+
+    await main.job_f1()
+
+    observe.assert_not_awaited()
+    f1_run.assert_not_awaited()
+
+
+async def test_paper_fast_probe_job_isolates_prepare_exception(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        main.paper_fast_probe,
+        "prepare",
+        AsyncMock(side_effect=RuntimeError("probe failed")),
+    )
+    monkeypatch.setattr(
+        main.logger,
+        "log",
+        lambda event, **kwargs: events.append((event, kwargs)),
+    )
+
+    await main.job_paper_fast_probe()
+
+    assert any(
+        event == "PAPER_FAST_PROBE_ERROR"
+        and fields.get("phase") == "PREOPEN"
+        and fields.get("reason") == "UNHANDLED"
+        for event, fields in events
+    )
 
 
 async def test_scheduled_f3_without_target_does_not_mark_started(monkeypatch):
@@ -993,7 +1174,7 @@ async def test_recover_state_stale_state_file_allows_today_db_fallback(monkeypat
     assert state_mod.get().position_status == "HOLDING"
     assert state_mod.get().target_ticker == "005930"
     assert send.await_count == 2
-    assert send.await_args_list[0].args[0] == "STALE_POSITION_DETECTED"
+    assert send.await_args_list[0].args[0] == "STALE_ACTIVE_RECONCILED"
     assert send.await_args_list[1].args[0] == "PROCESS_RESTART_DETECTED"
     persist.assert_awaited_once()
 
@@ -1008,6 +1189,7 @@ async def test_recover_state_stale_holding_blocks_todays_entry(monkeypatch):
     }
     monkeypatch.setattr(main.state, "load", lambda _state_dir: data)
     monkeypatch.setattr(main.state, "backup_stale", MagicMock(), raising=False)
+    monkeypatch.setattr(main, "_verified_holding_qty", AsyncMock(return_value=None))
     monkeypatch.setattr(main.db, "get_trade_by_date", AsyncMock(return_value=None))
     monkeypatch.setattr(main.notifier, "send", send)
     monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
@@ -1017,6 +1199,129 @@ async def test_recover_state_stale_holding_blocks_todays_entry(monkeypatch):
     assert state_mod.get().day_skip is True
     assert send.await_args_list[0].args[0] == "STALE_POSITION_DETECTED"
     assert "차단" in send.await_args_list[0].kwargs["message"]
+
+
+async def test_recover_state_stale_entering_zero_balance_is_reconciled(monkeypatch):
+    send = AsyncMock()
+    discard = MagicMock()
+    backup = MagicMock(return_value=True)
+    events = []
+    data = {
+        "date": "20260727",
+        "ticker": "006340",
+        "position_status": "ENTERING",
+        "pending_entry": None,
+    }
+    monkeypatch.setattr(main.state, "load", lambda _state_dir: data)
+    monkeypatch.setattr(main.state, "backup_stale", backup)
+    monkeypatch.setattr(main.state, "discard", discard)
+    monkeypatch.setattr(main, "_verified_holding_qty", AsyncMock(return_value=0))
+    monkeypatch.setattr(main.db, "get_trade_by_date", AsyncMock(return_value=None))
+    monkeypatch.setattr(main.notifier, "send", send)
+    monkeypatch.setattr(
+        main.logger,
+        "log",
+        lambda event, **kwargs: events.append((event, kwargs)),
+    )
+
+    await main._recover_state()
+
+    assert state_mod.get().day_skip is False
+    backup.assert_called_once_with(main.STATE_DIR, "20260727")
+    discard.assert_called_once_with(main.STATE_DIR)
+    assert any(event == "STALE_ACTIVE_RECONCILED" for event, _ in events)
+    assert send.await_args.args[0] == "STALE_ACTIVE_RECONCILED"
+
+
+async def test_verified_holding_qty_follows_balance_continuation(monkeypatch):
+    get = AsyncMock(side_effect=[
+        {
+            "rt_cd": "0",
+            "output1": [{"pdno": "005930", "hldg_qty": "1"}],
+            "ctx_area_fk100": "NEXT_FK",
+            "ctx_area_nk100": "NEXT_NK",
+            "_response_meta": {"tr_cont": "M"},
+        },
+        {
+            "rt_cd": "0",
+            "output1": [{"pdno": "006340", "hldg_qty": "7"}],
+            "_response_meta": {"tr_cont": ""},
+        },
+    ])
+    monkeypatch.setattr(main.kis_rest, "get", get)
+    monkeypatch.setattr(main.notifier, "send", AsyncMock())
+    monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
+
+    qty = await main._verified_holding_qty("006340", "TEST")
+
+    assert qty == 7
+    assert get.await_count == 2
+    second = get.await_args_list[1].kwargs
+    assert second["tr_cont"] == "N"
+    assert second["include_response_meta"] is True
+    assert second["params"]["CTX_AREA_FK100"] == "NEXT_FK"
+    assert second["params"]["CTX_AREA_NK100"] == "NEXT_NK"
+
+
+async def test_verified_holding_qty_fails_safe_on_invalid_continuation(monkeypatch):
+    send = AsyncMock()
+    monkeypatch.setattr(
+        main.kis_rest,
+        "get",
+        AsyncMock(return_value={
+            "rt_cd": "0",
+            "output1": [],
+            "ctx_area_fk100": "",
+            "ctx_area_nk100": "",
+            "_response_meta": {"tr_cont": "M"},
+        }),
+    )
+    monkeypatch.setattr(main.notifier, "send", send)
+    monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
+
+    qty = await main._verified_holding_qty("006340", "TEST")
+
+    assert qty is None
+    send.assert_awaited_once()
+
+
+async def test_verified_holding_qty_fails_safe_on_malformed_rows(monkeypatch):
+    send = AsyncMock()
+    monkeypatch.setattr(
+        main.kis_rest,
+        "get",
+        AsyncMock(return_value={"rt_cd": "0", "output1": None}),
+    )
+    monkeypatch.setattr(main.notifier, "send", send)
+    monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
+
+    qty = await main._verified_holding_qty("006340", "TEST")
+
+    assert qty is None
+    send.assert_awaited_once()
+
+
+@pytest.mark.parametrize("invalid_qty", ["not-a-number", -1])
+async def test_verified_holding_qty_fails_safe_on_invalid_target_qty(
+    monkeypatch,
+    invalid_qty,
+):
+    send = AsyncMock()
+    monkeypatch.setattr(
+        main.kis_rest,
+        "get",
+        AsyncMock(return_value={
+            "rt_cd": "0",
+            "output1": [{"pdno": "006340", "hldg_qty": invalid_qty}],
+        }),
+    )
+    monkeypatch.setattr(main.notifier, "send", send)
+    monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
+
+    qty = await main._verified_holding_qty("006340", "TEST")
+
+    assert qty is None
+    send.assert_awaited_once()
 
 
 async def test_recover_state_stale_closed_discards_silently(monkeypatch):
@@ -1139,6 +1444,7 @@ async def test_recover_state_backup_failure_logs_crit_and_continues(monkeypatch)
     }
     monkeypatch.setattr(main.state, "load", lambda _state_dir: data)
     monkeypatch.setattr(main.state, "backup_stale", MagicMock(return_value=False))
+    monkeypatch.setattr(main, "_verified_holding_qty", AsyncMock(return_value=None))
     monkeypatch.setattr(main.db, "get_trade_by_date", AsyncMock(return_value=None))
     monkeypatch.setattr(main.notifier, "send", send)
     monkeypatch.setattr(

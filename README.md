@@ -195,6 +195,7 @@ PAPER_FAST_PROBE=0
 PAPER_FAST_PROBE_DIR=data/paper_fast_probe
 PAPER_FAST_PROBE_OPEN_OFFSET_MS=300
 PAPER_FAST_PROBE_OPEN_MAX_LATENESS_MS=2500
+PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC=2.5
 
 # ── F2: 후보 전멸 시 F1 재시도 ─────────────────
 # 1이면 F2에서 후보가 모두 탈락했을 때 F1 스캔을 다시 시도 (PAPER 실험용)

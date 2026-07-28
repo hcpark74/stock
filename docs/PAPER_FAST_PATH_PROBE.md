@@ -31,6 +31,7 @@ PAPER_FAST_PROBE=1
 PAPER_FAST_PROBE_DIR=data/paper_fast_probe
 PAPER_FAST_PROBE_OPEN_OFFSET_MS=300
 PAPER_FAST_PROBE_OPEN_MAX_LATENESS_MS=2500
+PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC=2.5
 ```
 
 공용 예시는 안전하게 비활성(`0`)이고, 현재 PAPER `.env`에서만 활성화한다.
@@ -52,6 +53,7 @@ data/paper_fast_probe/YYYYMMDD.jsonl
 - `PAPER_FAST_PROBE_RANKING`: 시장별 장전 순위 원시 응답
 - `PAPER_FAST_PROBE_MULTI`: 시장별 장전 멀티시세 원시 응답
 - `PAPER_FAST_PROBE_PREOPEN_DONE`: 요청/응답 종목 대응 및 관측 대상 3종목
+- `PAPER_FAST_PROBE_PREOPEN_SKIPPED`: 09:00 이후 장전 관측 미스파이어 생략
 - `PAPER_FAST_PROBE_OPEN_MULTI`: 개장 직후 멀티시세 원시 응답
 - `PAPER_FAST_PROBE_OPEN_DONE`: 실제 시작 지연과 유효 매도1호가 개수
 - `PAPER_FAST_PROBE_OPEN_SKIPPED`: 지각 또는 장전 대상 부재로 생략

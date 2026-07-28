@@ -77,6 +77,40 @@ async def ensure_trading_day(date_str: str) -> bool:
         return True
 
 
+async def reset_stale_entering_for_trading_day(date_str: str) -> bool:
+    """Reset a prior-day ENTERING state after the caller verified no holding.
+
+    The normal daily reset intentionally preserves active states.  This
+    narrower escape hatch only accepts an ENTERING state from another date
+    when there is no persisted pending-order identity.  The caller must first
+    reconcile the broker balance; HOLDING/EXITING and identified pending
+    orders remain protected.
+    """
+    async with _lock:
+        if _state.trading_date == date_str:
+            return False
+        if _state.position_status != "ENTERING" or _state.pending_entry is not None:
+            return False
+        _clear_for_trading_day(date_str)
+        return True
+
+
+async def reset_stale_active_for_trading_day(date_str: str) -> bool:
+    """Reset a prior-day active state after broker-confirmed zero holdings.
+
+    Unlike ``ensure_trading_day``, this accepts ENTERING/HOLDING/EXITING.
+    It must only be called after the complete paginated balance response has
+    confirmed that the state's ticker is not held.
+    """
+    async with _lock:
+        if _state.trading_date == date_str:
+            return False
+        if _state.position_status not in {"ENTERING", "HOLDING", "EXITING"}:
+            return False
+        _clear_for_trading_day(date_str)
+        return True
+
+
 # ── 상태 전이 (atomic) ────────────────────────────────────────────────
 
 async def set_entering() -> bool:

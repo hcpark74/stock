@@ -317,6 +317,24 @@ async def prepare() -> list[str]:
         return []
 
     _prepared_tickers = []
+    now = datetime.now(KST)
+    market_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    if now >= market_open:
+        _append_record(
+            "PAPER_FAST_PROBE_PREOPEN_SKIPPED",
+            phase="PREOPEN",
+            scheduled_before=market_open.isoformat(),
+            actual_ts=now.isoformat(),
+            reason="MARKET_OPEN",
+        )
+        log(
+            "PAPER_FAST_PROBE_PREOPEN_SKIPPED",
+            level="WARN",
+            actual_ts=now.isoformat(),
+            reason="MARKET_OPEN",
+        )
+        return []
+
     started = time.monotonic()
     _append_record("PAPER_FAST_PROBE_PREOPEN_START", phase="PREOPEN")
     log("PAPER_FAST_PROBE_PREOPEN_START", level="INFO")

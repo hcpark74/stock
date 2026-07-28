@@ -54,7 +54,13 @@ F2_RETRY_F1_INTERVAL_SEC = int(
     os.getenv("F2_RETRY_F1_INTERVAL_SEC", str(f1_filter.F1_RETRY_INTERVAL_SEC))
 )
 F2_RETRY_F1_MIN_REMAINING_SEC = int(os.getenv("F2_RETRY_F1_MIN_REMAINING_SEC", "2"))
+PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC = max(
+    0.1,
+    float(os.getenv("PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC", "2.5")),
+)
 _BAL_TR = {"REAL": "TTTC8434R", "PAPER": "VTTC8434R"}
+_BALANCE_MAX_PAGES = 10
+_ACTIVE_POSITION_STATUSES = {"ENTERING", "HOLDING", "EXITING"}
 
 # 국내휴장일조회 — 실전 전용 TR (모의투자 미지원)
 _HOLIDAY_CHECK_PATH = "/uapi/domestic-stock/v1/quotations/chk-holiday"
@@ -107,12 +113,84 @@ def _f2_retry_remaining_seconds() -> int:
 async def _ensure_trading_day() -> None:
     global _f1_result, _f2_done, _f3_started, _market_closed_date
     today = _today()
-    if await state.ensure_trading_day(today):
+    reconciled = await _reconcile_runtime_stale_active(today)
+    if reconciled or await state.ensure_trading_day(today):
         _f1_result = []
         _f2_done = False
         _f3_started = False
         _market_closed_date = None
         logger.log("DAILY_STATE_RESET", level="INFO", date=today)
+
+
+async def _reconcile_runtime_stale_active(today: str) -> bool:
+    """Clear a prior-day active state only after KIS confirms zero shares."""
+    s = state.get()
+    stale_date = s.trading_date
+    if (
+        not stale_date
+        or stale_date == today
+        or s.position_status not in _ACTIVE_POSITION_STATUSES
+    ):
+        return False
+
+    stale_status = s.position_status
+    ticker = s.target_ticker
+    actual_qty = await _verified_holding_qty(ticker, "DAILY_ROLLOVER")
+    if actual_qty != 0:
+        logger.log(
+            "STALE_ACTIVE_ROLLOVER_BLOCKED",
+            level="CRIT",
+            stale_date=stale_date,
+            stale_status=stale_status,
+            ticker=ticker,
+            actual_qty=actual_qty,
+            reason="BALANCE_VERIFY_FAILED" if actual_qty is None else "HOLDING_EXISTS",
+            entry_blocked=True,
+        )
+        if actual_qty and actual_qty > 0:
+            await notifier.send(
+                "STALE_ACTIVE_ROLLOVER_BLOCKED",
+                level="CRIT",
+                message=(
+                    f"전일 {stale_status} 상태의 실제 보유 {actual_qty}주가 "
+                    f"확인되어 당일 진입을 차단했습니다: {ticker}"
+                ),
+                ticker=ticker,
+            )
+        return False
+
+    if not state.backup_stale(STATE_DIR, stale_date):
+        logger.log(
+            "STALE_BACKUP_FAILED",
+            level="CRIT",
+            stale_date=stale_date,
+            stale_status=stale_status,
+        )
+        return False
+
+    changed = await state.reset_stale_active_for_trading_day(today)
+    if not changed:
+        return False
+    state.discard(STATE_DIR)
+    logger.log(
+        "STALE_ACTIVE_RECONCILED",
+        level="WARN",
+        stale_date=stale_date,
+        stale_status=stale_status,
+        ticker=ticker,
+        actual_qty=0,
+        source="DAILY_ROLLOVER",
+    )
+    await notifier.send(
+        "STALE_ACTIVE_RECONCILED",
+        level="WARN",
+        message=(
+            f"전일 {stale_status} 잔류 상태를 잔고 0주 확인 후 "
+            f"자동 정리했습니다: {ticker}"
+        ),
+        ticker=ticker,
+    )
+    return True
 
 
 async def _check_market_holiday() -> None:
@@ -256,8 +334,21 @@ async def job_f1() -> None:
     await _ensure_trading_day()
     if _is_market_closed_today():
         return
+    if await _skip_entry_pipeline_if_trade_exists("JOB_F1"):
+        return
     try:
-        await paper_fast_probe.observe_open_boundary()
+        await asyncio.wait_for(
+            paper_fast_probe.observe_open_boundary(),
+            timeout=PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError:
+        logger.log(
+            "PAPER_FAST_PROBE_ERROR",
+            level="WARN",
+            phase="OPEN",
+            reason="TIMEOUT",
+            timeout_sec=PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC,
+        )
     except Exception as exc:
         logger.log(
             "PAPER_FAST_PROBE_ERROR",
@@ -266,8 +357,6 @@ async def job_f1() -> None:
             reason="UNHANDLED",
             error=repr(exc),
         )
-    if await _skip_entry_pipeline_if_trade_exists("JOB_F1"):
-        return
     _f1_result = await f1_filter.run()
     await _run_f2_f3_after_f1(immediate=_past_f3_schedule())
 
@@ -276,7 +365,16 @@ async def job_paper_fast_probe() -> None:
     await _ensure_trading_day()
     if _is_market_closed_today():
         return
-    await paper_fast_probe.prepare()
+    try:
+        await paper_fast_probe.prepare()
+    except Exception as exc:
+        logger.log(
+            "PAPER_FAST_PROBE_ERROR",
+            level="WARN",
+            phase="PREOPEN",
+            reason="UNHANDLED",
+            error=repr(exc),
+        )
 
 
 async def job_f2() -> None:
@@ -472,7 +570,48 @@ async def _recover_state() -> None:
 
     if data is not None and data.get("date") != today:
         stale_status = data.get("position_status")
-        if stale_status in ("CLOSED", "IDLE"):
+        stale_active_reconciled = False
+        if (
+            stale_status in _ACTIVE_POSITION_STATUSES
+            and data.get("ticker")
+        ):
+            actual_qty = await _verified_holding_qty(
+                data.get("ticker"),
+                "STALE_STATE_FILE",
+            )
+            if actual_qty == 0:
+                if state.backup_stale(STATE_DIR, str(data.get("date"))):
+                    state.discard(STATE_DIR)
+                    stale_active_reconciled = True
+                    logger.log(
+                        "STALE_ACTIVE_RECONCILED",
+                        level="WARN",
+                        stale_date=data.get("date"),
+                        stale_status=stale_status,
+                        ticker=data.get("ticker"),
+                        actual_qty=0,
+                        source="STATE_FILE",
+                    )
+                    await notifier.send(
+                        "STALE_ACTIVE_RECONCILED",
+                        level="WARN",
+                        message=(
+                            f"전일 {stale_status} 상태 파일을 잔고 0주 확인 후 "
+                            f"자동 정리했습니다: {data.get('ticker')}"
+                        ),
+                        ticker=data.get("ticker"),
+                    )
+                else:
+                    logger.log(
+                        "STALE_BACKUP_FAILED",
+                        level="CRIT",
+                        stale_date=data.get("date"),
+                        stale_status=stale_status,
+                    )
+
+        if stale_active_reconciled:
+            pass
+        elif stale_status in ("CLOSED", "IDLE"):
             # 정상 종료된 지난 거래일 파일 — 잔류 위험이 없으므로 알림 없이
             # 폐기한다. 남겨두면 재시작마다 다시 처리된다.
             logger.log(
@@ -656,55 +795,136 @@ async def _verified_holding_qty(ticker: str | None, recovery_source: str) -> int
         return None
 
     mode = os.getenv("KIS_MODE", "PAPER")
-    try:
-        resp = await kis_rest.get(
-            "/uapi/domestic-stock/v1/trading/inquire-balance",
-            tr_id=_BAL_TR[mode],
-            params=kis_rest.balance_inquiry_params(),
-        )
-    except Exception as exc:
-        logger.log(
-            "PROCESS_RESTART_DETECTED",
-            level="CRIT",
-            recovered_status="HOLDING_VERIFY_FAILED",
-            recovery_source=recovery_source,
-            ticker=ticker,
-            error=repr(exc),
-        )
-        await notifier.send(
-            "PROCESS_RESTART_DETECTED",
-            level="CRIT",
-            message=f"재시작 복구 전 잔고 확인 실패: {ticker}. 수동 확인 필요.",
-            ticker=ticker,
-        )
-        return None
+    params = kis_rest.balance_inquiry_params()
+    seen_keys: set[tuple[str, str]] = set()
+    tr_cont = ""
 
-    if str(resp.get("rt_cd", "0")) != "0":
-        logger.log(
-            "PROCESS_RESTART_DETECTED",
-            level="CRIT",
-            recovered_status="HOLDING_VERIFY_FAILED",
-            recovery_source=recovery_source,
-            ticker=ticker,
-            rt_cd=resp.get("rt_cd"),
-            msg_cd=resp.get("msg_cd"),
-            msg1=resp.get("msg1"),
-        )
-        await notifier.send(
-            "PROCESS_RESTART_DETECTED",
-            level="CRIT",
-            message=(
-                f"재시작 복구 전 잔고 확인 실패: {ticker}. "
-                f"{resp.get('msg_cd') or ''} {resp.get('msg1') or ''}. 수동 확인 필요."
-            ),
-            ticker=ticker,
-        )
-        return None
+    for page in range(1, _BALANCE_MAX_PAGES + 1):
+        try:
+            resp = await kis_rest.get(
+                "/uapi/domestic-stock/v1/trading/inquire-balance",
+                tr_id=_BAL_TR[mode],
+                params=params,
+                tr_cont=tr_cont,
+                include_response_meta=True,
+            )
+        except Exception as exc:
+            await _log_holding_verify_failure(
+                ticker,
+                recovery_source,
+                page=page,
+                error=repr(exc),
+            )
+            return None
 
-    for item in resp.get("output1", []):
-        if isinstance(item, dict) and item.get("pdno") == ticker:
-            return int(float(item.get("hldg_qty") or 0))
-    return 0
+        if str(resp.get("rt_cd", "0")) != "0":
+            await _log_holding_verify_failure(
+                ticker,
+                recovery_source,
+                page=page,
+                rt_cd=resp.get("rt_cd"),
+                msg_cd=resp.get("msg_cd"),
+                msg1=resp.get("msg1"),
+            )
+            return None
+
+        output = resp.get("output1")
+        if not isinstance(output, list):
+            await _log_holding_verify_failure(
+                ticker,
+                recovery_source,
+                page=page,
+                reason="INVALID_OUTPUT1",
+            )
+            return None
+
+        for item in output:
+            if isinstance(item, dict) and item.get("pdno") == ticker:
+                try:
+                    qty = int(float(item.get("hldg_qty") or 0))
+                except (TypeError, ValueError):
+                    await _log_holding_verify_failure(
+                        ticker,
+                        recovery_source,
+                        page=page,
+                        reason="INVALID_HOLDING_QTY",
+                    )
+                    return None
+                if qty < 0:
+                    await _log_holding_verify_failure(
+                        ticker,
+                        recovery_source,
+                        page=page,
+                        reason="INVALID_HOLDING_QTY",
+                    )
+                    return None
+                return qty
+
+        response_meta = resp.get("_response_meta")
+        next_flag = (
+            str(response_meta.get("tr_cont") or "").upper()
+            if isinstance(response_meta, dict)
+            else ""
+        )
+        if next_flag not in {"M", "F"}:
+            return 0
+
+        fk = str(resp.get("ctx_area_fk100") or "")
+        nk = str(resp.get("ctx_area_nk100") or "")
+        continuation_key = (fk, nk)
+        if not (fk or nk) or continuation_key in seen_keys:
+            await _log_holding_verify_failure(
+                ticker,
+                recovery_source,
+                page=page,
+                reason="INVALID_CONTINUATION_KEY",
+                tr_cont=next_flag,
+            )
+            return None
+        seen_keys.add(continuation_key)
+        params = {
+            **params,
+            "CTX_AREA_FK100": fk,
+            "CTX_AREA_NK100": nk,
+        }
+        tr_cont = "N"
+
+    await _log_holding_verify_failure(
+        ticker,
+        recovery_source,
+        page=_BALANCE_MAX_PAGES,
+        reason="MAX_PAGES_EXCEEDED",
+    )
+    return None
+
+
+async def _log_holding_verify_failure(
+    ticker: str,
+    recovery_source: str,
+    **fields,
+) -> None:
+    logger.log(
+        "PROCESS_RESTART_DETECTED",
+        level="CRIT",
+        recovered_status="HOLDING_VERIFY_FAILED",
+        recovery_source=recovery_source,
+        ticker=ticker,
+        **fields,
+    )
+    detail = " ".join(
+        str(value)
+        for value in (fields.get("msg_cd"), fields.get("msg1"), fields.get("reason"))
+        if value
+    )
+    await notifier.send(
+        "PROCESS_RESTART_DETECTED",
+        level="CRIT",
+        message=(
+            f"재시작 복구 전 전체 잔고 확인 실패: {ticker}"
+            f"{f'. {detail}' if detail else ''}. 수동 확인 필요."
+        ),
+        ticker=ticker,
+    )
 
 
 async def _recover_open_trade_from_db(today: str) -> None:

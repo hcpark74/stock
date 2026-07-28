@@ -190,6 +190,8 @@ def _f1_status_from_logs(logs: list[dict]) -> tuple[str, dict | None]:
         last_event = entry
         if event == "F1_API_ERROR":
             status = "FAILED"
+        elif event == "F1_SKIPPED":
+            status = "FAILED"
         elif event == "F1_RETRY_WAIT":
             status = "RETRYING"
         elif event in {"F1_FETCH_DONE", "F1_FILTER_EMPTY", "F1_EXPECTED_COMPARE"}:

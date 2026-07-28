@@ -60,8 +60,8 @@ def _transient_sleep_seconds(retry: int) -> float:
     return min(_TRANSIENT_RETRY_BASE_SEC * (2 ** retry), _TRANSIENT_RETRY_MAX_SEC)
 
 
-def _headers(tr_id: str = "") -> dict:
-    return {
+def _headers(tr_id: str = "", tr_cont: str = "") -> dict:
+    headers = {
         "authorization": f"Bearer {auth.get()}",
         "appkey": os.getenv("KIS_APP_KEY", ""),
         "appsecret": os.getenv("KIS_APP_SECRET", ""),
@@ -70,6 +70,9 @@ def _headers(tr_id: str = "") -> dict:
         "content-type": "application/json; charset=utf-8",
         # 모의투자는 일부 TR ID 앞에 'V' prefix 필요 — 호출 측에서 tr_id 구분
     }
+    if tr_cont:
+        headers["tr_cont"] = tr_cont
+    return headers
 
 
 async def _get_client() -> httpx.AsyncClient:
@@ -112,6 +115,8 @@ async def _request(
     _token_retry: int = 0,
     send_guard: Callable[[], bool] | None = None,
     stop_on_rate_limit: bool = False,
+    tr_cont: str = "",
+    include_response_meta: bool = False,
     **kwargs,
 ) -> dict:
     """Rate-limited KIS REST 요청.
@@ -156,7 +161,7 @@ async def _request(
         resp = await client.request(
             method,
             url,
-            headers=_headers(tr_id),
+            headers=_headers(tr_id, tr_cont),
             timeout=timeout,
             **kwargs,
         )
@@ -187,6 +192,8 @@ async def _request(
                 _token_retry=_token_retry,
                 send_guard=send_guard,
                 stop_on_rate_limit=stop_on_rate_limit,
+                tr_cont=tr_cont,
+                include_response_meta=include_response_meta,
                 **kwargs,
             )
         log(
@@ -243,6 +250,8 @@ async def _request(
             _token_retry=_token_retry,
             send_guard=send_guard,
             stop_on_rate_limit=stop_on_rate_limit,
+            tr_cont=tr_cont,
+            include_response_meta=include_response_meta,
             **kwargs,
         )
 
@@ -260,6 +269,8 @@ async def _request(
                 _token_retry=_token_retry + 1,
                 send_guard=send_guard,
                 stop_on_rate_limit=stop_on_rate_limit,
+                tr_cont=tr_cont,
+                include_response_meta=include_response_meta,
                 **kwargs,
             )
 
@@ -283,6 +294,8 @@ async def _request(
                 _token_retry=_token_retry + 1,
                 send_guard=send_guard,
                 stop_on_rate_limit=stop_on_rate_limit,
+                tr_cont=tr_cont,
+                include_response_meta=include_response_meta,
                 **kwargs,
             )
 
@@ -314,9 +327,16 @@ async def _request(
             _token_retry=_token_retry,
             send_guard=send_guard,
             stop_on_rate_limit=stop_on_rate_limit,
+            tr_cont=tr_cont,
+            include_response_meta=include_response_meta,
             **kwargs,
         )
 
+    if include_response_meta and isinstance(data, dict):
+        data = dict(data)
+        data["_response_meta"] = {
+            "tr_cont": str(resp.headers.get("tr_cont") or ""),
+        }
     return data
 
 
@@ -326,6 +346,8 @@ async def get(
     tr_id: str = "",
     timeout: float = _TIMEOUT,
     stop_on_rate_limit: bool = False,
+    tr_cont: str = "",
+    include_response_meta: bool = False,
 ) -> dict:
     return await _request(
         "GET",
@@ -334,6 +356,8 @@ async def get(
         timeout=timeout,
         params=params,
         stop_on_rate_limit=stop_on_rate_limit,
+        tr_cont=tr_cont,
+        include_response_meta=include_response_meta,
     )
 
 

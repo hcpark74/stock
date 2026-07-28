@@ -72,10 +72,16 @@ async def test_prepare_records_four_public_calls_and_selects_top_three(
     monkeypatch,
     tmp_path,
 ):
+    class FixedDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 7, 28, 8, 59, 45, tzinfo=probe.KST)
+
     monkeypatch.setenv("KIS_MODE", "PAPER")
     monkeypatch.setenv("PAPER_FAST_PROBE", "1")
     monkeypatch.setenv("DRY_RUN", "0")
     monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    monkeypatch.setattr(probe, "datetime", FixedDateTime)
     probe._prepared_tickers = []
 
     ranking_j = [
@@ -126,6 +132,34 @@ async def test_prepare_records_four_public_calls_and_selects_top_three(
 
 
 @pytest.mark.asyncio
+async def test_prepare_skips_after_market_open(monkeypatch, tmp_path):
+    class FixedDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 7, 28, 9, 0, 0, tzinfo=probe.KST)
+
+    monkeypatch.setenv("KIS_MODE", "PAPER")
+    monkeypatch.setenv("PAPER_FAST_PROBE", "1")
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    monkeypatch.setattr(probe, "datetime", FixedDateTime)
+    probe._prepared_tickers = ["006340"]
+    get = AsyncMock()
+    monkeypatch.setattr(probe.kis_rest, "get", get)
+
+    assert await probe.prepare() == []
+
+    get.assert_not_awaited()
+    assert probe._prepared_tickers == []
+    records = [
+        json.loads(line)
+        for line in next(tmp_path.glob("*.jsonl")).read_text(encoding="utf-8").splitlines()
+    ]
+    assert records[-1]["event"] == "PAPER_FAST_PROBE_PREOPEN_SKIPPED"
+    assert records[-1]["reason"] == "MARKET_OPEN"
+
+
+@pytest.mark.asyncio
 async def test_prepare_is_noop_in_real_mode(monkeypatch, tmp_path):
     monkeypatch.setenv("KIS_MODE", "REAL")
     monkeypatch.setenv("PAPER_FAST_PROBE", "1")
@@ -134,6 +168,20 @@ async def test_prepare_is_noop_in_real_mode(monkeypatch, tmp_path):
     monkeypatch.setattr(probe.kis_rest, "get", get)
 
     assert await probe.prepare() == []
+    get.assert_not_awaited()
+    assert list(tmp_path.glob("*")) == []
+
+
+@pytest.mark.asyncio
+async def test_open_boundary_is_noop_in_real_mode(monkeypatch, tmp_path):
+    monkeypatch.setenv("KIS_MODE", "REAL")
+    monkeypatch.setenv("PAPER_FAST_PROBE", "1")
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    get = AsyncMock()
+    monkeypatch.setattr(probe.kis_rest, "get", get)
+
+    await probe.observe_open_boundary()
+
     get.assert_not_awaited()
     assert list(tmp_path.glob("*")) == []
 
@@ -208,3 +256,38 @@ async def test_open_boundary_skips_when_scheduler_is_too_late(monkeypatch, tmp_p
     ]
     assert records[-1]["event"] == "PAPER_FAST_PROBE_OPEN_SKIPPED"
     assert records[-1]["reason"] == "TOO_LATE"
+
+
+@pytest.mark.asyncio
+async def test_open_boundary_recovers_tickers_from_preopen_record(
+    monkeypatch,
+    tmp_path,
+):
+    class FixedDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 7, 28, 9, 0, 0, 300000, tzinfo=probe.KST)
+
+    monkeypatch.setenv("KIS_MODE", "PAPER")
+    monkeypatch.setenv("PAPER_FAST_PROBE", "1")
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    monkeypatch.setenv("PAPER_FAST_PROBE_OPEN_OFFSET_MS", "300")
+    monkeypatch.setattr(probe, "datetime", FixedDateTime)
+    probe._prepared_tickers = []
+    path = tmp_path / "20260728.jsonl"
+    path.write_text(
+        json.dumps({
+            "event": "PAPER_FAST_PROBE_PREOPEN_DONE",
+            "selected_tickers": ["006340", "477850"],
+        })
+        + "\n",
+        encoding="utf-8",
+    )
+    get = AsyncMock(return_value={"rt_cd": "0", "output": []})
+    monkeypatch.setattr(probe.kis_rest, "get", get)
+
+    await probe.observe_open_boundary()
+
+    assert get.await_args.kwargs["params"]["FID_INPUT_ISCD_1"] == "006340"
+    assert get.await_args.kwargs["params"]["FID_INPUT_ISCD_2"] == "477850"

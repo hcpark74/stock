@@ -86,6 +86,52 @@ async def test_new_trading_day_does_not_clear_active_position():
     assert s.target_ticker == "005930"
     assert s.remaining_qty == 10
 
+
+async def test_verified_stale_entering_can_reset_for_new_trading_day():
+    await state.ensure_trading_day("20260727")
+    s = state.get()
+    s.position_status = "ENTERING"
+    s.target_ticker = "006340"
+    s.day_skip = True
+
+    changed = await state.reset_stale_entering_for_trading_day("20260728")
+
+    assert changed is True
+    assert s.trading_date == "20260728"
+    assert s.position_status == "IDLE"
+    assert s.target_ticker is None
+    assert s.day_skip is False
+
+
+async def test_stale_entering_with_pending_order_cannot_reset():
+    await state.ensure_trading_day("20260727")
+    s = state.get()
+    s.position_status = "ENTERING"
+    s.pending_entry = {"order_id": "0000000937"}
+
+    changed = await state.reset_stale_entering_for_trading_day("20260728")
+
+    assert changed is False
+    assert s.trading_date == "20260727"
+    assert s.position_status == "ENTERING"
+
+
+@pytest.mark.parametrize("status", ["ENTERING", "HOLDING", "EXITING"])
+async def test_verified_zero_holding_can_reset_any_stale_active_status(status):
+    await state.ensure_trading_day("20260727")
+    s = state.get()
+    s.position_status = status
+    s.target_ticker = "006340"
+    s.pending_entry = {"order_id": "0000000937"} if status == "ENTERING" else None
+
+    changed = await state.reset_stale_active_for_trading_day("20260728")
+
+    assert changed is True
+    assert s.trading_date == "20260728"
+    assert s.position_status == "IDLE"
+    assert s.pending_entry is None
+
+
 async def test_set_holding_records_entry_at():
     s = state.get()
     s.position_status = "ENTERING"

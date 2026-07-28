@@ -14,6 +14,12 @@ EVENT_LABELS = {
     "STALE_PID_REPLACED": "오래된 PID 파일 제거(Stale PID Removed)",
     "STALE_STATE_DISCARDED": "지난 거래일 상태 파일 폐기(Stale State Discarded)",
     "STALE_BACKUP_FAILED": "지난 상태 증거 사본 실패(Stale Backup Failed)",
+    "STALE_ACTIVE_RECONCILED": (
+        "전일 활성 상태 자동 정리(Stale Active Reconciled)"
+    ),
+    "STALE_ACTIVE_ROLLOVER_BLOCKED": (
+        "전일 활성 상태 일일 전환 차단(Stale Active Rollover Blocked)"
+    ),
     "PROCESS_RESTART_DETECTED": "프로세스 재시작 감지(Process Restart Detected)",
     "TIME_SYNC_OK": "시각 동기화 정상(Time Sync OK)",
     "TIME_SYNC_WARN": "시각 오차 경고(Time Sync Warning)",
@@ -54,6 +60,7 @@ EVENT_LABELS = {
     "ENTRY_CANCEL_RELEASE_WAIT": "취소 후 증거금 해제 대기(Entry Cancel Release Wait)",
     "ENTRY_QTY_CLAMPED": "진입 주문 수량 조정(Entry Quantity Clamped)",
     "F1_DONE": "F1 필터 완료(F1 Done)",
+    "F1_SKIPPED": "F1 필터 생략(F1 Skipped)",
     "F1_FETCH_START": "F1 API 조회중(F1 Fetching)",
     "F1_EXPECTED_QUOTE_START": "F1 예상체결 조회 시작(F1 Expected Quote Start)",
     "F1_EXPECTED_QUOTE_PROGRESS": "F1 예상체결 조회중(F1 Expected Quote Progress)",
@@ -77,6 +84,7 @@ EVENT_LABELS = {
     "PAPER_FAST_PROBE_PREOPEN_DONE": (
         "PAPER Fast Path 장전 관측 완료(Paper Fast Probe Preopen Done)"
     ),
+    "PAPER_FAST_PROBE_PREOPEN_SKIPPED": "PAPER Fast Path Preopen Skipped",
     "PAPER_FAST_PROBE_OPEN_MULTI": (
         "PAPER Fast Path 개장 멀티시세 관측(Paper Fast Probe Open Multi)"
     ),

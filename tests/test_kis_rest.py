@@ -67,6 +67,16 @@ def test_account_helpers_do_not_fallback_from_empty_runtime_env_names(monkeypatc
     assert params["ACNT_PRDT_CD"] == ""
 
 
+def test_headers_include_continuation_only_when_requested(monkeypatch):
+    monkeypatch.setattr(kis_rest.auth, "get", lambda: "token")
+
+    first = kis_rest._headers("VTTC8434R")
+    continued = kis_rest._headers("VTTC8434R", "N")
+
+    assert "tr_cont" not in first
+    assert continued["tr_cont"] == "N"
+
+
 class _FakeResponse:
     status_code = 200
 
@@ -89,6 +99,24 @@ class _FakeAsyncClient:
     async def request(self, *args, **kwargs):
         self.starts.append(time.monotonic())
         return _FakeResponse()
+
+
+@pytest.mark.asyncio
+async def test_get_can_return_continuation_response_metadata(monkeypatch):
+    class ContinuationResponse(_FakeResponse):
+        headers = {"tr_cont": "M"}
+
+    class ContinuationClient(_FakeAsyncClient):
+        async def request(self, *args, **kwargs):
+            return ContinuationResponse()
+
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 0)
+    monkeypatch.setattr(kis_rest.httpx, "AsyncClient", ContinuationClient)
+
+    resp = await kis_rest.get("/test", include_response_meta=True)
+
+    assert resp["rt_cd"] == "0"
+    assert resp["_response_meta"] == {"tr_cont": "M"}
 
 
 class _ControlledClock:

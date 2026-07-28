@@ -29,6 +29,15 @@ def test_f1_snapshot_saved_is_only_weak_done_signal():
     assert last_event == logs[-1]
 
 
+def test_f1_skipped_is_failed_status():
+    status, last_event = server._f1_status_from_logs(
+        [{"event": "F1_SKIPPED", "reason": "PROCESS_RESTART_DETECTED"}]
+    )
+
+    assert status == "FAILED"
+    assert last_event["event"] == "F1_SKIPPED"
+
+
 def test_selection_process_summarizes_f1_f2_f3():
     summary = {
         "selected": {

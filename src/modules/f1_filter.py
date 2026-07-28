@@ -74,6 +74,13 @@ async def run() -> list[dict]:
 
     s = state.get()
     if s.day_skip:
+        log(
+            "F1_SKIPPED",
+            level="WARN",
+            reason=s.close_reason or "DAY_SKIP",
+            trading_date=s.trading_date,
+            position_status=s.position_status,
+        )
         return []
 
     attempt = 0
