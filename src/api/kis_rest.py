@@ -26,6 +26,7 @@ _client_lock = asyncio.Lock()
 _client: httpx.AsyncClient | None = None
 _client_factory: object | None = None
 SEND_GUARD_BLOCKED_MSG_CD = "LOCAL_SEND_GUARD_BLOCKED"
+RATE_LIMIT_CODES = frozenset({"EGW00201"})
 
 
 def account_no() -> str:
@@ -58,6 +59,11 @@ def balance_inquiry_params() -> dict:
 
 def _transient_sleep_seconds(retry: int) -> float:
     return min(_TRANSIENT_RETRY_BASE_SEC * (2 ** retry), _TRANSIENT_RETRY_MAX_SEC)
+
+
+def _rate_limit_sleep_seconds(retry: int, path: str) -> float:
+    """Use the established one-second delay for each confirmed rate-limit retry."""
+    return 1.0
 
 
 def _headers(tr_id: str = "", tr_cont: str = "") -> dict:
@@ -234,19 +240,19 @@ async def _request(
     # 429 — Rate limit 초과
     if resp.status_code == 429:
         log("RATE_LIMIT_HIT", level="WARN", path=path)
-        if stop_on_rate_limit:
+        if stop_on_rate_limit or method != "GET" or _app_retry >= 3:
             return {
                 "rt_cd": "1",
                 "msg_cd": "HTTP_429",
                 "msg1": "HTTP 429 rate limit",
             }
-        await asyncio.sleep(1)
-        return await _request(
+        await asyncio.sleep(_rate_limit_sleep_seconds(_app_retry, path))
+        result = await _request(
             method,
             path,
             tr_id,
             timeout=timeout,
-            _app_retry=_app_retry,
+            _app_retry=_app_retry + 1,
             _token_retry=_token_retry,
             send_guard=send_guard,
             stop_on_rate_limit=stop_on_rate_limit,
@@ -254,6 +260,14 @@ async def _request(
             include_response_meta=include_response_meta,
             **kwargs,
         )
+        if _app_retry == 0 and str(result.get("rt_cd", "1")) == "0":
+            log(
+                "RATE_LIMIT_RECOVERED",
+                level="INFO",
+                path=path,
+                initial_code="HTTP_429",
+            )
+        return result
 
     # 401 — 토큰 만료 → 즉시 재발급 후 1회 재시도
     if resp.status_code == 401 and _token_retry < 1:
@@ -299,26 +313,28 @@ async def _request(
                 **kwargs,
             )
 
-    if data.get("msg_cd") == "EGW00201" and stop_on_rate_limit:
+    msg_cd = str(data.get("msg_cd") or "")
+    if msg_cd in RATE_LIMIT_CODES and stop_on_rate_limit:
         log(
             "RATE_LIMIT_HIT",
             level="WARN",
             path=path,
-            msg_cd=data.get("msg_cd"),
+            msg_cd=msg_cd,
             msg1=data.get("msg1"),
         )
         return data
 
-    if data.get("msg_cd") == "EGW00201" and _app_retry < 3:
+    if msg_cd in RATE_LIMIT_CODES:
         log(
             "RATE_LIMIT_HIT",
             level="WARN",
             path=path,
-            msg_cd=data.get("msg_cd"),
+            msg_cd=msg_cd,
             msg1=data.get("msg1"),
         )
-        await asyncio.sleep(1.0)
-        return await _request(
+    if msg_cd in RATE_LIMIT_CODES and method == "GET" and _app_retry < 3:
+        await asyncio.sleep(_rate_limit_sleep_seconds(_app_retry, path))
+        result = await _request(
             method,
             path,
             tr_id,
@@ -331,6 +347,14 @@ async def _request(
             include_response_meta=include_response_meta,
             **kwargs,
         )
+        if _app_retry == 0 and str(result.get("rt_cd", "1")) == "0":
+            log(
+                "RATE_LIMIT_RECOVERED",
+                level="INFO",
+                path=path,
+                initial_code=msg_cd,
+            )
+        return result
 
     if include_response_meta and isinstance(data, dict):
         data = dict(data)

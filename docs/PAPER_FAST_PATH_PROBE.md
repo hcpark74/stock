@@ -5,17 +5,26 @@
 PAPER의 1.1초 REST 호출 제한에서 F1의 약 60회 단건 예상체결 조회를
 장전 순위 2회와 멀티시세 2회로 대체할 수 있는지 실서버 응답으로 검증한다.
 
-이 단계는 관측 전용이다. 기존 F1/F2/F3 후보 선정, 상태 파일, 주문 수량,
-주문 전송 경로를 변경하지 않는다. `KIS_MODE=PAPER`, `DRY_RUN!=1`,
-`PAPER_FAST_PROBE=1`을 모두 만족할 때만 실행된다.
+현재 구현은 두 모드를 지원한다.
+
+- Shadow: 개장 멀티시세 후보와 레거시 F1 결과를 비교만 한다.
+- Hybrid: 개장 멀티시세 후보를 F2/F3에 전달한다. 주문 수량·주문 전 최종
+  가격/잔고/VI 검증과 주문 전송 경로는 기존 F3를 그대로 사용한다.
+
+두 모드 모두 `KIS_MODE=PAPER`, `DRY_RUN!=1`, `PAPER_FAST_PROBE=1`을
+만족해야 한다. `REAL`에서는 관련 환경변수가 켜져 있어도 코드에서 차단한다.
 
 ## 실행 시각과 호출
 
 - 08:59:45: KOSPI/KOSDAQ 등락률 순위 API를 각각 호출한다.
 - 각 순위 응답의 최대 30종목을 시장별 멀티시세 API로 조회한다.
-- 장전 응답만으로 관측 대상 3종목을 선정해 기록한다.
-- 09:00:00.300: 기존 F1이 시작되기 직전에 대상 3종목의 멀티시세를
-  한 번 더 조회한다.
+- 장전 응답에서 `PAPER_FAST_SHADOW_TOP_N`개(기본 10개)의 shortlist를
+  선정해 기록한다.
+- 09:00:00.300: 기존 F1이 시작되기 직전에 shortlist의 멀티시세를 한 번
+  더 조회한다.
+- Hybrid 잔고 스냅샷은 장전 프로브 뒤에 준비하되 08:59:58에 강제
+  종료한다. 느린 계좌 API가 09:00:00.300 멀티시세의 REST 슬롯을
+  선점하지 않도록 하기 위한 개장 가드다.
 - 09:00:02.800보다 늦게 시작하면 개장 관측은 생략하고 기존 F1을 즉시
   계속한다.
 
@@ -28,14 +37,18 @@ PAPER의 1.1초 REST 호출 제한에서 F1의 약 60회 단건 예상체결 조
 
 ```dotenv
 PAPER_FAST_PROBE=1
+PAPER_FAST_SHADOW=1
+PAPER_FAST_HYBRID=0
+PAPER_FAST_SHADOW_TOP_N=10
 PAPER_FAST_PROBE_DIR=data/paper_fast_probe
 PAPER_FAST_PROBE_OPEN_OFFSET_MS=300
 PAPER_FAST_PROBE_OPEN_MAX_LATENESS_MS=2500
 PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC=2.5
 ```
 
-공용 예시는 안전하게 비활성(`0`)이고, 현재 PAPER `.env`에서만 활성화한다.
-REAL 또는 DRY_RUN에서는 값이 `1`이어도 코드 레벨에서 실행되지 않는다.
+`PAPER_FAST_HYBRID=0`이면 Shadow 비교만 수행하고 레거시 F1 결과를
+사용한다. `1`이면 PAPER에서만 fast 후보를 F2/F3에 전달한다. REAL 또는
+DRY_RUN에서는 값이 `1`이어도 코드 레벨에서 실행되지 않는다.
 
 ## 산출물
 
@@ -52,7 +65,7 @@ data/paper_fast_probe/YYYYMMDD.jsonl
 
 - `PAPER_FAST_PROBE_RANKING`: 시장별 장전 순위 원시 응답
 - `PAPER_FAST_PROBE_MULTI`: 시장별 장전 멀티시세 원시 응답
-- `PAPER_FAST_PROBE_PREOPEN_DONE`: 요청/응답 종목 대응 및 관측 대상 3종목
+- `PAPER_FAST_PROBE_PREOPEN_DONE`: 요청/응답 종목 대응 및 장전 shortlist
 - `PAPER_FAST_PROBE_PREOPEN_SKIPPED`: 09:00 이후 장전 관측 미스파이어 생략
 - `PAPER_FAST_PROBE_OPEN_MULTI`: 개장 직후 멀티시세 원시 응답
 - `PAPER_FAST_PROBE_OPEN_DONE`: 실제 시작 지연과 유효 매도1호가 개수
@@ -72,13 +85,14 @@ data/paper_fast_probe/YYYYMMDD.jsonl
    VI 또는 거래정지 판단에 사용할 수 있는가.
 5. 09:00:00.300 조회에서 `inter2_askp`가 유효한가. 비어 있다면
    1회 재조회 필요성과 적정 지연 시간을 결정한다.
-6. 장전 선정 상위 3종목과 기존 F1 결과의 순위·누락 종목 차이가
+6. 장전 shortlist 상위 3종목과 기존 F1 결과의 순위·누락 종목 차이가
    허용 가능한가.
 7. 추가 5회 호출이 PAPER 제한 오류 없이 끝나고 기존 F1/F2/F3가
    그대로 실행되는가.
 
-이 항목을 만족한 뒤에만 실제 Fast Path 후보 선정과 주문 경로를 별도
-변경으로 구현한다.
+Shadow 결과는 `PAPER_FAST_SHADOW_COMPARE`로 계속 기록한다. Hybrid는
+이 관측을 바탕으로 구현됐으며, REAL 차단과 기존 F3 안전 가드는 별도
+회귀 테스트로 유지한다.
 
 ## 2026-07-27 장중 수동 확인
 

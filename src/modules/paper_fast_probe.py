@@ -32,6 +32,8 @@ PREOPEN_MARKETS = (
 )
 
 _prepared_tickers: list[str] = []
+_prepared_candidates: list[dict] = []
+_open_candidates: list[dict] = []
 
 
 def enabled() -> bool:
@@ -41,6 +43,23 @@ def enabled() -> bool:
         and os.getenv("PAPER_FAST_PROBE", "0") == "1"
         and os.getenv("DRY_RUN", "0") != "1"
     )
+
+
+def shadow_enabled() -> bool:
+    """Shadow comparison is PAPER-only and never changes trading state."""
+    return enabled() and os.getenv("PAPER_FAST_SHADOW", "1") == "1"
+
+
+def hybrid_enabled() -> bool:
+    """Live PAPER fast path requires an explicit opt-in; REAL is always excluded."""
+    return enabled() and os.getenv("PAPER_FAST_HYBRID", "0") == "1"
+
+
+def _shadow_top_n() -> int:
+    try:
+        return max(1, min(30, int(os.getenv("PAPER_FAST_SHADOW_TOP_N", "10"))))
+    except ValueError:
+        return 10
 
 
 def _probe_dir() -> Path:
@@ -227,21 +246,33 @@ def _candidate_from_multi(
     if len(ticker) != 6 or not ticker.isdigit():
         return None
 
-    price = _to_float(row.get("inter2_prpr"))
+    ranking = ranking_by_ticker.get(ticker, {})
+    name = str(row.get("inter_kor_isnm") or ranking.get("hts_kor_isnm") or "")
+    if f1_selector.is_excluded_product(name):
+        return None
+
+    current_price = _to_float(row.get("inter2_prpr"))
     prev_close = _to_float(row.get("inter2_prdy_clpr") or row.get("inter2_sdpr"))
     expected_qty = _to_int(row.get("intr_antc_vol"))
-    gap_pct = (
+    expected_gap_pct = (
         _to_float(row.get("intr_antc_cntg_prdy_ctrt"))
         if expected_qty > 0
         else _to_float(row.get("prdy_ctrt"))
     )
+    expected_diff = _to_float(row.get("intr_antc_cntg_vrss"))
+    derived_expected = (
+        prev_close + expected_diff
+        if prev_close > 0 and expected_diff
+        else prev_close * (1 + expected_gap_pct / 100)
+    )
+    price = derived_expected if expected_qty > 0 and derived_expected > 0 else current_price
+    gap_pct = expected_gap_pct
     qty = expected_qty if expected_qty > 0 else _to_int(row.get("acml_vol"))
     expected_amount = (
         price * qty
         if expected_qty > 0
         else _to_float(row.get("acml_tr_pbmn"))
     )
-    ranking = ranking_by_ticker.get(ticker, {})
     ranking_price = _to_float(ranking.get("stck_prpr")) or price
     avg_amount_5d = _to_float(ranking.get("avrg_vol")) * ranking_price
     vi_gap = (
@@ -251,7 +282,7 @@ def _candidate_from_multi(
     )
     return {
         "ticker": ticker,
-        "name": row.get("inter_kor_isnm") or ranking.get("hts_kor_isnm") or "",
+        "name": name,
         "market": market,
         "expected_price": price,
         "prev_close": prev_close,
@@ -266,6 +297,9 @@ def _candidate_from_multi(
         "expected_qty": qty,
         "vi_gap": vi_gap,
         "buy_sell_ratio": 0.0,
+        "current_price": current_price,
+        "ask_price": _to_float(row.get("inter2_askp")),
+        "quote_hour_code": str(row.get("hour_cls_code") or ""),
     }
 
 
@@ -312,11 +346,12 @@ def _select_probe_tickers(
 
 async def prepare() -> list[str]:
     """Collect the 08:59 ranking and multi-price evidence."""
-    global _prepared_tickers
+    global _prepared_tickers, _prepared_candidates
     if not enabled():
         return []
 
     _prepared_tickers = []
+    _prepared_candidates = []
     now = datetime.now(KST)
     market_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
     if now >= market_open:
@@ -392,7 +427,26 @@ async def prepare() -> list[str]:
             }
         )
 
-    _prepared_tickers = _select_probe_tickers(ranking_rows, multi_rows)
+    _prepared_tickers = _select_probe_tickers(
+        ranking_rows,
+        multi_rows,
+        limit=_shadow_top_n(),
+    )
+    prepared_by_ticker: dict[str, dict] = {}
+    for market in ("J", "Q"):
+        ranking_by_ticker = {
+            str(row.get("stck_shrn_iscd") or row.get("mksc_shrn_iscd") or ""): row
+            for row in ranking_rows.get(market, [])
+        }
+        for row in multi_rows.get(market, []):
+            candidate = _candidate_from_multi(row, market, ranking_by_ticker)
+            if candidate is not None:
+                prepared_by_ticker[str(candidate["ticker"])] = candidate
+    _prepared_candidates = [
+        prepared_by_ticker[ticker]
+        for ticker in _prepared_tickers
+        if ticker in prepared_by_ticker
+    ]
     elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
     _append_record(
         "PAPER_FAST_PROBE_PREOPEN_DONE",
@@ -430,15 +484,56 @@ def _load_prepared_tickers() -> list[str]:
             str(ticker)
             for ticker in record.get("selected_tickers", [])
             if len(str(ticker)) == 6 and str(ticker).isdigit()
-        ][:3]
+        ][:_shadow_top_n()]
     return []
 
 
-async def observe_open_boundary() -> None:
-    """Observe the prepared top-three once near 09:00 without changing F1."""
-    global _prepared_tickers
+def get_open_candidates() -> list[dict]:
+    return [dict(candidate) for candidate in _open_candidates]
+
+
+def compare_with_legacy(legacy_candidates: list[dict]) -> dict:
+    """Record fast/legacy selection parity without changing live candidates."""
+    fast = get_open_candidates()
+    fast_tickers = [str(c.get("ticker") or "") for c in fast if c.get("ticker")]
+    legacy_tickers = [
+        str(c.get("ticker") or "") for c in legacy_candidates if c.get("ticker")
+    ]
+    common = set(fast_tickers) & set(legacy_tickers)
+    fast_by_ticker = {str(c.get("ticker")): c for c in fast}
+    legacy_by_ticker = {str(c.get("ticker")): c for c in legacy_candidates}
+    gap_deltas = [
+        abs(
+            float(fast_by_ticker[ticker].get("gap_pct") or 0.0)
+            - float(legacy_by_ticker[ticker].get("gap_pct") or 0.0)
+        )
+        * 100
+        for ticker in common
+    ]
+    fields = {
+        "fast_count": len(fast_tickers),
+        "legacy_count": len(legacy_tickers),
+        "fast_tickers": fast_tickers,
+        "legacy_tickers": legacy_tickers,
+        "top3_overlap_count": len(set(fast_tickers[:3]) & set(legacy_tickers[:3])),
+        "rank1_match": bool(
+            fast_tickers and legacy_tickers and fast_tickers[0] == legacy_tickers[0]
+        ),
+        "common_count": len(common),
+        "max_gap_delta_pct_point": round(max(gap_deltas), 4) if gap_deltas else None,
+    }
+    if shadow_enabled():
+        _append_record("PAPER_FAST_SHADOW_COMPARE", phase="SHADOW", **fields)
+        log("PAPER_FAST_SHADOW_COMPARE", level="INFO", **fields)
+    return fields
+
+
+async def observe_open_boundary() -> list[dict]:
+    """Observe and rank the prepared shortlist near 09:00."""
+    global _prepared_tickers, _open_candidates
+    _open_candidates = []
     if not enabled():
-        return
+        return []
 
     now = datetime.now(KST)
     target = now.replace(hour=9, minute=0, second=0, microsecond=0)
@@ -470,7 +565,7 @@ async def observe_open_boundary() -> None:
             max_lateness_ms=max_lateness_ms,
             reason="TOO_LATE",
         )
-        return
+        return []
 
     tickers = list(_prepared_tickers) or _load_prepared_tickers()
     if not tickers:
@@ -488,17 +583,40 @@ async def observe_open_boundary() -> None:
             lateness_ms=lateness_ms,
             reason="NO_PREOPEN_TICKERS",
         )
-        return
+        return []
 
     resp = await _get_and_record(
         event="PAPER_FAST_PROBE_OPEN_MULTI",
         phase="OPEN",
-        market="TOP3",
+        market="SHORTLIST",
         path=MULTI_PRICE_PATH,
         tr_id=MULTI_PRICE_TR_ID,
         params=_multi_params(tickers),
     )
     rows = _rows(resp)
+    prepared_by_ticker = {
+        str(candidate.get("ticker") or ""): candidate
+        for candidate in _prepared_candidates
+    }
+    parsed: list[dict] = []
+    observed_monotonic = time.monotonic()
+    for row in rows:
+        ticker = str(row.get("inter_shrn_iscd") or "")
+        prepared = prepared_by_ticker.get(ticker, {})
+        candidate = _candidate_from_multi(
+            row,
+            str(prepared.get("market") or "J"),
+            {},
+        )
+        if candidate is None:
+            continue
+        if prepared:
+            candidate["avg_amount_5d"] = prepared.get("avg_amount_5d", 0.0)
+        candidate["gap_allowed"] = f1_selector.gap_allowed(candidate)
+        candidate["fast_observed_monotonic"] = observed_monotonic
+        candidate["gap_source"] = f"fast.{candidate.get('gap_source', 'multi')}"
+        parsed.append(candidate)
+    _open_candidates = f1_selector.rank_candidates(parsed)
     valid_ask_count = sum(1 for row in rows if _to_float(row.get("inter2_askp")) > 0)
     _append_record(
         "PAPER_FAST_PROBE_OPEN_DONE",
@@ -514,6 +632,8 @@ async def observe_open_boundary() -> None:
         ],
         valid_ask_count=valid_ask_count,
         output_count=len(rows),
+        shadow_candidate_count=len(_open_candidates),
+        shadow_tickers=[candidate.get("ticker") for candidate in _open_candidates],
     )
     log(
         "PAPER_FAST_PROBE_OPEN_DONE",
@@ -522,4 +642,6 @@ async def observe_open_boundary() -> None:
         requested_count=len(tickers),
         output_count=len(rows),
         valid_ask_count=valid_ask_count,
+        shadow_candidate_count=len(_open_candidates),
     )
+    return get_open_candidates()

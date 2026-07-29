@@ -13,11 +13,18 @@ from zoneinfo import ZoneInfo
 
 from src import db, notifier, state
 from src.api import kis_rest
-from src.modules import vi_watch
+from src.modules import paper_fast_probe, vi_watch
 from src.utils.logger import log
 from src.utils.number import to_float
 
 KST = ZoneInfo("Asia/Seoul")
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        return default
 
 GAP_MIN_RECHECK = 0.020   # 재검증 하한 (F1 3%보다 낮음 — 완충)
 GAP_MAX_ORDER = 0.065     # 주문 전 재검증 상한 — GAP_MAX_FILL과의 차이가 시장가 슬리피지 버퍼
@@ -79,6 +86,14 @@ F3_RECHECK_RETRY_DELAY_SEC = float(os.getenv("F3_RECHECK_RETRY_DELAY_SEC", "1.0"
 F3_RECHECK_BATCH_TIMEOUT_SEC = float(os.getenv("F3_RECHECK_BATCH_TIMEOUT_SEC", "0"))
 BALANCE_QUERY_MAX_ATTEMPTS = max(1, int(os.getenv("BALANCE_QUERY_MAX_ATTEMPTS", "3")))
 BALANCE_QUERY_RETRY_DELAY_SEC = float(os.getenv("BALANCE_QUERY_RETRY_DELAY_SEC", "1.0"))
+BALANCE_SNAPSHOT_TTL_SEC = max(
+    0.0,
+    _env_float("BALANCE_SNAPSHOT_TTL_SEC", 90.0),
+)
+F3_FAST_RECHECK_MAX_AGE_SEC = max(
+    0.0,
+    _env_float("F3_FAST_RECHECK_MAX_AGE_SEC", 15.0),
+)
 F3_FIRST_ORDER_AT = "IMMEDIATE"
 F3_PYRAMID_AT = os.getenv("F3_PYRAMID_AT", "09:10:40")
 F3_PYRAMID_FILL_SEC = float(os.getenv("F3_PYRAMID_FILL_SEC", "10.0"))
@@ -167,6 +182,7 @@ _BUY_PSBL_TR = {"REAL": "TTTC8908R", "PAPER": "VTTC8908R"}
 
 _last_fill_poll_summary: dict = {}
 _pending_buy_org_no: str = ""  # 매수 주문 후 저장, 취소 시 사용
+_available_cash_snapshot: dict | None = None
 _CANDIDATE_RETRY_REASONS = {
     "ORDER_REJECTED",
     "BUYABLE_QTY_ZERO",
@@ -215,6 +231,64 @@ class FillSnapshot:
             "remaining_qty": self.remaining_qty,
             "fill_price": self.fill_price,
         }
+
+
+async def prepare_available_cash_snapshot() -> float | None:
+    """Prefetch the PAPER entry budget; final buyable-quantity remains mandatory."""
+    global _available_cash_snapshot
+    if (
+        os.getenv("KIS_MODE", "PAPER").upper() != "PAPER"
+        or os.getenv("DRY_RUN", "0") == "1"
+        or not paper_fast_probe.hybrid_enabled()
+    ):
+        return None
+    cash = await _fetch_available_cash()
+    if cash is None:
+        _available_cash_snapshot = None
+        return None
+    _available_cash_snapshot = {
+        "date": _today(),
+        "cash": float(cash),
+        "created_monotonic": time.monotonic(),
+    }
+    log(
+        "BALANCE_SNAPSHOT_READY",
+        level="INFO",
+        cash=float(cash),
+        ttl_sec=BALANCE_SNAPSHOT_TTL_SEC,
+    )
+    return float(cash)
+
+
+def _cached_available_cash() -> float | None:
+    if not paper_fast_probe.hybrid_enabled():
+        return None
+    snapshot = _available_cash_snapshot
+    if not snapshot or snapshot.get("date") != _today():
+        return None
+    age_sec = max(
+        0.0,
+        time.monotonic() - float(snapshot.get("created_monotonic") or 0.0),
+    )
+    if BALANCE_SNAPSHOT_TTL_SEC <= 0 or age_sec > BALANCE_SNAPSHOT_TTL_SEC:
+        return None
+    cash = float(snapshot.get("cash") or 0.0)
+    log(
+        "BALANCE_SNAPSHOT_HIT",
+        level="INFO",
+        cash=cash,
+        age_ms=round(age_sec * 1000),
+        ttl_sec=BALANCE_SNAPSHOT_TTL_SEC,
+    )
+    return cash
+
+
+async def _available_cash_for_entry() -> float | None:
+    cached = _cached_available_cash()
+    if cached is not None:
+        return cached
+    log("BALANCE_SNAPSHOT_MISS", level="INFO", ttl_sec=BALANCE_SNAPSHOT_TTL_SEC)
+    return await _fetch_available_cash()
 
 
 def _more_complete_fill(first: dict | None, second: dict | None) -> dict | None:
@@ -789,7 +863,7 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
         if not force and not _before_deadline(_entry_retry_deadline()):
             await _block_entry_deadline_passed(ticker, "BEFORE_BALANCE_QUERY")
             return
-        cash = await _fetch_available_cash()
+        cash = await _available_cash_for_entry()
         if cash is None:
             s.day_skip = True
             s.close_reason = "BALANCE_QUERY_FAILED"
@@ -1956,6 +2030,53 @@ async def _alert_balance_query_failed(ticker: str | None, candidates: list[str])
     )
 
 
+def _fast_recheck_rows(
+    tickers: list[str],
+    candidate_by_ticker: dict[str, dict],
+) -> list[dict] | None:
+    if not paper_fast_probe.hybrid_enabled():
+        return None
+    fast_by_ticker = {
+        str(candidate.get("ticker") or ""): candidate
+        for candidate in paper_fast_probe.get_open_candidates()
+    }
+    now_mono = time.monotonic()
+    rows: list[dict] = []
+    max_age_ms = 0
+    for rank, ticker in enumerate(tickers, start=1):
+        fast = fast_by_ticker.get(ticker)
+        candidate = candidate_by_ticker.get(ticker) or fast
+        if fast is None or candidate is None:
+            return None
+        observed = float(fast.get("fast_observed_monotonic") or 0.0)
+        age_sec = max(0.0, now_mono - observed) if observed > 0 else float("inf")
+        if F3_FAST_RECHECK_MAX_AGE_SEC <= 0 or age_sec > F3_FAST_RECHECK_MAX_AGE_SEC:
+            return None
+        expected_price = float(fast.get("expected_price") or 0.0)
+        prev_close = float(fast.get("prev_close") or 0.0)
+        if expected_price <= 0 or prev_close <= 0:
+            return None
+        max_age_ms = max(max_age_ms, round(age_sec * 1000))
+        rows.append(
+            {
+                "rank": rank,
+                "ticker": ticker,
+                "candidate": candidate,
+                "expected_price": expected_price,
+                "prev_close": prev_close,
+            }
+        )
+    log(
+        "F3_FAST_RECHECK_USED",
+        level="INFO",
+        requested_count=len(tickers),
+        completed_count=len(rows),
+        max_age_ms=max_age_ms,
+        max_age_sec=F3_FAST_RECHECK_MAX_AGE_SEC,
+    )
+    return rows
+
+
 async def _rank_final_entry_candidates(
     s: state.State,
     exclude_tickers: set[str] | None = None,
@@ -2009,7 +2130,7 @@ async def _rank_final_entry_candidates(
 
     async def fetch_available_cash_safe() -> float | None:
         try:
-            return await _fetch_available_cash()
+            return await _available_cash_for_entry()
         except Exception as exc:
             log(
                 "BALANCE_QUERY_ERROR",
@@ -2021,41 +2142,46 @@ async def _rank_final_entry_candidates(
 
     batch_started = time.perf_counter()
     cash_task = asyncio.create_task(fetch_available_cash_safe())
-    recheck_tasks = [
-        asyncio.create_task(recheck_one(rank, ticker))
-        for rank, ticker in enumerate(tickers, start=1)
-    ]
-    task_tickers = dict(zip(recheck_tasks, tickers, strict=False))
-    if F3_RECHECK_BATCH_TIMEOUT_SEC > 0:
-        done, pending = await asyncio.wait(
-            recheck_tasks,
-            timeout=F3_RECHECK_BATCH_TIMEOUT_SEC,
-        )
-        if pending:
-            log(
-                "F3_RECHECK_BATCH_TIMEOUT",
-                level="WARN",
-                requested_count=len(recheck_tasks),
-                completed_count=len(done),
-                pending_count=len(pending),
-                pending_tickers=[task_tickers[task] for task in pending],
-                timeout_sec=F3_RECHECK_BATCH_TIMEOUT_SEC,
+    recheck_source = "FAST_MULTI"
+    recheck_rows = _fast_recheck_rows(tickers, candidate_by_ticker)
+    if recheck_rows is None:
+        recheck_source = "SINGLE_QUOTE"
+        recheck_tasks = [
+            asyncio.create_task(recheck_one(rank, ticker))
+            for rank, ticker in enumerate(tickers, start=1)
+        ]
+        task_tickers = dict(zip(recheck_tasks, tickers, strict=False))
+        if F3_RECHECK_BATCH_TIMEOUT_SEC > 0:
+            done, pending = await asyncio.wait(
+                recheck_tasks,
+                timeout=F3_RECHECK_BATCH_TIMEOUT_SEC,
             )
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-        recheck_rows = [task.result() for task in recheck_tasks if task in done]
-    else:
-        recheck_rows = await asyncio.gather(*recheck_tasks)
+            if pending:
+                log(
+                    "F3_RECHECK_BATCH_TIMEOUT",
+                    level="WARN",
+                    requested_count=len(recheck_tasks),
+                    completed_count=len(done),
+                    pending_count=len(pending),
+                    pending_tickers=[task_tickers[task] for task in pending],
+                    timeout_sec=F3_RECHECK_BATCH_TIMEOUT_SEC,
+                )
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+            recheck_rows = [task.result() for task in recheck_tasks if task in done]
+        else:
+            recheck_rows = await asyncio.gather(*recheck_tasks)
     cash = await cash_task
     batch_elapsed_ms = round((time.perf_counter() - batch_started) * 1000, 1)
     log(
         "F3_RECHECK_BATCH_TIMING",
         level="DEBUG",
-        requested_count=len(recheck_tasks),
+        requested_count=len(tickers),
         completed_count=len(recheck_rows),
         elapsed_ms=batch_elapsed_ms,
         timeout_sec=F3_RECHECK_BATCH_TIMEOUT_SEC,
+        source=recheck_source,
     )
     if cash is None:
         s.day_skip = True

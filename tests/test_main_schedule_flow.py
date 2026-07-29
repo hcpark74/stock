@@ -278,12 +278,51 @@ async def test_job_f1_checks_existing_trade_before_probe(monkeypatch):
     f1_run.assert_not_awaited()
 
 
+async def test_job_f1_shadow_compare_failure_does_not_block_f2_f3(monkeypatch):
+    async def lock_target(_candidates):
+        state_mod.get().target_ticker = "005930"
+
+    f3_run = AsyncMock()
+    monkeypatch.setattr(
+        main,
+        "_skip_entry_pipeline_if_trade_exists",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(main.paper_fast_probe, "observe_open_boundary", AsyncMock(return_value=[]))
+    monkeypatch.setattr(main.paper_fast_probe, "hybrid_enabled", lambda: False)
+    monkeypatch.setattr(
+        main.paper_fast_probe,
+        "compare_with_legacy",
+        MagicMock(side_effect=RuntimeError("observer failed")),
+    )
+    monkeypatch.setattr(main.f1_filter, "run", AsyncMock(return_value=[{"ticker": "005930"}]))
+    monkeypatch.setattr(main.f2_lockup, "run", lock_target)
+    monkeypatch.setattr(main.f3_entry, "run", f3_run)
+
+    await main.job_f1()
+
+    f3_run.assert_awaited_once()
+    assert main._f2_done is True
+    assert main._f3_started is True
+
+
 async def test_paper_fast_probe_job_isolates_prepare_exception(monkeypatch):
     events = []
+    monkeypatch.setattr(
+        main.f3_entry,
+        "prepare_available_cash_snapshot",
+        AsyncMock(return_value=1_000_000.0),
+    )
     monkeypatch.setattr(
         main.paper_fast_probe,
         "prepare",
         AsyncMock(side_effect=RuntimeError("probe failed")),
+    )
+    monkeypatch.setattr(main.paper_fast_probe, "hybrid_enabled", lambda: True)
+    monkeypatch.setattr(
+        main,
+        "_paper_fast_balance_prefetch_budget_seconds",
+        lambda: 1.0,
     )
     monkeypatch.setattr(
         main.logger,
@@ -299,6 +338,91 @@ async def test_paper_fast_probe_job_isolates_prepare_exception(monkeypatch):
         and fields.get("reason") == "UNHANDLED"
         for event, fields in events
     )
+
+
+async def test_paper_fast_probe_runs_before_failing_balance_prefetch(monkeypatch):
+    calls = []
+
+    async def prepare_probe():
+        calls.append("probe")
+        return []
+
+    async def prepare_balance():
+        calls.append("balance")
+        raise RuntimeError("balance failed")
+
+    monkeypatch.setattr(main.paper_fast_probe, "prepare", prepare_probe)
+    monkeypatch.setattr(main.paper_fast_probe, "hybrid_enabled", lambda: True)
+    monkeypatch.setattr(
+        main,
+        "_paper_fast_balance_prefetch_budget_seconds",
+        lambda: 1.0,
+    )
+    monkeypatch.setattr(main.f3_entry, "prepare_available_cash_snapshot", prepare_balance)
+    monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
+
+    await main.job_paper_fast_probe()
+
+    assert calls == ["probe", "balance"]
+
+
+async def test_paper_fast_balance_prefetch_is_cancelled_before_open_guard(monkeypatch):
+    events = []
+    cancelled = asyncio.Event()
+
+    async def slow_balance():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(main.paper_fast_probe, "prepare", AsyncMock(return_value=[]))
+    monkeypatch.setattr(main.paper_fast_probe, "hybrid_enabled", lambda: True)
+    monkeypatch.setattr(
+        main,
+        "_paper_fast_balance_prefetch_budget_seconds",
+        lambda: 0.01,
+    )
+    monkeypatch.setattr(main.f3_entry, "prepare_available_cash_snapshot", slow_balance)
+    monkeypatch.setattr(
+        main.logger,
+        "log",
+        lambda event, **fields: events.append((event, fields)),
+    )
+
+    await asyncio.wait_for(main.job_paper_fast_probe(), 0.2)
+
+    assert cancelled.is_set()
+    assert any(
+        event == "BALANCE_SNAPSHOT_ERROR"
+        and fields.get("reason") == "OPEN_GUARD_TIMEOUT"
+        for event, fields in events
+    )
+
+
+async def test_job_f1_uses_fast_candidates_when_hybrid_enabled(monkeypatch):
+    fast = [{"ticker": "005930", "gap_pct": 0.034, "gap_allowed": True}]
+    monkeypatch.setattr(
+        main,
+        "_skip_entry_pipeline_if_trade_exists",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        main.paper_fast_probe,
+        "observe_open_boundary",
+        AsyncMock(return_value=fast),
+    )
+    monkeypatch.setattr(main.paper_fast_probe, "hybrid_enabled", lambda: True)
+    legacy = AsyncMock(return_value=[{"ticker": "000001"}])
+    monkeypatch.setattr(main.f1_filter, "run", legacy)
+    chained = AsyncMock()
+    monkeypatch.setattr(main, "_run_f2_f3_after_f1", chained)
+
+    await main.job_f1()
+
+    legacy.assert_not_awaited()
+    assert main._f1_result == fast
+    chained.assert_awaited_once()
 
 
 async def test_scheduled_f3_without_target_does_not_mark_started(monkeypatch):
@@ -634,6 +758,55 @@ async def test_f2_failure_retries_f1_before_deadline(monkeypatch):
     send.assert_awaited_once()
     assert send.await_args.args[0] == "F2_FAIL_F1_RETRY"
     f3_run.assert_awaited_once_with(force=False)
+    assert main._f2_done is True
+    assert main._f3_started is True
+    assert state_mod.get().day_skip is False
+
+
+async def test_f2_f3_chain_executes_real_hybrid_fast_recheck_path(monkeypatch):
+    observed_at = 100.0
+    candidates = [
+        {
+            "ticker": "005930",
+            "name": "Samsung",
+            "expected_price": 10300.0,
+            "prev_close": 10000.0,
+            "gap_pct": 0.03,
+            "expected_amount": 3_000_000_000.0,
+            "fast_observed_monotonic": observed_at,
+        },
+        {
+            "ticker": "000660",
+            "name": "SK hynix",
+            "expected_price": 10400.0,
+            "prev_close": 10000.0,
+            "gap_pct": 0.04,
+            "expected_amount": 2_000_000_000.0,
+            "fast_observed_monotonic": observed_at,
+        },
+    ]
+    run_single = AsyncMock(return_value=None)
+    main._f1_result = candidates
+
+    monkeypatch.setattr(main.notifier, "send", AsyncMock())
+    monkeypatch.setattr(main.f3_entry.paper_fast_probe, "hybrid_enabled", lambda: True)
+    monkeypatch.setattr(
+        main.f3_entry.paper_fast_probe,
+        "get_open_candidates",
+        lambda: candidates,
+    )
+    monkeypatch.setattr(main.f3_entry.time, "monotonic", lambda: 105.0)
+    monkeypatch.setattr(main.f3_entry, "F3_FAST_RECHECK_MAX_AGE_SEC", 15.0)
+    monkeypatch.setattr(
+        main.f3_entry,
+        "_available_cash_for_entry",
+        AsyncMock(return_value=1_000_000.0),
+    )
+    monkeypatch.setattr(main.f3_entry, "_run_single", run_single)
+
+    await main._run_f2_f3_after_f1()
+
+    run_single.assert_awaited_once()
     assert main._f2_done is True
     assert main._f3_started is True
     assert state_mod.get().day_skip is False

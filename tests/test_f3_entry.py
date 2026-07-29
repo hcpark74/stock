@@ -3272,3 +3272,161 @@ async def test_cancel_unconfirmed_blocks_candidate_switch_and_idle(monkeypatch):
         if call.args[0] == "ENTRY_CANCEL_UNCONFIRMED"
     ]
     assert unconfirmed_alerts and unconfirmed_alerts[-1].kwargs["level"] == "ERROR"
+
+
+@pytest.mark.asyncio
+async def test_available_cash_for_entry_uses_fresh_preopen_snapshot(monkeypatch):
+    fetch = AsyncMock(return_value=2_000_000.0)
+    monkeypatch.setattr(f3.paper_fast_probe, "hybrid_enabled", lambda: True)
+    monkeypatch.setattr(f3, "_fetch_available_cash", fetch)
+    monkeypatch.setattr(f3, "_today", lambda: "20260729")
+    monkeypatch.setattr(f3.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(f3, "BALANCE_SNAPSHOT_TTL_SEC", 90.0)
+    f3._available_cash_snapshot = {
+        "date": "20260729",
+        "cash": 1_000_000.0,
+        "created_monotonic": 50.0,
+    }
+
+    cash = await f3._available_cash_for_entry()
+
+    assert cash == 1_000_000.0
+    fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_available_cash_for_entry_refreshes_expired_snapshot(monkeypatch):
+    fetch = AsyncMock(return_value=2_000_000.0)
+    monkeypatch.setattr(f3.paper_fast_probe, "hybrid_enabled", lambda: True)
+    monkeypatch.setattr(f3, "_fetch_available_cash", fetch)
+    monkeypatch.setattr(f3, "_today", lambda: "20260729")
+    monkeypatch.setattr(f3.time, "monotonic", lambda: 200.0)
+    monkeypatch.setattr(f3, "BALANCE_SNAPSHOT_TTL_SEC", 90.0)
+    f3._available_cash_snapshot = {
+        "date": "20260729",
+        "cash": 1_000_000.0,
+        "created_monotonic": 50.0,
+    }
+
+    cash = await f3._available_cash_for_entry()
+
+    assert cash == 2_000_000.0
+    fetch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_available_cash_for_entry_ignores_snapshot_outside_hybrid(monkeypatch):
+    fetch = AsyncMock(return_value=2_000_000.0)
+    monkeypatch.setattr(f3.paper_fast_probe, "hybrid_enabled", lambda: False)
+    monkeypatch.setattr(f3, "_fetch_available_cash", fetch)
+    f3._available_cash_snapshot = {
+        "date": f3._today(),
+        "cash": 1_000_000.0,
+        "created_monotonic": f3.time.monotonic(),
+    }
+
+    cash = await f3._available_cash_for_entry()
+
+    assert cash == 2_000_000.0
+    fetch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_real_mode_blocks_all_hybrid_f3_shortcuts_without_monkeypatching_gate(
+    monkeypatch,
+):
+    fetch = AsyncMock(return_value=1_000_000.0)
+    fast = {
+        "ticker": "005930",
+        "expected_price": 10300.0,
+        "prev_close": 10000.0,
+        "fast_observed_monotonic": f3.time.monotonic(),
+    }
+    monkeypatch.setenv("KIS_MODE", "REAL")
+    monkeypatch.setenv("PAPER_FAST_PROBE", "1")
+    monkeypatch.setenv("PAPER_FAST_SHADOW", "1")
+    monkeypatch.setenv("PAPER_FAST_HYBRID", "1")
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setattr(f3, "_fetch_available_cash", fetch)
+    f3._available_cash_snapshot = {
+        "date": f3._today(),
+        "cash": 1_000_000.0,
+        "created_monotonic": f3.time.monotonic(),
+    }
+
+    assert f3.paper_fast_probe.hybrid_enabled() is False
+    assert await f3.prepare_available_cash_snapshot() is None
+    assert f3._cached_available_cash() is None
+    assert f3._fast_recheck_rows(["005930"], {"005930": fast}) is None
+    fetch.assert_not_awaited()
+
+
+def test_fast_recheck_rows_reuses_fresh_open_multi_snapshot(monkeypatch):
+    monkeypatch.setattr(f3.paper_fast_probe, "hybrid_enabled", lambda: True)
+    monkeypatch.setattr(f3.time, "monotonic", lambda: 105.0)
+    monkeypatch.setattr(f3, "F3_FAST_RECHECK_MAX_AGE_SEC", 15.0)
+    fast = [
+        {
+            "ticker": "005930",
+            "name": "삼성전자",
+            "expected_price": 227500.0,
+            "prev_close": 220000.0,
+            "fast_observed_monotonic": 100.0,
+        }
+    ]
+    monkeypatch.setattr(f3.paper_fast_probe, "get_open_candidates", lambda: fast)
+
+    rows = f3._fast_recheck_rows(["005930"], {"005930": fast[0]})
+
+    assert rows is not None
+    assert rows[0]["expected_price"] == 227500.0
+    assert rows[0]["prev_close"] == 220000.0
+
+
+@pytest.mark.asyncio
+async def test_rank_final_candidates_uses_fast_recheck_without_unbound_local(monkeypatch):
+    events = []
+    _reset_state()
+    fast = {
+        "ticker": "005930",
+        "name": "Samsung",
+        "expected_price": 227500.0,
+        "prev_close": 220000.0,
+        "expected_amount": 3_000_000.0,
+        "fast_observed_monotonic": 100.0,
+    }
+    state.get().target_ticker = fast["ticker"]
+    state.get().target_candidates = [fast]
+
+    monkeypatch.setattr(f3.paper_fast_probe, "hybrid_enabled", lambda: True)
+    monkeypatch.setattr(f3.paper_fast_probe, "get_open_candidates", lambda: [fast])
+    monkeypatch.setattr(f3.time, "monotonic", lambda: 105.0)
+    monkeypatch.setattr(f3, "F3_FAST_RECHECK_MAX_AGE_SEC", 15.0)
+    monkeypatch.setattr(f3, "_available_cash_for_entry", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+
+    ranked = await f3._rank_final_entry_candidates(state.get())
+
+    assert ranked is not None
+    assert ranked[0]["ticker"] == "005930"
+    timing = [fields for event, fields in events if event == "F3_RECHECK_BATCH_TIMING"][-1]
+    assert timing["requested_count"] == 1
+    assert timing["completed_count"] == 1
+    assert timing["source"] == "FAST_MULTI"
+
+
+def test_fast_recheck_rows_rejects_stale_snapshot(monkeypatch):
+    monkeypatch.setattr(f3.paper_fast_probe, "hybrid_enabled", lambda: True)
+    monkeypatch.setattr(f3.time, "monotonic", lambda: 120.0)
+    monkeypatch.setattr(f3, "F3_FAST_RECHECK_MAX_AGE_SEC", 15.0)
+    fast = [
+        {
+            "ticker": "005930",
+            "expected_price": 227500.0,
+            "prev_close": 220000.0,
+            "fast_observed_monotonic": 100.0,
+        }
+    ]
+    monkeypatch.setattr(f3.paper_fast_probe, "get_open_candidates", lambda: fast)
+
+    assert f3._fast_recheck_rows(["005930"], {"005930": fast[0]}) is None

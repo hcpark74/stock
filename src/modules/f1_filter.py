@@ -43,25 +43,6 @@ _PREMARKET_MARKETS = (
     {"label": "Q", "ranking_market": "J", "ranking_input": "1001", "quote_market": "J"},
 )
 
-_EXCLUDED_PRODUCT_KEYWORDS = (
-    "ETF",
-    "ETN",
-    "KODEX",
-    "TIGER",
-    "ACE",
-    "SOL",
-    "KBSTAR",
-    "KOSEF",
-    "HANARO",
-    "ARIRANG",
-    "TIMEFOLIO",
-    "TREX",
-    "인버스",
-    "레버리지",
-    "선물",
-)
-
-
 async def run() -> list[dict]:
     """
     Fetch premarket candidates, apply the gap/liquidity filters, and retry until
@@ -446,8 +427,7 @@ def _candidate_skip_reason(item: dict) -> str | None:
         return "INVALID_TICKER"
 
     name = str(item.get("hts_kor_isnm") or "")
-    upper_name = name.upper()
-    if any(keyword in upper_name for keyword in _EXCLUDED_PRODUCT_KEYWORDS):
+    if f1_selector.is_excluded_product(name):
         return "EXCLUDED_PRODUCT"
 
     if _to_float(item.get("stck_prpr")) <= 0:
@@ -570,8 +550,7 @@ def _is_common_stock_candidate(ticker: str | None, name: str = "") -> bool:
     if not ticker or len(ticker) != 6 or not ticker.isdigit():
         return False
 
-    upper_name = name.upper()
-    return not any(keyword in upper_name for keyword in _EXCLUDED_PRODUCT_KEYWORDS)
+    return not f1_selector.is_excluded_product(name)
 
 
 def _dry_run_candidate() -> dict:

@@ -9,12 +9,35 @@ pipeline.
 import math
 import os
 
+EXCLUDED_PRODUCT_KEYWORDS = (
+    "ETF",
+    "ETN",
+    "KODEX",
+    "TIGER",
+    "ACE",
+    "SOL",
+    "KBSTAR",
+    "KOSEF",
+    "HANARO",
+    "ARIRANG",
+    "TIMEFOLIO",
+    "TREX",
+    "인버스",
+    "레버리지",
+    "선물",
+)
+
 
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+def is_excluded_product(name: str) -> bool:
+    upper_name = str(name or "").upper()
+    return any(keyword in upper_name for keyword in EXCLUDED_PRODUCT_KEYWORDS)
 
 
 def _env_int(name: str, default: int) -> int:

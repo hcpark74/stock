@@ -15,6 +15,15 @@ from src.utils.logger import log
 from src.utils.spike_filter import SpikeFilter
 
 KST = ZoneInfo("Asia/Seoul")
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        return default
+
+
 FORCE_TRAILING_HOUR = 10
 FORCE_TRAILING_MINUTE = 50
 
@@ -23,10 +32,23 @@ STEP_TRAIL     = 0.015   # 스텝 기준 하락폭 -1.5%
 HARD_STOP_RATIO = 0.020  # Hard Stop -2.0% (trailing 미활성 구간 전용)
 F4_REST_BACKUP_ENABLED = os.getenv("F4_REST_BACKUP_ENABLED", "1") == "1"
 F4_REST_ONLY_WHEN_WS_STALE = os.getenv("F4_REST_ONLY_WHEN_WS_STALE", "1") == "1"
-F4_WS_STALE_SEC = float(os.getenv("F4_WS_STALE_SEC", "2.0"))
-F4_REST_POLL_INTERVAL_SEC = float(os.getenv("F4_REST_POLL_INTERVAL_SEC", "1.0"))
-F4_FILL_POLL_INTERVAL_SEC = float(os.getenv("F4_FILL_POLL_INTERVAL_SEC", "0.5"))
-F4_STATE_PERSIST_INTERVAL_SEC = float(os.getenv("F4_STATE_PERSIST_INTERVAL_SEC", "1.0"))
+F4_WS_STALE_SEC = max(0.0, _env_float("F4_WS_STALE_SEC", 2.0))
+F4_REST_POLL_INTERVAL_SEC = max(
+    0.0,
+    _env_float("F4_REST_POLL_INTERVAL_SEC", 1.0),
+)
+F4_FILL_POLL_INTERVAL_SEC = max(
+    0.0,
+    _env_float("F4_FILL_POLL_INTERVAL_SEC", 0.5),
+)
+F4_STATE_PERSIST_INTERVAL_SEC = max(
+    0.0,
+    _env_float("F4_STATE_PERSIST_INTERVAL_SEC", 1.0),
+)
+F4_HEARTBEAT_INTERVAL_SEC = max(
+    0.0,
+    _env_float("F4_HEARTBEAT_INTERVAL_SEC", 30.0),
+)
 VI_WATCH_ENABLED = os.getenv("VI_WATCH_ENABLED", "1") == "1"
 VI_FREEZE_SUSPECT_SEC = float(os.getenv("VI_FREEZE_SUSPECT_SEC", "10"))
 VI_CHECK_COOLDOWN_SEC = float(os.getenv("VI_CHECK_COOLDOWN_SEC", "60"))
@@ -181,13 +203,35 @@ async def run() -> None:
 
     live.ws_connected = False
     last_ws_tick_at = 0.0
+    ws_watch_started_at = time.monotonic()
 
     def is_ws_stale() -> bool:
-        if not F4_REST_ONLY_WHEN_WS_STALE:
+        now_mono = time.monotonic()
+        if last_ws_tick_at <= 0:
+            return (now_mono - ws_watch_started_at) >= F4_WS_STALE_SEC
+        if not live.ws_connected:
             return True
-        if not live.ws_connected or last_ws_tick_at <= 0:
-            return True
-        return (time.monotonic() - last_ws_tick_at) >= F4_WS_STALE_SEC
+        return (now_mono - last_ws_tick_at) >= F4_WS_STALE_SEC
+
+    def should_poll_rest() -> bool:
+        return not F4_REST_ONLY_WHEN_WS_STALE or is_ws_stale()
+
+    def ws_tick_age_ms() -> int | None:
+        if last_ws_tick_at <= 0:
+            return None
+        return max(0, round((time.monotonic() - last_ws_tick_at) * 1000))
+
+    def ws_status_fields() -> dict:
+        return {
+            "ws_connected": bool(live.ws_connected),
+            "last_ws_tick_age_ms": ws_tick_age_ms(),
+            "last_price": live.last_tick_price,
+            "high_price": state.get().high_price,
+            "remaining_qty": state.get().remaining_qty,
+            "position_status": state.get().position_status,
+            "trade_id": state.get().trade_id,
+            "rest_backup_enabled": F4_REST_BACKUP_ENABLED,
+        }
 
     vi_watch = _make_vi_watch(ticker)
 
@@ -209,10 +253,25 @@ async def run() -> None:
         ticker, on_tick,
         stop_if=lambda: not _price_observation_active(),
     ))
-    tasks = [ws_task]
+    ws_health_task = asyncio.create_task(
+        _run_ws_health_monitor(ticker, is_ws_stale, ws_status_fields)
+    )
+    tasks = [ws_task, ws_health_task]
     if F4_REST_BACKUP_ENABLED:
         tasks.append(asyncio.create_task(
-            _run_rest_price_backup(ticker, spike_filter, is_ws_stale, vi_watch=vi_watch)))
+            _run_rest_price_backup(
+                ticker,
+                spike_filter,
+                should_poll_rest,
+                vi_watch=vi_watch,
+            )
+        ))
+    if F4_HEARTBEAT_INTERVAL_SEC > 0:
+        tasks.append(
+            asyncio.create_task(
+                _run_monitor_heartbeat(ticker, is_ws_stale, ws_tick_age_ms)
+            )
+        )
     try:
         # 모니터 태스크 하나가 예외로 죽어도 나머지 태스크는 유지한다.
         # 정상 종료(HOLDING 해제)만 감시 종료로 취급.
@@ -253,8 +312,59 @@ async def run() -> None:
         live.ws_connected = False
 
 
+async def _run_monitor_heartbeat(
+    ticker: str,
+    is_ws_stale,
+    ws_tick_age_ms,
+) -> None:
+    """Emit monitor liveness without persisting state."""
+    while _price_observation_active():
+        await asyncio.sleep(F4_HEARTBEAT_INTERVAL_SEC)
+        if not _price_observation_active():
+            return
+        stale = bool(is_ws_stale())
+        fields = {
+            "ws_connected": bool(live.ws_connected),
+            "ws_stale": stale,
+            "last_ws_tick_age_ms": ws_tick_age_ms(),
+            "last_price": live.last_tick_price,
+            "high_price": state.get().high_price,
+            "remaining_qty": state.get().remaining_qty,
+            "position_status": state.get().position_status,
+            "trade_id": state.get().trade_id,
+            "rest_backup_enabled": F4_REST_BACKUP_ENABLED,
+        }
+        log("F4_HEARTBEAT", level="DEBUG", ticker=ticker, **fields)
+
+
+async def _run_ws_health_monitor(
+    ticker: str,
+    is_ws_stale,
+    ws_status_fields,
+) -> None:
+    """Detect WS stale/recovery independently from the optional REST backup."""
+    stale_reported = False
+    interval_sec = min(
+        1.0,
+        max(0.1, F4_WS_STALE_SEC / 2),
+    )
+    while _price_observation_active():
+        stale = bool(is_ws_stale())
+        fields = {**ws_status_fields(), "ws_stale": stale}
+        if stale and not stale_reported:
+            log("WS_STALE", level="WARN", ticker=ticker, **fields)
+            stale_reported = True
+        elif not stale and stale_reported:
+            log("WS_RECOVERED", level="INFO", ticker=ticker, **fields)
+            stale_reported = False
+        await asyncio.sleep(interval_sec)
+
+
 async def _run_rest_price_backup(
-    ticker: str, spike_filter: SpikeFilter, is_ws_stale=None, vi_watch: ViWatch | None = None,
+    ticker: str,
+    spike_filter: SpikeFilter,
+    should_poll_rest=None,
+    vi_watch: ViWatch | None = None,
 ) -> None:
     """REST backup while holding or during the short post-close observation."""
     log(
@@ -266,7 +376,12 @@ async def _run_rest_price_backup(
         ws_stale_sec=F4_WS_STALE_SEC,
     )
     while _price_observation_active():
-        if is_ws_stale is not None and not is_ws_stale():
+        should_poll = (
+            bool(should_poll_rest())
+            if should_poll_rest is not None
+            else True
+        )
+        if not should_poll:
             await asyncio.sleep(F4_REST_POLL_INTERVAL_SEC)
             continue
         try:

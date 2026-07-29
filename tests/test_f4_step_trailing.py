@@ -448,6 +448,130 @@ async def test_rest_backup_survives_fetch_error(monkeypatch):
     assert "F4_REST_BACKUP_ERROR" in [event for event, _ in events]
 
 
+@pytest.mark.asyncio
+async def test_monitor_heartbeat_logs_liveness_only(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    events = []
+    stale_values = iter([True, False])
+    sleep_count = {"value": 0}
+
+    async def advance(_seconds):
+        sleep_count["value"] += 1
+        if sleep_count["value"] == 2:
+            f4.live.ws_connected = True
+        elif sleep_count["value"] >= 3:
+            _state_mod.get().position_status = "CLOSED"
+
+    monkeypatch.setattr(f4, "F4_HEARTBEAT_INTERVAL_SEC", 0.01)
+    monkeypatch.setattr(f4.asyncio, "sleep", AsyncMock(side_effect=advance))
+    monkeypatch.setattr(
+        f4,
+        "log",
+        lambda event, **fields: events.append((event, fields)),
+    )
+    f4.live.ws_connected = False
+    f4.live.last_tick_price = ENTRY
+
+    await f4._run_monitor_heartbeat(
+        "005930",
+        lambda: next(stale_values),
+        lambda: 250,
+    )
+
+    event_names = [event for event, _ in events]
+    assert event_names.count("F4_HEARTBEAT") == 2
+    assert "WS_STALE" not in event_names
+    assert "WS_RECOVERED" not in event_names
+
+
+@pytest.mark.asyncio
+async def test_ws_health_monitor_detects_stale_and_recovery_independent_of_rest(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    events = []
+    stale_values = iter([True, False])
+    sleep_count = {"value": 0}
+
+    async def advance(_seconds):
+        sleep_count["value"] += 1
+        if sleep_count["value"] >= 2:
+            _state_mod.get().position_status = "CLOSED"
+
+    monkeypatch.setattr(f4.asyncio, "sleep", AsyncMock(side_effect=advance))
+    monkeypatch.setattr(
+        f4,
+        "log",
+        lambda event, **fields: events.append((event, fields)),
+    )
+
+    await f4._run_ws_health_monitor(
+        "005930",
+        lambda: next(stale_values),
+        lambda: {"last_ws_tick_age_ms": 2100, "rest_backup_enabled": False},
+    )
+
+    event_names = [event for event, _ in events]
+    assert "WS_STALE" in event_names
+    assert "WS_RECOVERED" in event_names
+
+
+@pytest.mark.asyncio
+async def test_run_starts_ws_health_monitor_when_rest_backup_is_disabled(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    health_started = asyncio.Event()
+
+    async def fake_health(*_args, **_kwargs):
+        health_started.set()
+        await asyncio.Event().wait()
+
+    async def fake_subscribe(_ticker, _on_tick, *, stop_if=None):
+        await health_started.wait()
+        _state_mod.get().position_status = "CLOSED"
+
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setattr(f4, "F4_REST_BACKUP_ENABLED", False)
+    monkeypatch.setattr(f4, "F4_HEARTBEAT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(f4, "_run_ws_health_monitor", fake_health)
+    monkeypatch.setattr(f4.kis_ws, "subscribe", fake_subscribe)
+
+    await asyncio.wait_for(f4.run(), 1)
+
+    assert health_started.is_set()
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_log_ws_stale_before_first_tick_grace(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    events = []
+    s = _state_mod.get()
+    s.target_ticker = "005930"
+    s.position_status = "HOLDING"
+
+    async def fake_subscribe(_ticker, on_tick, *, stop_if=None):
+        await asyncio.sleep(0)
+        await on_tick({"price": ENTRY})
+        s.position_status = "CLOSED"
+
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setattr(f4, "F4_REST_BACKUP_ENABLED", False)
+    monkeypatch.setattr(f4, "F4_HEARTBEAT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(f4, "F4_WS_STALE_SEC", 2.0)
+    monkeypatch.setattr(f4, "_handle_price_tick", AsyncMock(return_value=True))
+    monkeypatch.setattr(f4.kis_ws, "subscribe", fake_subscribe)
+    monkeypatch.setattr(
+        f4,
+        "log",
+        lambda event, **fields: events.append((event, fields)),
+    )
+
+    await asyncio.wait_for(f4.run(), 1)
+
+    assert "WS_STALE" not in [event for event, _ in events]
+
+
 def test_post_close_observation_stops_at_0910():
     s = _state_mod.get()
     s.position_status = "CLOSED"

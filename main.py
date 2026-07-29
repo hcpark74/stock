@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import os
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -41,6 +42,14 @@ from src.utils import logger, time_sync  # noqa: E402
 
 KST = ZoneInfo("Asia/Seoul")
 
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        return default
+
+
 LOG_DIR = os.getenv("LOG_DIR", "data/logs")
 STATE_DIR = os.getenv("STATE_DIR", "data/state")
 NTP_SERVERS = [s.strip() for s in os.getenv("NTP_SERVER", "pool.ntp.org").split(",")]
@@ -56,8 +65,9 @@ F2_RETRY_F1_INTERVAL_SEC = int(
 F2_RETRY_F1_MIN_REMAINING_SEC = int(os.getenv("F2_RETRY_F1_MIN_REMAINING_SEC", "2"))
 PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC = max(
     0.1,
-    float(os.getenv("PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC", "2.5")),
+    _env_float("PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC", 2.5),
 )
+PAPER_FAST_BALANCE_PREFETCH_CUTOFF = (8, 59, 58)
 _BAL_TR = {"REAL": "TTTC8434R", "PAPER": "VTTC8434R"}
 _BALANCE_MAX_PAGES = 10
 _ACTIVE_POSITION_STATUSES = {"ENTERING", "HOLDING", "EXITING"}
@@ -331,13 +341,16 @@ async def _skip_entry_pipeline_if_trade_exists(source: str) -> bool:
 
 async def job_f1() -> None:
     global _f1_result
+    pipeline_started = time.perf_counter()
     await _ensure_trading_day()
     if _is_market_closed_today():
         return
     if await _skip_entry_pipeline_if_trade_exists("JOB_F1"):
         return
+    fast_candidates: list[dict] = []
+    probe_started = time.perf_counter()
     try:
-        await asyncio.wait_for(
+        fast_candidates = await asyncio.wait_for(
             paper_fast_probe.observe_open_boundary(),
             timeout=PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC,
         )
@@ -357,8 +370,41 @@ async def job_f1() -> None:
             reason="UNHANDLED",
             error=repr(exc),
         )
-    _f1_result = await f1_filter.run()
+    probe_ms = round((time.perf_counter() - probe_started) * 1000)
+    selection_started = time.perf_counter()
+    if paper_fast_probe.hybrid_enabled() and fast_candidates:
+        _f1_result = fast_candidates
+        selection_source = "FAST_MULTI"
+        logger.log(
+            "PAPER_FAST_PATH_SELECTED",
+            level="INFO",
+            candidate_count=len(fast_candidates),
+            tickers=[candidate.get("ticker") for candidate in fast_candidates],
+        )
+    else:
+        _f1_result = await f1_filter.run()
+        selection_source = "LEGACY_SINGLE_QUOTE"
+        try:
+            paper_fast_probe.compare_with_legacy(_f1_result)
+        except Exception as exc:
+            logger.log(
+                "PAPER_FAST_SHADOW_COMPARE_ERROR",
+                level="WARN",
+                reason="UNHANDLED",
+                error=repr(exc),
+            )
+    selection_ms = round((time.perf_counter() - selection_started) * 1000)
     await _run_f2_f3_after_f1(immediate=_past_f3_schedule())
+    logger.log(
+        "ENTRY_PIPELINE_TIMING",
+        level="INFO",
+        selection_source=selection_source,
+        probe_ms=probe_ms,
+        selection_ms=selection_ms,
+        total_ms=round((time.perf_counter() - pipeline_started) * 1000),
+        candidate_count=len(_f1_result or []),
+        position_status=state.get().position_status,
+    )
 
 
 async def job_paper_fast_probe() -> None:
@@ -375,6 +421,53 @@ async def job_paper_fast_probe() -> None:
             reason="UNHANDLED",
             error=repr(exc),
         )
+    if not paper_fast_probe.hybrid_enabled():
+        return
+    budget_sec = _paper_fast_balance_prefetch_budget_seconds()
+    if budget_sec <= 0:
+        logger.log(
+            "BALANCE_SNAPSHOT_SKIPPED",
+            level="WARN",
+            phase="PREOPEN",
+            reason="OPEN_GUARD",
+            cutoff="08:59:58",
+        )
+        return
+    try:
+        await asyncio.wait_for(
+            f3_entry.prepare_available_cash_snapshot(),
+            timeout=budget_sec,
+        )
+    except asyncio.TimeoutError:
+        logger.log(
+            "BALANCE_SNAPSHOT_ERROR",
+            level="WARN",
+            phase="PREOPEN",
+            reason="OPEN_GUARD_TIMEOUT",
+            timeout_sec=round(budget_sec, 3),
+            cutoff="08:59:58",
+        )
+    except Exception as exc:
+        logger.log(
+            "BALANCE_SNAPSHOT_ERROR",
+            level="WARN",
+            phase="PREOPEN",
+            reason="UNHANDLED",
+            error=repr(exc),
+        )
+
+
+def _paper_fast_balance_prefetch_budget_seconds(
+    now: datetime | None = None,
+) -> float:
+    current = now or datetime.now(KST)
+    cutoff = current.replace(
+        hour=PAPER_FAST_BALANCE_PREFETCH_CUTOFF[0],
+        minute=PAPER_FAST_BALANCE_PREFETCH_CUTOFF[1],
+        second=PAPER_FAST_BALANCE_PREFETCH_CUTOFF[2],
+        microsecond=0,
+    )
+    return max(0.0, (cutoff - current).total_seconds())
 
 
 async def job_f2() -> None:

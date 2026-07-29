@@ -563,6 +563,63 @@ async def test_kis_rest_investigation_mode_stops_on_egw00201(monkeypatch):
     assert _RateLimitClient.calls == 1
 
 
+class _BodyRateLimitThenOkClient:
+    calls = 0
+    code = "EGW00215"
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def request(self, *args, **kwargs):
+        self.__class__.calls += 1
+        call_no = self.__class__.calls
+        code = self.__class__.code
+
+        class Response:
+            status_code = 200
+
+            def json(self):
+                if call_no == 1:
+                    return {"rt_cd": "1", "msg_cd": code, "msg1": "rate limit"}
+                return {"rt_cd": "0", "output": {"ok": True}}
+
+        return Response()
+
+
+@pytest.mark.asyncio
+async def test_get_does_not_classify_unconfirmed_egw00215_as_rate_limit(monkeypatch):
+    events = []
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 0.0)
+    monkeypatch.setattr(kis_rest, "_last_call_at", 0.0)
+    monkeypatch.setattr(kis_rest, "_rate_limit_sleep_seconds", lambda *_: 0.0)
+    monkeypatch.setattr(kis_rest.httpx, "AsyncClient", _BodyRateLimitThenOkClient)
+    monkeypatch.setattr(
+        kis_rest,
+        "log",
+        lambda event, **fields: events.append((event, fields)),
+    )
+    _BodyRateLimitThenOkClient.calls = 0
+
+    resp = await kis_rest.get("/balance")
+
+    assert resp["msg_cd"] == "EGW00215"
+    assert _BodyRateLimitThenOkClient.calls == 1
+    assert not any(event.startswith("RATE_LIMIT_") for event, _ in events)
+
+
+@pytest.mark.asyncio
+async def test_post_does_not_retry_application_rate_limit(monkeypatch):
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 0.0)
+    monkeypatch.setattr(kis_rest, "_last_call_at", 0.0)
+    monkeypatch.setattr(kis_rest.httpx, "AsyncClient", _BodyRateLimitThenOkClient)
+    _BodyRateLimitThenOkClient.calls = 0
+
+    resp = await kis_rest.post("/order", body={"qty": 1})
+
+    assert resp["msg_cd"] == "EGW00215"
+    assert _BodyRateLimitThenOkClient.calls == 1
+
+
 def test_transient_sleep_seconds_exponential_backoff_with_cap(monkeypatch):
     monkeypatch.setattr(kis_rest, "_TRANSIENT_RETRY_BASE_SEC", 1.0)
     monkeypatch.setattr(kis_rest, "_TRANSIENT_RETRY_MAX_SEC", 8.0)
@@ -572,6 +629,14 @@ def test_transient_sleep_seconds_exponential_backoff_with_cap(monkeypatch):
     assert kis_rest._transient_sleep_seconds(2) == 4.0
     assert kis_rest._transient_sleep_seconds(3) == 8.0
     assert kis_rest._transient_sleep_seconds(4) == 8.0
+
+
+def test_confirmed_rate_limit_retry_delay_remains_one_second():
+    assert [kis_rest._rate_limit_sleep_seconds(i, "/test") for i in range(3)] == [
+        1.0,
+        1.0,
+        1.0,
+    ]
 
 
 class _TransientErrorClient:
