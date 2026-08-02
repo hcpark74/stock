@@ -8,6 +8,8 @@ import pytest
 
 from src import state as _state_mod
 from src.modules.f4_tracking import (
+    FORCE_TRAILING_HOUR,
+    FORCE_TRAILING_MINUTE,
     HARD_STOP_RATIO,
     STEP_SIZE,
     STEP_TRAIL,
@@ -300,26 +302,36 @@ async def test_step_trailing_not_triggered_above_stop():
     mock_close.assert_not_awaited()
 
 
-# ── 10:50 강제 발동 ───────────────────────────────────────────────────
+# ── 청산 10분 전 강제 발동 ────────────────────────────────────────────
+# 시각 리터럴을 쓰지 않는다 — F5 청산 시각이 바뀌면 이 테스트도 따라가야 한다.
+
+_LATE_H = FORCE_TRAILING_HOUR
+_LATE_M = FORCE_TRAILING_MINUTE
+_BEFORE_LATE_H, _BEFORE_LATE_M = (
+    (_LATE_H, _LATE_M - 1) if _LATE_M > 0 else (_LATE_H - 1, 59)
+)
+
 
 async def test_late_force_trailing_active():
-    """10:50 이후 → highest_step 0이어도 trailing_active 강제 True."""
+    """강제 시각 이후 → highest_step 0이어도 trailing_active 강제 True."""
     price = ENTRY * 1.01  # 1% 이익, 스텝 미달
-    await _run_tick(price, hour=10, minute=50)
+    await _run_tick(price, hour=_LATE_H, minute=_LATE_M)
     assert _state_mod.get().trailing_active is True
 
 
 async def test_late_triggers_if_below_zero_step_stop():
-    """10:50 강제 활성 후 stop(entry×0.985) 이하 → 청산 발동."""
+    """강제 활성 후 stop(entry×0.985) 이하 → 청산 발동."""
     price = ENTRY * 0.984  # stop = ENTRY*(1+0-0.015)=9850, 9840 < 9850
-    mock_close = await _run_tick(price, hour=10, minute=50, set_closed_return=True)
+    mock_close = await _run_tick(
+        price, hour=_LATE_H, minute=_LATE_M, set_closed_return=True
+    )
     mock_close.assert_awaited_once_with(price, "TRAILING")
 
 
 async def test_before_late_no_force():
-    """10:49 → 강제 발동 없음, trailing_active 여전히 False."""
+    """강제 시각 1분 전 → 강제 발동 없음, trailing_active 여전히 False."""
     price = ENTRY * 1.01
-    await _run_tick(price, hour=10, minute=49)
+    await _run_tick(price, hour=_BEFORE_LATE_H, minute=_BEFORE_LATE_M)
     assert _state_mod.get().trailing_active is False
 
 
@@ -861,6 +873,120 @@ async def test_poll_fill_attempts_cover_timeout_window(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_poll_fill_waits_for_full_cumulative_quantity(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    get = AsyncMock(side_effect=[
+        {
+            "output1": [{
+                "odno": "ORD1",
+                "tot_ccld_qty": "30",
+                "tot_ccld_amt": "1270500",
+                "rmn_qty": "135",
+            }],
+        },
+        {
+            "output1": [{
+                "odno": "ORD1",
+                "tot_ccld_qty": "165",
+                "tot_ccld_amt": "6985440",
+                "rmn_qty": "0",
+            }],
+        },
+    ])
+    monkeypatch.setattr(f4.kis_rest, "get", get)
+    monkeypatch.setattr(f4.kis_rest, "account_no", lambda: "12345678")
+    monkeypatch.setattr(f4.kis_rest, "account_cd", lambda: "01")
+    monkeypatch.setattr(f4, "F4_FILL_POLL_INTERVAL_SEC", 0.5)
+    sleep = AsyncMock()
+    monkeypatch.setattr("src.modules.f4_tracking.asyncio.sleep", sleep)
+
+    result = await f4._poll_fill("ORD1", timeout_sec=3, expect_qty=165)
+
+    assert result == {"fill_price": 42_336, "fill_qty": 165}
+    assert get.await_count == 2
+    sleep.assert_awaited_once_with(0.5)
+
+
+@pytest.mark.asyncio
+async def test_poll_fill_returns_latest_partial_only_after_timeout(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    get = AsyncMock(return_value={
+        "output1": [{
+            "odno": "ORD1",
+            "tot_ccld_qty": "30",
+            "tot_ccld_amt": "1270500",
+            "rmn_qty": "135",
+        }],
+    })
+    monkeypatch.setattr(f4.kis_rest, "get", get)
+    monkeypatch.setattr(f4.kis_rest, "account_no", lambda: "12345678")
+    monkeypatch.setattr(f4.kis_rest, "account_cd", lambda: "01")
+    monkeypatch.setattr(f4, "F4_FILL_POLL_INTERVAL_SEC", 0.5)
+    monkeypatch.setattr("src.modules.f4_tracking.asyncio.sleep", AsyncMock())
+
+    result = await f4._poll_fill("ORD1", timeout_sec=1, expect_qty=165)
+
+    assert result == {"fill_price": 42_350, "fill_qty": 30}
+    assert get.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_poll_fill_returns_immediately_when_partial_order_is_terminal(monkeypatch):
+    """부분체결 후 잔량 0(취소·소멸)이면 남은 폴링을 소진하지 않고 즉시 반환한다.
+
+    끝까지 기다리면 F4_CLOSE_PENDING 알림과 잔량 기록이 폴링 창만큼 늦어진다.
+    """
+    import src.modules.f4_tracking as f4
+
+    get = AsyncMock(return_value={
+        "output1": [{
+            "odno": "ORD1",
+            "tot_ccld_qty": "30",
+            "tot_ccld_amt": "1270500",
+            "rmn_qty": "0",
+        }],
+    })
+    monkeypatch.setattr(f4.kis_rest, "get", get)
+    monkeypatch.setattr(f4.kis_rest, "account_no", lambda: "12345678")
+    monkeypatch.setattr(f4.kis_rest, "account_cd", lambda: "01")
+    monkeypatch.setattr(f4, "F4_FILL_POLL_INTERVAL_SEC", 0.5)
+    sleep = AsyncMock()
+    monkeypatch.setattr("src.modules.f4_tracking.asyncio.sleep", sleep)
+
+    result = await f4._poll_fill("ORD1", timeout_sec=30, expect_qty=165)
+
+    assert result == {"fill_price": 42_350, "fill_qty": 30}
+    assert get.await_count == 1
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_poll_fill_keeps_polling_when_remaining_qty_missing(monkeypatch):
+    """rmn_qty가 응답에 없으면 종료를 단정할 수 없으므로 기존대로 계속 폴링한다."""
+    import src.modules.f4_tracking as f4
+
+    get = AsyncMock(return_value={
+        "output1": [{
+            "odno": "ORD1",
+            "tot_ccld_qty": "30",
+            "tot_ccld_amt": "1270500",
+        }],
+    })
+    monkeypatch.setattr(f4.kis_rest, "get", get)
+    monkeypatch.setattr(f4.kis_rest, "account_no", lambda: "12345678")
+    monkeypatch.setattr(f4.kis_rest, "account_cd", lambda: "01")
+    monkeypatch.setattr(f4, "F4_FILL_POLL_INTERVAL_SEC", 0.5)
+    monkeypatch.setattr("src.modules.f4_tracking.asyncio.sleep", AsyncMock())
+
+    result = await f4._poll_fill("ORD1", timeout_sec=1, expect_qty=165)
+
+    assert result == {"fill_price": 42_350, "fill_qty": 30}
+    assert get.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_execute_close_sends_critical_alert_on_sell_error(monkeypatch):
     notify = AsyncMock()
     record_order = AsyncMock()
@@ -892,6 +1018,7 @@ async def test_execute_close_separates_trigger_price_and_measures_latency(monkey
     record_order = AsyncMock(return_value=9)
     update_order_fill = AsyncMock()
     close_trade = AsyncMock()
+    poll_fill = AsyncMock(return_value={"fill_price": 9_750.0, "fill_qty": 100})
 
     monkeypatch.setenv("DRY_RUN", "0")
     monkeypatch.setattr(
@@ -900,7 +1027,7 @@ async def test_execute_close_separates_trigger_price_and_measures_latency(monkey
     )
     monkeypatch.setattr(
         "src.modules.f4_tracking._poll_fill",
-        AsyncMock(return_value={"fill_price": 9_750.0, "fill_qty": 100}),
+        poll_fill,
     )
     monkeypatch.setattr("src.modules.f4_tracking.db.record_order", record_order)
     monkeypatch.setattr("src.modules.f4_tracking.db.update_order_fill", update_order_fill)
@@ -915,6 +1042,7 @@ async def test_execute_close_separates_trigger_price_and_measures_latency(monkey
     result = await _execute_close(ENTRY * 0.98, "HARD_STOP")
 
     assert result is True
+    poll_fill.assert_awaited_once_with("SELL001", timeout_sec=30, expect_qty=100)
     assert _state_mod.get().position_status == "CLOSED"
     assert _state_mod.get().remaining_qty == 0
     assert record_order.await_args.args[4] == 0.0

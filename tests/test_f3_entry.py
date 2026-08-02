@@ -53,6 +53,36 @@ def reset_fill_poll_summary(monkeypatch):
     f3._last_fill_poll_summary = {}
 
 
+def test_removed_env_var_is_warned_not_silently_ignored(monkeypatch):
+    """.env에 남은 제거 설정은 조용히 무시되면 안 된다.
+
+    F3_MAX_ENTRY_SLIPPAGE_RATIO는 이름이 바뀐 게 아니라 삭제된 안전장치라,
+    운영자가 "아직 슬리피지 상한이 걸려 있다"고 오해할 위험이 크다.
+    """
+    events = []
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setenv("F3_MAX_ENTRY_SLIPPAGE_RATIO", "0.005")
+
+    f3._warn_removed_env_vars()
+
+    removed = [kwargs for event, kwargs in events if event == "F3_ENV_REMOVED"]
+    assert len(removed) == 1
+    assert removed[0]["level"] == "WARN"
+    assert removed[0]["removed_env"] == "F3_MAX_ENTRY_SLIPPAGE_RATIO"
+    assert removed[0]["removed_value"] == "0.005"
+    assert removed[0]["replacement_env"] == "F3_ASK_SLIPPAGE_RATIO"
+
+
+def test_removed_env_var_warning_is_silent_when_unset(monkeypatch):
+    events = []
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.delenv("F3_MAX_ENTRY_SLIPPAGE_RATIO", raising=False)
+
+    f3._warn_removed_env_vars()
+
+    assert [event for event, _ in events if event == "F3_ENV_REMOVED"] == []
+
+
 def test_gap_in_order_range_boundaries():
     """주문 전 갭 허용 구간의 경계 연산자를 고정한다: 하한 포함(<=), 상한 미포함(<).
 
@@ -72,15 +102,21 @@ def test_fill_gap_reaches_max_boundary():
     assert f3._fill_gap_reaches_max(f3.GAP_MAX_FILL - 1e-9) is False
 
 
-def test_entry_limit_price_uses_fixed_anchor_and_lower_cap(monkeypatch):
-    """7/27 사례는 14,440원 기준 0.5% 상한을 호가단위로 내려 14,510원이 된다."""
-    monkeypatch.setattr(f3, "F3_MAX_ENTRY_SLIPPAGE_RATIO", 0.005)
+def test_entry_limit_price_uses_final_ask_cap(monkeypatch):
+    """7/30 위닉스 호가는 신선한 매도호가 +1% 상한을 사용한다."""
+    monkeypatch.setattr(f3, "F3_ASK_SLIPPAGE_RATIO", 0.01)
+    gap_cap = f3._strict_gap_cap(4_490)
 
-    limit_price, slippage_cap, gap_cap = f3._entry_limit_price(14_440, 13_730)
+    limit_price, ask_cap = f3._entry_limit_price(4_690, gap_cap)
 
-    assert slippage_cap == 14_510
-    assert gap_cap == 14_620
-    assert limit_price == 14_510
+    assert ask_cap == 4_735
+    assert gap_cap == 4_780
+    assert limit_price == 4_735
+
+    limit_price, ask_cap = f3._entry_limit_price(4_740, gap_cap)
+
+    assert ask_cap == 4_785
+    assert limit_price == gap_cap
 
 
 def test_final_quote_age_default_is_mode_specific():
@@ -99,7 +135,7 @@ def test_strict_gap_cap_never_reaches_order_gap_boundary():
 
 
 @pytest.mark.asyncio
-async def test_send_buy_uses_price_cap_limit_order(monkeypatch):
+async def test_send_buy_uses_gap_cap_limit_order(monkeypatch):
     post = AsyncMock(return_value={"rt_cd": "0"})
     monkeypatch.setattr(f3.kis_rest, "post", post)
     monkeypatch.setattr(f3.kis_rest, "account_no", lambda: "12345678")
@@ -1000,17 +1036,32 @@ async def test_full_cash_quantity_places_first_buy(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_limit_entry_blocks_when_final_ask_exceeds_fixed_anchor_cap(monkeypatch):
+@pytest.mark.parametrize(
+    ("warn_threshold_pct", "should_warn"),
+    [(1.5, False), (0.5, True)],
+)
+async def test_limit_entry_allows_rising_ask_within_gap_cap(
+    monkeypatch,
+    warn_threshold_pct,
+    should_warn,
+):
+    """7/30 위닉스 사례: 기준가 대비 +0.644%여도 최종 갭 6.5% 미만이면 진입한다."""
     _reset_state()
-    send_buy = AsyncMock()
+    events = []
+    send_buy = AsyncMock(return_value={
+        "rt_cd": "0",
+        "msg_cd": "MCA00000",
+        "msg1": "OK",
+        "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
+    })
     monkeypatch.setattr(f3, "F3_LIMIT_BUY_ENABLED", True)
-    monkeypatch.setattr(f3, "F3_MAX_ENTRY_SLIPPAGE_RATIO", 0.005)
+    monkeypatch.setattr(f3, "F3_QUOTE_MOVE_WARN_PCT", warn_threshold_pct)
     monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
-    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
     monkeypatch.setattr(
         f3,
         "_fetch_expected_price",
-        AsyncMock(return_value=(14_440.0, 13_730.0)),
+        AsyncMock(return_value=(4_660.0, 4_490.0)),
     )
     monkeypatch.setattr(
         f3,
@@ -1021,7 +1072,219 @@ async def test_limit_entry_blocks_when_final_ask_exceeds_fixed_anchor_cap(monkey
         f3,
         "_fetch_final_entry_quote",
         AsyncMock(return_value=f3.EntryQuote(
-            ask_price=14_520,
+            ask_price=4_690,
+            ask_qty=562,
+            antc_price=0,
+            fetched_monotonic=f3.time.monotonic(),
+            rt_cd="0",
+            msg_cd="MCA00000",
+            msg1="OK",
+        )),
+    )
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(
+        f3,
+        "_poll_fill",
+        AsyncMock(return_value={"fill_price": 4_690, "fill_qty": 200}),
+    )
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "record_order", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "update_order_fill", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+
+    await f3.run(force=True)
+
+    assert send_buy.await_args.args[1] == 200
+    assert send_buy.await_args.kwargs["limit_price"] == 4_735
+    assert state.get().position_status == "HOLDING"
+    assert state.get().day_skip is False
+    assert "ENTRY_PRICE_BLOCKED" not in [event for event, _ in events]
+    quote_move_warnings = [
+        kwargs for event, kwargs in events if event == "ENTRY_QUOTE_MOVE_HIGH"
+    ]
+    assert bool(quote_move_warnings) is should_warn
+    if should_warn:
+        assert quote_move_warnings[-1]["level"] == "WARN"
+        assert quote_move_warnings[-1]["quote_move_pct"] == pytest.approx(
+            0.644,
+            abs=0.001,
+        )
+    approved = [kwargs for event, kwargs in events if event == "ENTRY_PRICE_APPROVED"][-1]
+    assert approved["quote_move_pct"] == pytest.approx(0.644, abs=0.001)
+    sized = [
+        kwargs for event, kwargs in events if event == "ENTRY_QTY_SIZED_AT_LIMIT"
+    ][-1]
+    assert sized["reason"] == "LIMIT_PRICE_BUDGET"
+    assert sized["planned_qty"] == 203
+    assert sized["order_qty"] == 200
+    assert not [
+        kwargs
+        for event, kwargs in events
+        if event == "ENTRY_QTY_CLAMPED"
+        and kwargs.get("reason") == "LIMIT_PRICE_BUDGET"
+    ]
+    f3.db.record_skip.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_limit_sizing_qty_zero_is_info_when_candidate_retry_allowed(
+    monkeypatch,
+):
+    _reset_state()
+    blocked = []
+    send_buy = AsyncMock()
+    monkeypatch.setattr(f3, "F3_LIMIT_BUY_ENABLED", True)
+    monkeypatch.setattr(f3, "_existing_trade_for_today", AsyncMock(return_value=None))
+    monkeypatch.setattr(f3, "_pre_order_quiet_wait", AsyncMock())
+    monkeypatch.setattr(
+        f3,
+        "_fetch_buyable_qty",
+        AsyncMock(return_value=_buyable(qty=1, amt=1_000.0)),
+    )
+    monkeypatch.setattr(
+        f3,
+        "_fetch_final_entry_quote",
+        AsyncMock(return_value=f3.EntryQuote(
+            ask_price=1_030,
+            ask_qty=100,
+            antc_price=0,
+            fetched_monotonic=f3.time.monotonic(),
+            rt_cd="0",
+            msg_cd="MCA00000",
+            msg1="OK",
+        )),
+    )
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(
+        f3,
+        "_log_entry_blocked",
+        lambda ticker, reason, **kwargs: blocked.append((ticker, reason, kwargs)),
+    )
+    picked = {
+        "ticker": "006340",
+        "expected_price": 1_000.0,
+        "prev_close": 970.0,
+        "cash": 1_000.0,
+        "total_amount": 1_000,
+        "total_qty": 1,
+    }
+
+    result = await f3._run_single(
+        force=True,
+        picked=picked,
+        allow_candidate_retry=True,
+    )
+
+    assert result == "QTY_ZERO"
+    assert blocked[-1][1] == "QTY_ZERO"
+    assert blocked[-1][2]["level"] == "INFO"
+    assert blocked[-1][2]["candidate_retry"] is True
+    send_buy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_limit_sizing_qty_zero_alerts_operator_when_day_is_skipped(monkeypatch):
+    """후보 교체가 불가하면 하루를 스킵하므로 로그·알림·스킵기록이 모두 남아야 한다.
+
+    형제 경로(QTY_ZERO/BUYABLE_QTY_ZERO)와 동일한 관측 수준을 보장한다 —
+    조용한 day_skip은 대시보드에도 텔레그램에도 흔적이 남지 않는다.
+    """
+    _reset_state()
+    events = []
+    blocked = []
+    send_buy = AsyncMock()
+    notify = AsyncMock()
+    record_skip = AsyncMock()
+    monkeypatch.setattr(f3, "F3_LIMIT_BUY_ENABLED", True)
+    monkeypatch.setattr(f3, "_existing_trade_for_today", AsyncMock(return_value=None))
+    monkeypatch.setattr(f3, "_pre_order_quiet_wait", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(
+        f3,
+        "_fetch_buyable_qty",
+        AsyncMock(return_value=_buyable(qty=1, amt=1_000.0)),
+    )
+    monkeypatch.setattr(
+        f3,
+        "_fetch_final_entry_quote",
+        AsyncMock(return_value=f3.EntryQuote(
+            ask_price=1_030,
+            ask_qty=100,
+            antc_price=0,
+            fetched_monotonic=f3.time.monotonic(),
+            rt_cd="0",
+            msg_cd="MCA00000",
+            msg1="OK",
+        )),
+    )
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3.notifier, "send", notify)
+    monkeypatch.setattr(f3.db, "record_skip", record_skip)
+    monkeypatch.setattr(
+        f3,
+        "_log_entry_blocked",
+        lambda ticker, reason, **kwargs: blocked.append((ticker, reason, kwargs)),
+    )
+    picked = {
+        "ticker": "006340",
+        "expected_price": 1_000.0,
+        "prev_close": 970.0,
+        "cash": 1_000.0,
+        "total_amount": 1_000,
+        "total_qty": 1,
+    }
+
+    result = await f3._run_single(
+        force=True,
+        picked=picked,
+        allow_candidate_retry=False,
+    )
+
+    assert result is None
+    send_buy.assert_not_awaited()
+    assert state.get().day_skip is True
+    assert state.get().close_reason == "INSUFFICIENT_BALANCE"
+
+    assert blocked[-1][1] == "QTY_ZERO"
+    assert blocked[-1][2]["level"] == "WARN"
+
+    insufficient = [kwargs for event, kwargs in events if event == "INSUFFICIENT_BALANCE"][-1]
+    assert insufficient["reason"] == "QTY_ZERO_AT_LIMIT"
+    assert insufficient["level"] == "WARN"
+    assert insufficient["limit_buyable_qty"] == 0
+
+    notify.assert_awaited_once()
+    assert notify.await_args.args[0] == "ENTRY_FAIL"
+
+    record_skip.assert_awaited_once()
+    assert "reason=QTY_ZERO_AT_LIMIT" in record_skip.await_args.args[2]
+
+
+@pytest.mark.asyncio
+async def test_limit_entry_blocks_final_ask_outside_gap_cap(monkeypatch):
+    """고정 0.5% 제한을 없애도 최종 호가 갭 6.5% 상한은 계속 차단한다."""
+    _reset_state()
+    send_buy = AsyncMock()
+    monkeypatch.setattr(f3, "F3_LIMIT_BUY_ENABLED", True)
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        f3,
+        "_fetch_expected_price",
+        AsyncMock(return_value=(4_660.0, 4_490.0)),
+    )
+    monkeypatch.setattr(
+        f3,
+        "_fetch_available_cash",
+        AsyncMock(return_value=1_000_000.0),
+    )
+    monkeypatch.setattr(
+        f3,
+        "_fetch_final_entry_quote",
+        AsyncMock(return_value=f3.EntryQuote(
+            ask_price=4_785,
             ask_qty=100,
             antc_price=0,
             fetched_monotonic=f3.time.monotonic(),
@@ -1039,9 +1302,8 @@ async def test_limit_entry_blocks_when_final_ask_exceeds_fixed_anchor_cap(monkey
     send_buy.assert_not_awaited()
     assert state.get().position_status == "IDLE"
     assert state.get().day_skip is True
-    details = f3.db.record_skip.await_args.args[2]
-    assert "reason=PRICE_CAP_EXCEEDED" in details
-    assert "limit=14510.0" in details
+    assert state.get().close_reason == "GAP_CHANGED"
+    assert f3.db.record_skip.await_args.args[1] == "GAP_CHANGED"
 
 
 @pytest.mark.asyncio
@@ -1062,7 +1324,6 @@ async def test_limit_entry_cancels_remainder_and_records_partial_fill(monkeypatc
         "fill_price": 14_500,
     }
     monkeypatch.setattr(f3, "F3_LIMIT_BUY_ENABLED", True)
-    monkeypatch.setattr(f3, "F3_MAX_ENTRY_SLIPPAGE_RATIO", 0.005)
     monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 1)
     monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
     monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
@@ -1104,7 +1365,7 @@ async def test_limit_entry_cancels_remainder_and_records_partial_fill(monkeypatc
 
     await f3.run(force=True)
 
-    assert send_buy.await_args.kwargs["limit_price"] == 14_510
+    assert send_buy.await_args.kwargs["limit_price"] == 14_620
     assert state.get().position_status == "HOLDING"
     assert state.get().entry_qty == 19
     assert state.get().pending_entry is None

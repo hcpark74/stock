@@ -512,3 +512,47 @@ async def test_poll_fill_returns_partial_after_timeout(monkeypatch):
     fill = await f5_timeout._poll_fill("S1", timeout_sec=2, expect_qty=10)
 
     assert fill == {"fill_price": 10_100, "fill_qty": 6, "fill_amt": 60_600.0}
+
+
+async def test_poll_fill_returns_immediately_when_partial_order_is_terminal(monkeypatch):
+    """부분체결 후 잔량 0이면 창을 소진하지 않고 즉시 반환한다.
+
+    11:00 강제 청산은 잔량 재주문을 최대 3회까지 시도하므로, 더 채워질 수
+    없는 주문을 기다리며 폴링 창을 태우면 남은 재시도 시간만 줄어든다.
+    """
+    kis_get = AsyncMock(return_value={
+        "output1": [{
+            "odno": "S1",
+            "tot_ccld_qty": "6",
+            "tot_ccld_amt": "60600",
+            "rmn_qty": "0",
+        }],
+    })
+    monkeypatch.setattr(f5_timeout.kis_rest, "get", kis_get)
+    sleep = AsyncMock()
+    monkeypatch.setattr(f5_timeout.asyncio, "sleep", sleep)
+
+    fill = await f5_timeout._poll_fill("S1", timeout_sec=30, expect_qty=10)
+
+    assert fill == {"fill_price": 10_100, "fill_qty": 6, "fill_amt": 60_600.0}
+    assert kis_get.await_count == 1
+    sleep.assert_not_awaited()
+
+
+async def test_poll_fill_keeps_polling_while_quantity_remains(monkeypatch):
+    """rmn_qty > 0이면 아직 체결될 여지가 있으므로 계속 폴링한다."""
+    kis_get = AsyncMock(side_effect=[
+        {"output1": [{
+            "odno": "S1", "tot_ccld_qty": "6", "tot_ccld_amt": "60600", "rmn_qty": "4",
+        }]},
+        {"output1": [{
+            "odno": "S1", "tot_ccld_qty": "10", "tot_ccld_amt": "101000", "rmn_qty": "0",
+        }]},
+    ])
+    monkeypatch.setattr(f5_timeout.kis_rest, "get", kis_get)
+    monkeypatch.setattr(f5_timeout.asyncio, "sleep", AsyncMock())
+
+    fill = await f5_timeout._poll_fill("S1", timeout_sec=5, expect_qty=10)
+
+    assert fill == {"fill_price": 10_100, "fill_qty": 10, "fill_amt": 101_000.0}
+    assert kis_get.await_count == 2

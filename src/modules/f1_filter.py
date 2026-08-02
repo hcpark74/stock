@@ -521,6 +521,11 @@ def _save_candidate_snapshot(candidates: list[dict]) -> None:
         log("F1_SNAPSHOT_SAVE_ERROR", level="WARN", error=repr(e))
 
 
+def save_candidate_snapshot(candidates: list[dict]) -> None:
+    """Persist candidates from alternate F1 sources using the standard format."""
+    _save_candidate_snapshot(candidates)
+
+
 def _rotate_candidate_snapshots(snapshot_dir: Path, keep: int = F1_SNAPSHOT_KEEP) -> None:
     if keep <= 0:
         return

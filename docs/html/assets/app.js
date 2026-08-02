@@ -54,6 +54,35 @@ function go(id, btn) {
 // ── Arc 게이지 ────────────────────────────────────────────────────────────
 let _arcAnims = [];
 
+// 세션 구간: 시작은 장전 08:40 고정, 종료는 F5 마감 청산 시각.
+// 종료는 /api/settings(f5.timeout_time)에서 받아 갱신하고, 미수신 시 15:15로 폴백한다.
+const SESSION_START_MIN = 8 * 60 + 40;
+let _sessionEndMin = 15 * 60 + 15;  // F5 마감 청산 폴백(15:15)
+
+// "HH:MM" / "HH:MM:SS" → 자정 기준 분. 파싱 실패 시 null.
+function parseClockMin(str) {
+  const m = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(String(str ?? '').trim());
+  if (!m) return null;
+  const h = Number(m[1]), min = Number(m[2]);
+  if (h > 23 || min > 59) return null;
+  return h * 60 + min;
+}
+
+// 아크 진행도 0..1 (구간 밖은 클램프, endMin<=startMin이면 0).
+function sessionArcProgress(startMin, endMin, nowMin) {
+  if (!(endMin > startMin)) return 0;
+  return Math.max(0, Math.min(1, (nowMin - startMin) / (endMin - startMin)));
+}
+
+// 1/4·2/4·3/4 지점의 "HH:MM" 눈금 라벨 3개를 구간에서 계산.
+function sessionArcTicks(startMin, endMin) {
+  const p2 = n => String(n).padStart(2, '0');
+  return [1, 2, 3].map(i => {
+    const t = Math.round(startMin + (endMin - startMin) * i / 4);
+    return p2(Math.floor(t / 60) % 24) + ':' + p2(t % 60);
+  });
+}
+
 (function tick(){
   setTimeout(tick, 1000);
   try {
@@ -71,9 +100,9 @@ function updateArc(kst) {
   const p=n=>String(n).padStart(2,'0');
   $('arc-now').textContent = p(h)+':'+p(m)+' 현재';
 
-  const startMin=8*60+40, endMin=10*60, nowMin=h*60+m+s/60;
-  let prog = Math.max(0, Math.min(1, (nowMin-startMin)/(endMin-startMin)));
-  const elapsed = Math.max(0, Math.round(nowMin-startMin));
+  const nowMin=h*60+m+s/60;
+  let prog = sessionArcProgress(SESSION_START_MIN, _sessionEndMin, nowMin);
+  const elapsed = Math.max(0, Math.round(nowMin-SESSION_START_MIN));
   $('arc-elapsed').textContent = elapsed+'분 경과';
 
   drawArc(prog);
@@ -99,7 +128,7 @@ function drawArc(prog) {
     ctx.strokeStyle='#f7a600'; ctx.lineWidth=10; ctx.lineCap='round'; ctx.stroke();
   }
 
-  ['09:00','09:20','09:40'].forEach((lbl,i)=>{
+  sessionArcTicks(SESSION_START_MIN, _sessionEndMin).forEach((lbl,i)=>{
     const p=(i+1)/4, a=Math.PI*(1-p), ri=r-22;
     const x=cx+ri*Math.cos(a), y=cy+ri*Math.sin(a);
     ctx.fillStyle=themeVal('#363a45','#4f5260'); ctx.font='10px Noto Sans KR,sans-serif';
@@ -229,7 +258,7 @@ function updateFlag(id, on, label, dotColor) {
 }
 
 function updatePipeline(status, pipeline) {
-  const stages=['F1 스캔','F2 잠금','F3 진입','F4 Step Trailing','F5 타임아웃'];
+  const stages=['F1 스캔','F2 잠금','F3 진입','F4 Step Trailing','F5 마감 청산'];
   const activeIdx = Number.isInteger(pipeline?.pipeline_stage)
     ? pipeline.pipeline_stage
     : ({IDLE:0,ENTERING:2,HOLDING:3,CLOSED:4}[status]??0);
@@ -1240,6 +1269,7 @@ function settingBox(title, rows) {
 
 function renderSettings(s) {
   if(!s) return;
+  applySchedule(s);  // 설정 탭을 나중에 열 때도 세션 종료 시각을 재반영(중복 요청 없이 재사용)
   $('set-mode').textContent = s.mode || 'PAPER';
   $('set-mode').className = 'sc2-val ' + (s.mode === 'REAL' ? 'pdn' : '');
   $('set-runtime').textContent = s.dry_run ? 'DRY_RUN' : 'LIVE';
@@ -1272,7 +1302,7 @@ function renderSettings(s) {
         ['Step 간격', `+${fmt(s.f4?.step_size_pct, 1)}%`],
         ['Trail 폭', `-${fmt(s.f4?.step_trail_pct, 1)}%`],
         ['강제 트레일링', s.f4?.force_trailing_time || '—'],
-        ['F5 타임아웃', s.f5?.timeout_time ? `${s.f5.timeout_time} · 점검 ${s.f5.precheck_time || '—'}` : '—'],
+        ['F5 마감 청산', s.f5?.timeout_time ? `${s.f5.timeout_time} · 점검 ${s.f5.precheck_time || '—'}` : '—'],
       ]),
       settingBox('시세 감시', [
         ['VI 감시', s.vi?.watch_enabled ? '활성' : '비활성', s.vi?.watch_enabled ? 'pup' : 'pdn'],
@@ -1301,6 +1331,28 @@ function renderSettings(s) {
 }
 
 // ── API 호출 ─────────────────────────────────────────────────────────────
+// 세션 종료(F5 마감 청산) 시각을 설정 페이로드에서 한 곳으로 반영한다.
+// _sessionEndMin(아크 계산)·#arc-end·#btm-end 라벨을 함께 갱신하고 아크를 다시 그린다.
+// timeout_time이 없거나 불량이면 기존 15:15 폴백을 유지한다.
+function applySchedule(settings) {
+  const raw = settings?.f5?.timeout_time;
+  const end = parseClockMin(raw);
+  if(end == null) return;
+  _sessionEndMin = end;
+  const hhmm = String(raw).slice(0, 5);
+  const arcEnd = $('arc-end'); if(arcEnd) arcEnd.textContent = hhmm;
+  const btmEnd = $('btm-end'); if(btmEnd) btmEnd.textContent = hhmm;
+  drawArc(0);
+}
+
+async function loadSchedule() {
+  try {
+    const r = await fetch('/api/settings');
+    if(!r.ok) return;
+    applySchedule(await r.json());
+  } catch(e){}
+}
+
 async function loadSettings() {
   try {
     const r = await fetch('/api/settings');
@@ -1542,7 +1594,7 @@ function renderImprove(d) {
     ['STEP_SIZE',    `+${p.step_size_pct}%`,                           judgeStepSize(d)],
     ['STEP_TRAIL',   `-${p.step_trail_pct}%`,                          judgeStepTrail(d)],
     ['슬리피지 버퍼', `${p.gap_max_order_pct}→${p.gap_max_fill_pct}%`, judgeSlipBuffer(d)],
-    ['F5 타임아웃',  p.timeout_time,                                   judgeTimeout(d)],
+    ['F5 마감 청산', p.timeout_time,                                   judgeTimeout(d)],
     ['F1 갭 범위',   `${p.f1_gap_min_pct}~${p.f1_gap_core_max_pct}% / 조건부 ${p.f1_gap_hard_max_pct}%`, judgeGapRange(d)],
   ];
   $('imp-cards').innerHTML = cards.map(([t, cur, j]) => impCard(t, cur, j)).join('');
@@ -1650,6 +1702,7 @@ function toggleTheme() {
 })();
 
 // ── 초기 로드 ────────────────────────────────────────────────────────────
+loadSchedule();
 loadStatus();
 loadF1();
 loadLogs();

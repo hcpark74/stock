@@ -1,4 +1,4 @@
-"""F4. 장중 추적 스탑 모듈 (09:00:00 ~ 10:59:59) — PRD §F4"""
+"""F4. 장중 추적 스탑 모듈 (09:00:00 ~ F5 청산 직전) — PRD §F4"""
 
 import asyncio
 import math
@@ -24,8 +24,10 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-FORCE_TRAILING_HOUR = 10
-FORCE_TRAILING_MINUTE = 50
+# 청산 10분 전 — F5_EXEC(15:15)에 연동한다. 스텝 미달 포지션도 마감 직전에는
+# trailing을 켜서 F5 시장가 청산 전에 스탑 기회를 준다.
+FORCE_TRAILING_HOUR = 15
+FORCE_TRAILING_MINUTE = 5
 
 STEP_SIZE      = 0.025   # 스텝 간격 +2.5% (params.json 로드 예정)
 STEP_TRAIL     = 0.015   # 스텝 기준 하락폭 -1.5%
@@ -725,7 +727,7 @@ async def _execute_close_impl(price: float, reason: str) -> bool:
                 phase="EXITING",
                 error=repr(exc),
             )
-        fill = await _poll_fill(sell_id, timeout_sec=30)
+        fill = await _poll_fill(sell_id, timeout_sec=30, expect_qty=qty)
         if fill:
             exit_price = fill["fill_price"]
             filled_qty = max(0, int(fill.get("fill_qty") or 0))
@@ -921,14 +923,26 @@ async def _send_sell(ticker: str, qty: int, mode: str) -> dict:
     )
 
 
-async def _poll_fill(order_id: str, timeout_sec: int = 30) -> dict | None:
-    # REAL-BLOCKER: this helper returns on the first positive cumulative fill
-    # and does not prove that the full sell quantity filled. The caller also
-    # lacks pending-order reconciliation when this returns None. Keep REAL
-    # disabled until docs/REAL_TRADING_CHECKLIST.md items R1/R2 are resolved.
+async def _poll_fill(
+    order_id: str,
+    timeout_sec: int = 30,
+    expect_qty: int = 0,
+) -> dict | None:
+    """Poll cumulative fills until the requested quantity is confirmed.
+
+    KIS can expose an intermediate cumulative fill before a market order is
+    completely filled. Preserve the latest partial result for the timeout
+    path, but do not return it early when the caller supplied expect_qty.
+
+    rmn_qty == 0 means the order is terminal (fully filled, or cancelled /
+    expired after a partial). Return immediately in that case — waiting out
+    the remaining attempts would only delay the caller's partial-fill
+    handling (F4_CLOSE_PENDING alert, remaining-qty bookkeeping).
+    """
     mode = os.getenv("KIS_MODE", "PAPER")
     today = datetime.now(KST).strftime("%Y%m%d")
     attempts = max(1, round(timeout_sec / F4_FILL_POLL_INTERVAL_SEC))
+    last_partial: dict | None = None
     for _ in range(attempts):
         try:
             resp = await kis_rest.get(
@@ -956,9 +970,18 @@ async def _poll_fill(order_id: str, timeout_sec: int = 30) -> dict | None:
                 if item.get("odno") == order_id:
                     tot_qty = int(item.get("tot_ccld_qty") or 0)
                     tot_amt = float(item.get("tot_ccld_amt") or 0)
+                    rmn_qty = item.get("rmn_qty")
                     if tot_qty > 0:
-                        return {"fill_price": round(tot_amt / tot_qty), "fill_qty": tot_qty}
+                        last_partial = {
+                            "fill_price": round(tot_amt / tot_qty),
+                            "fill_qty": tot_qty,
+                        }
+                        if expect_qty <= 0 or tot_qty >= expect_qty:
+                            return last_partial
+                        # 잔량 0 = 주문 종료. 더 채워질 여지가 없으므로 즉시 반환한다.
+                        if rmn_qty is not None and int(rmn_qty or 0) == 0:
+                            return last_partial
         except Exception:
             pass
         await asyncio.sleep(F4_FILL_POLL_INTERVAL_SEC)
-    return None
+    return last_partial

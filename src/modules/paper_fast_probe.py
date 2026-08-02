@@ -488,6 +488,120 @@ def _load_prepared_tickers() -> list[str]:
     return []
 
 
+def load_persisted_open_candidates(
+    now: datetime | None = None,
+) -> tuple[Path | None, list[dict]]:
+    """Rebuild today's last completed fast-path selection **for reporting only**.
+
+    Replays the probe file's public multi-price response plus the ordered
+    tickers that were accepted, so `/api/f1` can still show the selection after
+    a restart without another KIS call.
+
+    This deliberately does NOT repopulate the in-memory ``_open_candidates``:
+    those rows carry ``fast_observed_monotonic``, which is meaningless across
+    processes and would defeat F3's freshness gate.  Restart recovery on the
+    trading side comes from the F1 snapshot (``save_candidate_snapshot``) and
+    persisted state, not from here.
+    """
+    path = _probe_path(now)
+    if not path.exists():
+        return None, []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None, []
+
+    ranking_by_ticker: dict[str, dict] = {}
+    market_by_ticker: dict[str, str] = {}
+    prepared_by_ticker: dict[str, dict] = {}
+    pending_open_rows: list[dict] = []
+    restored: list[dict] = []
+
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+
+        event = record.get("event")
+        # 새 관측 사이클 시작 — 이전 사이클 잔재가 섞이지 않도록 전부 비운다.
+        # restored까지 비워야 완주하지 못한 사이클이 직전 결과를 재사용하지 않는다.
+        if event == "PAPER_FAST_PROBE_PREOPEN_START":
+            ranking_by_ticker = {}
+            market_by_ticker = {}
+            prepared_by_ticker = {}
+            pending_open_rows = []
+            restored = []
+            continue
+
+        response_rows = _rows(record.get("response") or {})
+        if event == "PAPER_FAST_PROBE_RANKING":
+            market = str(record.get("market") or "J")
+            for row in response_rows:
+                ticker = str(row.get("stck_shrn_iscd") or row.get("mksc_shrn_iscd") or "")
+                if ticker:
+                    ranking_by_ticker[ticker] = row
+                    market_by_ticker[ticker] = market
+            continue
+
+        if event == "PAPER_FAST_PROBE_MULTI" and record.get("phase") == "PREOPEN":
+            market = str(record.get("market") or "J")
+            for row in response_rows:
+                candidate = _candidate_from_multi(row, market, ranking_by_ticker)
+                if candidate is not None:
+                    prepared_by_ticker[str(candidate["ticker"])] = candidate
+            continue
+
+        if event == "PAPER_FAST_PROBE_OPEN_MULTI":
+            pending_open_rows = response_rows
+            continue
+
+        if event != "PAPER_FAST_PROBE_OPEN_DONE" or not pending_open_rows:
+            continue
+
+        parsed: list[dict] = []
+        for row in pending_open_rows:
+            ticker = str(row.get("inter_shrn_iscd") or "")
+            prepared = prepared_by_ticker.get(ticker, {})
+            candidate = _candidate_from_multi(
+                row,
+                str(prepared.get("market") or market_by_ticker.get(ticker) or "J"),
+                ranking_by_ticker,
+            )
+            if candidate is None:
+                continue
+            if prepared:
+                candidate["avg_amount_5d"] = prepared.get("avg_amount_5d", 0.0)
+            candidate["gap_allowed"] = f1_selector.gap_allowed(candidate)
+            candidate["gap_source"] = f"fast.{candidate.get('gap_source', 'multi')}"
+            parsed.append(candidate)
+
+        ranked_by_ticker = {
+            str(candidate.get("ticker")): candidate
+            for candidate in f1_selector.rank_candidates(parsed)
+            if candidate.get("ticker")
+        }
+        parsed_by_ticker = {
+            str(candidate.get("ticker")): candidate
+            for candidate in parsed
+            if candidate.get("ticker")
+        }
+        accepted_tickers = [
+            str(ticker)
+            for ticker in (record.get("shadow_tickers") or [])
+            if ticker
+        ]
+        restored = [
+            ranked_by_ticker.get(ticker) or parsed_by_ticker[ticker]
+            for ticker in accepted_tickers
+            if ticker in ranked_by_ticker or ticker in parsed_by_ticker
+        ]
+        # 소비한 개장 응답은 비운다 — 뒤따르는 OPEN_DONE이 같은 행을 다시 쓰지 않게.
+        pending_open_rows = []
+
+    return (path, restored) if restored else (None, [])
+
+
 def get_open_candidates() -> list[dict]:
     return [dict(candidate) for candidate in _open_candidates]
 

@@ -6,6 +6,11 @@ pytest.importorskip("fastapi")
 
 import src.api.server as server  # noqa: E402 — fastapi 미설치 시 모듈 스킵 이후 임포트
 from src import db  # noqa: E402
+from src.modules.f4_tracking import (  # noqa: E402
+    FORCE_TRAILING_HOUR,
+    FORCE_TRAILING_MINUTE,
+)
+from src.schedule_times import F5_EXEC_H, F5_EXEC_M  # noqa: E402
 
 
 def _trade(**over):
@@ -45,8 +50,15 @@ def test_improve_empty_rows_returns_zero_structure():
     assert payload["params"]["hard_stop_pct"] == 2.0
     assert payload["params"]["gap_max_order_pct"] == 6.5
     assert payload["params"]["gap_max_fill_pct"] == 7.0
-    assert payload["params"]["timeout_time"] == "11:00"
-    assert payload["params"]["force_trailing_time"] == "10:50"
+    # 시각은 schedule_times/f4_tracking이 단일 출처 — 리터럴로 고정하지 않는다.
+    assert payload["params"]["timeout_time"] == f"{F5_EXEC_H:02d}:{F5_EXEC_M:02d}"
+    assert payload["params"]["force_trailing_time"] == (
+        f"{FORCE_TRAILING_HOUR:02d}:{FORCE_TRAILING_MINUTE:02d}"
+    )
+    # 강제 trailing은 청산 10분 전이라는 관계가 깨지면 안 된다.
+    assert (FORCE_TRAILING_HOUR * 60 + FORCE_TRAILING_MINUTE) == (
+        F5_EXEC_H * 60 + F5_EXEC_M - 10
+    )
 
 
 def test_improve_overall_payoff_and_expectancy():

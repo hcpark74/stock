@@ -413,6 +413,8 @@ async def test_job_f1_uses_fast_candidates_when_hybrid_enabled(monkeypatch):
         AsyncMock(return_value=fast),
     )
     monkeypatch.setattr(main.paper_fast_probe, "hybrid_enabled", lambda: True)
+    save_snapshot = MagicMock()
+    monkeypatch.setattr(main.f1_filter, "save_candidate_snapshot", save_snapshot)
     legacy = AsyncMock(return_value=[{"ticker": "000001"}])
     monkeypatch.setattr(main.f1_filter, "run", legacy)
     chained = AsyncMock()
@@ -422,6 +424,7 @@ async def test_job_f1_uses_fast_candidates_when_hybrid_enabled(monkeypatch):
 
     legacy.assert_not_awaited()
     assert main._f1_result == fast
+    save_snapshot.assert_called_once_with(fast)
     chained.assert_awaited_once()
 
 

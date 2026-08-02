@@ -8,9 +8,17 @@ import pytest
 pytest.importorskip("fastapi")
 
 import src.api.server as server  # noqa: E402 — fastapi 미설치 시 모듈 스킵 이후 임포트
+import src.api.status_logic as status_logic  # noqa: E402
 import src.modules.f1_filter as f1_filter  # noqa: E402
 import src.modules.f4_tracking as f4_tracking  # noqa: E402
 from src import db  # noqa: E402
+from src.schedule_times import (  # noqa: E402
+    F5_EXEC_H,
+    F5_EXEC_M,
+    F5_PRECHECK_H,
+    F5_PRECHECK_M,
+    F5_PRECHECK_S,
+)
 
 
 def test_server_uses_f1_snapshot_dir_constant():
@@ -36,6 +44,62 @@ def test_f1_skipped_is_failed_status():
 
     assert status == "FAILED"
     assert last_event["event"] == "F1_SKIPPED"
+
+
+def test_paper_fast_selection_is_done_status():
+    status, last_event = server._f1_status_from_logs(
+        [{
+            "event": "PAPER_FAST_PATH_SELECTED",
+            "tickers": ["005930", "000660"],
+        }]
+    )
+
+    assert status == "DONE"
+    assert last_event["event"] == "PAPER_FAST_PATH_SELECTED"
+
+
+def test_fast_candidates_can_be_recovered_from_selection_logs():
+    logs = [
+        {
+            "event": "PAPER_FAST_PATH_SELECTED",
+            "tickers": ["011790", "028050", "332570"],
+        },
+        {
+            "event": "TARGET_LOCKED",
+            "ticker": "028050",
+            "name": "Samsung E&A",
+            "target_tickers": ["028050", "332570"],
+            "target_names": ["Samsung E&A", "PS Electronics"],
+            "gap_pct": 4.88,
+            "expected_price": 43000,
+            "expected_amount": 1_514_761_000,
+        },
+    ]
+
+    rows = server._fast_candidates_from_logs(logs)
+
+    assert [row["ticker"] for row in rows] == ["011790", "028050", "332570"]
+    assert rows[1]["name"] == "Samsung E&A"
+    assert rows[1]["gap_pct"] == pytest.approx(0.0488)
+
+    # 갭을 복구한 종목만 통과로 표시한다 — 나머지는 근거 없이 통과로 단정하지 않는다.
+    assert rows[1]["gap_allowed"] is True
+    assert status_logic.f1_verdict(rows[1]) == "통과"
+    for row in (rows[0], rows[2]):
+        assert "gap_allowed" not in row
+        assert row["gap_reason"] == "GAP_UNVERIFIED"
+        assert status_logic.f1_allowed(row) is False
+        assert status_logic.f1_verdict(row) == "갭확인불가"
+
+
+def test_fast_candidates_from_logs_without_lock_event_claims_no_gap_pass():
+    """TARGET_LOCKED가 없으면 어떤 종목도 통과로 집계되지 않아야 한다."""
+    rows = server._fast_candidates_from_logs(
+        [{"event": "PAPER_FAST_PATH_SELECTED", "tickers": ["011790", "028050"]}]
+    )
+
+    assert [row["ticker"] for row in rows] == ["011790", "028050"]
+    assert server._f1_summary_from_rows(rows)["gap_pass"] == 0
 
 
 def test_selection_process_summarizes_f1_f2_f3():
@@ -326,7 +390,9 @@ async def test_api_settings_exposes_f4_timing_vi_and_rest_backup():
     resp = await server.api_settings()
     payload = json.loads(resp.body.decode("utf-8"))
 
-    assert payload["f4"]["force_trailing_time"] == "10:50"
+    assert payload["f4"]["force_trailing_time"] == (
+        f"{f4_tracking.FORCE_TRAILING_HOUR:02d}:{f4_tracking.FORCE_TRAILING_MINUTE:02d}"
+    )
     assert payload["f4"]["rest_backup"] == {
         "enabled": f4_tracking.F4_REST_BACKUP_ENABLED,
         "only_when_ws_stale": f4_tracking.F4_REST_ONLY_WHEN_WS_STALE,
@@ -334,9 +400,11 @@ async def test_api_settings_exposes_f4_timing_vi_and_rest_backup():
         "poll_interval_sec": f4_tracking.F4_REST_POLL_INTERVAL_SEC,
     }
     assert payload["f5"] == {
-        "timeout_time": "11:00",
-        "precheck_time": "10:59:50",
+        "timeout_time": f"{F5_EXEC_H:02d}:{F5_EXEC_M:02d}",
+        "precheck_time": f"{F5_PRECHECK_H:02d}:{F5_PRECHECK_M:02d}:{F5_PRECHECK_S:02d}",
     }
+    # 청산은 장마감 동시호가(15:20) 전에 재시도까지 끝나야 한다.
+    assert (F5_EXEC_H, F5_EXEC_M) < (15, 20)
     assert payload["vi"] == {
         "watch_enabled": f4_tracking.VI_WATCH_ENABLED,
         "freeze_suspect_sec": f4_tracking.VI_FREEZE_SUSPECT_SEC,

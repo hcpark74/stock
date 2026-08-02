@@ -1,5 +1,6 @@
 import json
 from datetime import datetime as real_datetime
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -353,3 +354,195 @@ async def test_open_boundary_recovers_tickers_from_preopen_record(
 
     assert get.await_args.kwargs["params"]["FID_INPUT_ISCD_1"] == "006340"
     assert get.await_args.kwargs["params"]["FID_INPUT_ISCD_2"] == "477850"
+
+
+def test_load_persisted_open_candidates_restores_completed_selection(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    now = real_datetime(2026, 7, 28, 9, 1, tzinfo=probe.KST)
+    path = tmp_path / "20260728.jsonl"
+    rows = [
+        _multi_row("005930", "Samsung", 10400, 10000),
+        _multi_row("000660", "Hynix", 10500, 10000),
+    ]
+    records = [
+        {"event": "PAPER_FAST_PROBE_PREOPEN_START"},
+        {
+            "event": "PAPER_FAST_PROBE_RANKING",
+            "market": "J",
+            "response": {
+                "output": [
+                    _ranking_row("005930", "Samsung", 10400),
+                    _ranking_row("000660", "Hynix", 10500),
+                ],
+            },
+        },
+        {
+            "event": "PAPER_FAST_PROBE_OPEN_MULTI",
+            "phase": "OPEN",
+            "response": {"output": rows},
+        },
+        {
+            "event": "PAPER_FAST_PROBE_OPEN_DONE",
+            "shadow_tickers": ["000660", "005930"],
+        },
+    ]
+    path.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    restored_path, candidates = probe.load_persisted_open_candidates(now)
+
+    assert restored_path == path
+    assert [candidate["ticker"] for candidate in candidates] == ["000660", "005930"]
+    assert candidates[0]["name"] == "Hynix"
+    assert candidates[0]["gap_allowed"] is True
+    assert candidates[0]["gap_source"].startswith("fast.")
+
+
+def _write_probe_file(tmp_path, records) -> Path:
+    path = tmp_path / "20260728.jsonl"
+    path.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _completed_cycle(tickers: list[tuple[str, str, int]]) -> list[dict]:
+    """PREOPEN_START ~ OPEN_DONE 한 사이클 레코드를 만든다."""
+    return [
+        {"event": "PAPER_FAST_PROBE_PREOPEN_START"},
+        {
+            "event": "PAPER_FAST_PROBE_RANKING",
+            "market": "J",
+            "response": {
+                "output": [
+                    _ranking_row(ticker, name, price)
+                    for ticker, name, price in tickers
+                ],
+            },
+        },
+        {
+            "event": "PAPER_FAST_PROBE_OPEN_MULTI",
+            "phase": "OPEN",
+            "response": {
+                "output": [
+                    _multi_row(ticker, name, price, 10000)
+                    for ticker, name, price in tickers
+                ],
+            },
+        },
+        {
+            "event": "PAPER_FAST_PROBE_OPEN_DONE",
+            "shadow_tickers": [ticker for ticker, _, _ in tickers],
+        },
+    ]
+
+
+def test_load_persisted_open_candidates_uses_latest_completed_cycle(
+    monkeypatch,
+    tmp_path,
+):
+    """같은 파일에 사이클이 여러 번 있으면 마지막 완료 사이클만 남는다."""
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    now = real_datetime(2026, 7, 28, 9, 1, tzinfo=probe.KST)
+    path = _write_probe_file(
+        tmp_path,
+        _completed_cycle([("005930", "Samsung", 10400)])
+        + _completed_cycle([("000660", "Hynix", 10500)]),
+    )
+
+    restored_path, candidates = probe.load_persisted_open_candidates(now)
+
+    assert restored_path == path
+    assert [candidate["ticker"] for candidate in candidates] == ["000660"]
+
+
+def test_load_persisted_open_candidates_discards_unfinished_later_cycle(
+    monkeypatch,
+    tmp_path,
+):
+    """새 사이클이 시작만 하고 완주하지 못했으면 이전 사이클 결과를 재사용하지 않는다.
+
+    재사용하면 개장 관측이 실패한 날에 어제 같은 선정을 통과한 것처럼 보인다.
+    """
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    now = real_datetime(2026, 7, 28, 9, 1, tzinfo=probe.KST)
+    _write_probe_file(
+        tmp_path,
+        _completed_cycle([("005930", "Samsung", 10400)])
+        + [{"event": "PAPER_FAST_PROBE_PREOPEN_START"}],
+    )
+
+    restored_path, candidates = probe.load_persisted_open_candidates(now)
+
+    assert restored_path is None
+    assert candidates == []
+
+
+def test_load_persisted_open_candidates_ignores_open_done_without_rows(
+    monkeypatch,
+    tmp_path,
+):
+    """OPEN_MULTI 없이 도착한 OPEN_DONE은 복구 근거가 없으므로 무시한다.
+
+    직전 사이클의 개장 응답을 빌려 쓰면 다른 날/다른 종목 데이터가 섞인다.
+    """
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    now = real_datetime(2026, 7, 28, 9, 1, tzinfo=probe.KST)
+    _write_probe_file(
+        tmp_path,
+        _completed_cycle([("005930", "Samsung", 10400)])
+        + [{"event": "PAPER_FAST_PROBE_OPEN_DONE", "shadow_tickers": ["000660"]}],
+    )
+
+    restored_path, candidates = probe.load_persisted_open_candidates(now)
+
+    # 마지막 OPEN_DONE은 버려지고 직전 완료 사이클 결과가 유지된다.
+    assert restored_path is not None
+    assert [candidate["ticker"] for candidate in candidates] == ["005930"]
+
+
+def test_load_persisted_open_candidates_survives_corrupt_and_null_records(
+    monkeypatch,
+    tmp_path,
+):
+    """잘린 마지막 줄과 shadow_tickers=null이 있어도 예외 없이 처리한다.
+
+    이 함수는 /api/f1 응답 경로라 예외가 나면 대시보드가 500으로 죽는다.
+    """
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    now = real_datetime(2026, 7, 28, 9, 1, tzinfo=probe.KST)
+    path = tmp_path / "20260728.jsonl"
+    records = _completed_cycle([("005930", "Samsung", 10400)])
+    body = "\n".join(json.dumps(record) for record in records)
+    body += "\n" + json.dumps(
+        {"event": "PAPER_FAST_PROBE_OPEN_DONE", "shadow_tickers": None}
+    )
+    body += '\n{"event": "PAPER_FAST_PROBE_OPEN_DO'  # 쓰다 만 마지막 줄
+    path.write_text(body, encoding="utf-8")
+
+    restored_path, candidates = probe.load_persisted_open_candidates(now)
+
+    assert restored_path == path
+    assert [candidate["ticker"] for candidate in candidates] == ["005930"]
+
+
+def test_load_persisted_open_candidates_skips_unknown_accepted_ticker(
+    monkeypatch,
+    tmp_path,
+):
+    """shadow_tickers에 개장 응답에 없는 종목이 있으면 조용히 건너뛴다(KeyError 금지)."""
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    now = real_datetime(2026, 7, 28, 9, 1, tzinfo=probe.KST)
+    records = _completed_cycle([("005930", "Samsung", 10400)])
+    records[-1]["shadow_tickers"] = ["999999", "005930"]
+    _write_probe_file(tmp_path, records)
+
+    _restored_path, candidates = probe.load_persisted_open_candidates(now)
+
+    assert [candidate["ticker"] for candidate in candidates] == ["005930"]

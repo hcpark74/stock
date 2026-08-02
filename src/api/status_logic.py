@@ -190,6 +190,8 @@ def f1_verdict(candidate: dict) -> str:
         "EXTREME_GAP_RISK": "초고갭",
         "GAP_TOO_HIGH": "갭과열",
         "NEGATIVE_GAP": "음수갭",
+        # 로그 복구 경로 — 선정된 것은 확실하나 갭 수치를 복구하지 못한 경우
+        "GAP_UNVERIFIED": "갭확인불가",
     }
     return labels.get(str(reason), "통과" if candidate.get("gap_allowed") else "제외")
 

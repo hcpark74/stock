@@ -86,14 +86,14 @@ def build(
     # F3 — 갭 재검증 → 진입 → 피라미딩 전 과정 포함
     scheduler.add_job(f3, cron(hour=F3_H, minute=F3_M, second=F3_S), id="f3_entry")
 
-    # 10:59:50 — F5 Pre-Check
+    # F5 Pre-Check (청산 10초 전 — src/schedule_times.py)
     scheduler.add_job(
         f5_precheck,
         cron(hour=F5_PRECHECK_H, minute=F5_PRECHECK_M, second=F5_PRECHECK_S),
         id="f5_precheck",
     )
 
-    # 11:00:00 — F5 Execute
+    # F5 Execute (연속매매 마감 전 청산 — src/schedule_times.py)
     scheduler.add_job(
         f5_exec,
         cron(hour=F5_EXEC_H, minute=F5_EXEC_M, second=F5_EXEC_S),

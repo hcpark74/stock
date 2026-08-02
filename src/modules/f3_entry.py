@@ -27,8 +27,8 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 GAP_MIN_RECHECK = 0.020   # 재검증 하한 (F1 3%보다 낮음 — 완충)
-GAP_MAX_ORDER = 0.065     # 주문 전 재검증 상한 — GAP_MAX_FILL과의 차이가 시장가 슬리피지 버퍼
-GAP_MAX_FILL = 0.070      # 체결가 갭 상한 — 이상이면 SLIPPAGE_GUARD 즉시 청산
+GAP_MAX_ORDER = 0.065     # 주문 전 재검증 및 지정가의 절대 갭 상한
+GAP_MAX_FILL = 0.070      # 레거시 시장가·불변식 위반 시 체결 후 방어 상한
 ALLOC_RATIO = float(os.getenv("F3_ALLOC_RATIO", "0.95"))  # 주문가능 현금 기본 95% 기준
 F3_QTY_CLAMP_WARN_PCT = max(
     0.0,
@@ -47,10 +47,38 @@ F3_ENTRY_RETRY_FILL_SEC = float(os.getenv("F3_ENTRY_RETRY_FILL_SEC", "8.0"))
 F3_ENTRY_RETRY_DEADLINE = os.getenv("F3_ENTRY_RETRY_DEADLINE", "09:11:00")
 F3_PRE_ORDER_QUIET_SEC = float(os.getenv("F3_PRE_ORDER_QUIET_SEC", "1.5"))
 F3_LIMIT_BUY_ENABLED = os.getenv("F3_LIMIT_BUY_ENABLED", "1") == "1"
-F3_MAX_ENTRY_SLIPPAGE_RATIO = max(
+F3_ASK_SLIPPAGE_RATIO = max(
     0.0,
-    float(os.getenv("F3_MAX_ENTRY_SLIPPAGE_RATIO", "0.005")),
+    _env_float("F3_ASK_SLIPPAGE_RATIO", 0.01),
 )
+F3_QUOTE_MOVE_WARN_PCT = max(
+    0.0,
+    _env_float("F3_QUOTE_MOVE_WARN_PCT", 1.5),
+)
+
+# 제거된 설정 → 대체 설정. 남아 있는 값은 조용히 무시되므로 기동 시 1회 경고한다.
+# 슬리피지 상한처럼 운영자가 "아직 걸려 있다"고 믿는 안전장치는 특히 위험하다.
+_REMOVED_ENV_VARS = {
+    "F3_MAX_ENTRY_SLIPPAGE_RATIO": "F3_ASK_SLIPPAGE_RATIO",
+}
+
+
+def _warn_removed_env_vars() -> None:
+    for removed, replacement in _REMOVED_ENV_VARS.items():
+        value = os.getenv(removed)
+        if value is None:
+            continue
+        log(
+            "F3_ENV_REMOVED",
+            level="WARN",
+            removed_env=removed,
+            removed_value=value,
+            replacement_env=replacement,
+            replacement_value=os.getenv(replacement),
+        )
+
+
+_warn_removed_env_vars()
 
 
 def _default_final_quote_max_age_ms(mode: str) -> int:
@@ -148,17 +176,16 @@ def _strict_gap_cap(prev_close: float, api_tick_size: float = 0.0) -> float:
 
 
 def _entry_limit_price(
-    anchor_price: float,
-    prev_close: float,
+    ask_price: float,
+    gap_cap: float,
     api_tick_size: float = 0.0,
-) -> tuple[float, float, float]:
-    """슬리피지 상한과 갭 상한 중 더 낮은 유효 호가를 선택한다."""
-    slippage_cap = _floor_to_tick(
-        anchor_price * (1 + F3_MAX_ENTRY_SLIPPAGE_RATIO),
+) -> tuple[float, float]:
+    """신선한 최종 매도호가 상한과 절대 갭 상한 중 더 낮은 지정가를 사용한다."""
+    ask_cap = _floor_to_tick(
+        ask_price * (1 + F3_ASK_SLIPPAGE_RATIO),
         api_tick_size,
     )
-    gap_cap = _strict_gap_cap(prev_close, api_tick_size)
-    return min(slippage_cap, gap_cap), slippage_cap, gap_cap
+    return min(ask_cap, gap_cap), ask_cap
 
 
 def _quote_age_ms(quote: EntryQuote) -> int:
@@ -188,7 +215,6 @@ _CANDIDATE_RETRY_REASONS = {
     "BUYABLE_QTY_ZERO",
     "QTY_ZERO",
     "VI_ACTIVE",
-    "PRICE_CAP_EXCEEDED",
     "FINAL_QUOTE_UNAVAILABLE",
     "FINAL_QUOTE_STALE",
     "GAP_CHANGED",
@@ -197,7 +223,6 @@ _EXPECTED_CANDIDATE_REJECTIONS = {
     "BUYABLE_QTY_ZERO",
     "QTY_ZERO",
     "VI_ACTIVE",
-    "PRICE_CAP_EXCEEDED",
     "GAP_CHANGED",
 }
 # KIS "모의투자 영업일이 아닙니다" — CTCA0903R이 모의투자 미지원이라 주문 거부가 유일한 휴장 신호
@@ -695,13 +720,11 @@ async def recover_pending_entry() -> bool:
         ticker=ticker,
     )
 
+    # 정상 지정가 체결에서는 둘 다 불변식상 발생하지 않는다. 레거시 시장가
+    # 또는 거래소/API 대조 이상을 복구한 경우에만 마지막 방어선으로 사용한다.
     guard_breached = (
         (prev_close > 0 and _fill_gap_reaches_max(fill_price / prev_close - 1))
         or (limit_price > 0 and fill_price > limit_price)
-        or (
-            anchor_price > 0
-            and fill_price / anchor_price - 1 > F3_MAX_ENTRY_SLIPPAGE_RATIO
-        )
     )
     if guard_breached:
         state.get().day_skip = True
@@ -928,6 +951,8 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
     last_run_attempt = 0
     last_entry_fail_reason = "UNFILLED"
     submitted_order_price = 0.0
+    gap_cap = _strict_gap_cap(prev_close) if F3_LIMIT_BUY_ENABLED else 0.0
+    ask_cap = 0.0
     fill_was_partial = False
     for attempt in range(1, max_attempts + 1):
         if attempt > 1:
@@ -1111,8 +1136,6 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
             return
 
         entry_quote: EntryQuote | None = None
-        slippage_cap = 0.0
-        gap_cap = 0.0
         if F3_LIMIT_BUY_ENABLED:
             entry_quote = await _fetch_final_entry_quote(ticker)
             if entry_quote is None:
@@ -1136,10 +1159,6 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
                     quote_age_ms=quote_age_ms,
                 )
 
-            submitted_order_price, slippage_cap, gap_cap = _entry_limit_price(
-                expected_price,
-                prev_close,
-            )
             fresh_gap = (entry_quote.ask_price / prev_close) - 1
             if not _gap_in_order_range(fresh_gap):
                 return await _reject_final_entry_price(
@@ -1149,22 +1168,111 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
                     anchor_price=expected_price,
                     prev_close=prev_close,
                     ask_price=entry_quote.ask_price,
-                    limit_price=submitted_order_price,
+                    limit_price=gap_cap,
                     quote_age_ms=quote_age_ms,
                     fresh_gap=fresh_gap,
                 )
-            if entry_quote.ask_price > submitted_order_price:
-                return await _reject_final_entry_price(
-                    ticker,
-                    "PRICE_CAP_EXCEEDED",
-                    allow_candidate_retry=allow_candidate_retry,
+            submitted_order_price, ask_cap = _entry_limit_price(
+                entry_quote.ask_price,
+                gap_cap,
+            )
+            quote_move_pct = round(
+                (entry_quote.ask_price / expected_price - 1) * 100,
+                3,
+            )
+            if quote_move_pct > F3_QUOTE_MOVE_WARN_PCT:
+                log(
+                    "ENTRY_QUOTE_MOVE_HIGH",
+                    level="WARN",
+                    ticker=ticker,
                     anchor_price=expected_price,
-                    prev_close=prev_close,
                     ask_price=entry_quote.ask_price,
+                    quote_move_pct=quote_move_pct,
+                    warn_threshold_pct=F3_QUOTE_MOVE_WARN_PCT,
                     limit_price=submitted_order_price,
-                    quote_age_ms=quote_age_ms,
-                    fresh_gap=fresh_gap,
+                    ask_cap_price=ask_cap,
+                    gap_cap_price=gap_cap,
+                    entry_attempt=attempt,
                 )
+
+            # 시장가 기준 매수가능수량 조회와 별개로, 실제 제출 지정가 기준으로
+            # 배정금액 및 주문가능현금을 넘지 않도록 마지막 수량을 제한한다.
+            limit_budget = float(total_amount)
+            ord_psbl_cash = float(buyable.get("ord_psbl_cash") or 0)
+            if ord_psbl_cash > 0:
+                limit_budget = min(limit_budget, ord_psbl_cash)
+            limit_buyable_qty = int(limit_budget / submitted_order_price)
+            if limit_buyable_qty < first_qty:
+                planned_qty = first_qty
+                order_qty = max(0, limit_buyable_qty)
+                log(
+                    "ENTRY_QTY_SIZED_AT_LIMIT",
+                    level=_qty_clamp_log_level(planned_qty, order_qty),
+                    ticker=ticker,
+                    planned_qty=planned_qty,
+                    buyable_qty=buyable_qty,
+                    limit_buyable_qty=limit_buyable_qty,
+                    order_qty=order_qty,
+                    order_price=submitted_order_price,
+                    entry_attempt=attempt,
+                    max_attempts=max_attempts,
+                    ord_psbl_cash=ord_psbl_cash,
+                    allocated_amount=total_amount,
+                    reduction_pct=_qty_clamp_reduction_pct(planned_qty, order_qty),
+                    warn_threshold_pct=F3_QTY_CLAMP_WARN_PCT,
+                    reason="LIMIT_PRICE_BUDGET",
+                )
+                if order_qty <= 0:
+                    await state.reset_to_idle("ENTRY_FAIL")
+                    _log_entry_blocked(
+                        ticker,
+                        "QTY_ZERO",
+                        level=("INFO" if allow_candidate_retry else "WARN"),
+                        order_price=submitted_order_price,
+                        allocated_amount=total_amount,
+                        ord_psbl_cash=ord_psbl_cash,
+                        candidate_retry=allow_candidate_retry,
+                    )
+                    log(
+                        "INSUFFICIENT_BALANCE",
+                        level=("INFO" if allow_candidate_retry else "WARN"),
+                        ticker=ticker,
+                        cash=cash,
+                        alloc_ratio=ALLOC_RATIO,
+                        order_price=submitted_order_price,
+                        planned_qty=planned_qty,
+                        buyable_qty=buyable_qty,
+                        limit_buyable_qty=limit_buyable_qty,
+                        allocated_amount=total_amount,
+                        ord_psbl_cash=ord_psbl_cash,
+                        reason="QTY_ZERO_AT_LIMIT",
+                        candidate_retry=allow_candidate_retry,
+                    )
+                    if allow_candidate_retry:
+                        return "QTY_ZERO"
+                    state.get().day_skip = True
+                    state.get().close_reason = "INSUFFICIENT_BALANCE"
+                    await notifier.send(
+                        "ENTRY_FAIL",
+                        level="WARN",
+                        message=(
+                            f"지정가 {submitted_order_price:,.0f}원 기준 주문가능수량이 "
+                            f"0입니다. {ticker}"
+                        ),
+                        ticker=ticker,
+                    )
+                    await db.record_skip(
+                        _today(),
+                        "ENTRY_FAIL",
+                        (
+                            "reason=QTY_ZERO_AT_LIMIT,"
+                            f"limit={submitted_order_price},allocated={total_amount},"
+                            f"ord_psbl_cash={ord_psbl_cash}"
+                        ),
+                    )
+                    return
+                first_qty = order_qty
+                second_qty = 0
             log(
                 "ENTRY_PRICE_APPROVED",
                 level="INFO",
@@ -1173,8 +1281,10 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
                 ask_price=entry_quote.ask_price,
                 ask_qty=entry_quote.ask_qty,
                 limit_price=submitted_order_price,
-                slippage_cap_price=slippage_cap,
+                ask_cap_price=ask_cap,
                 gap_cap_price=gap_cap,
+                quote_move_pct=quote_move_pct,
+                quote_move_warn_pct=F3_QUOTE_MOVE_WARN_PCT,
                 quote_age_ms=quote_age_ms,
                 entry_attempt=attempt,
             )
@@ -1231,7 +1341,7 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
             trigger_price=expected_price,
             order_qty=first_qty,
             order_type="LIMIT" if F3_LIMIT_BUY_ENABLED else "MARKET",
-            slippage_cap_price=slippage_cap or None,
+            ask_cap_price=ask_cap or None,
             gap_cap_price=gap_cap or None,
             mode=mode,
             entry_attempt=attempt,
@@ -1480,7 +1590,8 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
                         message=f"진입: {ticker} {fill_qty}주 @ {fill_price:,}원",
                         ticker=ticker)
 
-    # ── 체결 후 이중 가드. 포지션/DB를 먼저 기록한 뒤 확인 가능한 청산 경로 사용 ──
+    # ── 레거시 시장가·불변식 위반 방어. 정상 지정가는 제출가 이하 체결이므로
+    # 갭 7%와 지정가 초과 조건에 도달하지 않는다.
     fill_gap = (fill_price / prev_close) - 1
     direct_slippage = (fill_price / expected_price) - 1
     limit_breached = (
@@ -1488,22 +1599,15 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
         and submitted_order_price > 0
         and fill_price > submitted_order_price
     )
-    direct_slippage_breached = (
-        F3_LIMIT_BUY_ENABLED
-        and direct_slippage > F3_MAX_ENTRY_SLIPPAGE_RATIO
-    )
     if (
         _fill_gap_reaches_max(fill_gap)
         or limit_breached
-        or direct_slippage_breached
     ):
         reasons = []
         if _fill_gap_reaches_max(fill_gap):
             reasons.append("FILL_GAP")
         if limit_breached:
             reasons.append("LIMIT_PRICE")
-        if direct_slippage_breached:
-            reasons.append("DIRECT_SLIPPAGE")
         log(
             "SLIPPAGE_GUARD",
             level="WARN",
@@ -1515,7 +1619,6 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
             fill_gap_pct=round(fill_gap * 100, 3),
             gap_max_pct=round(GAP_MAX_FILL * 100, 2),
             slippage_pct=round(direct_slippage * 100, 3),
-            slippage_max_pct=round(F3_MAX_ENTRY_SLIPPAGE_RATIO * 100, 3),
             guard_reasons=reasons,
         )
         state.get().day_skip = True
@@ -1575,26 +1678,38 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
                     reason="FINAL_QUOTE_UNAVAILABLE",
                 )
                 return
-            py_limit_price, py_slippage_cap, py_gap_cap = _entry_limit_price(
-                current_price,
-                prev_close,
+            py_gap_cap = gap_cap
+            py_limit_price, py_ask_cap = _entry_limit_price(
+                py_quote.ask_price,
+                py_gap_cap,
             )
             py_gap = (py_quote.ask_price / prev_close) - 1
-            if (
-                not _quote_is_fresh(py_quote)
-                or not _gap_in_order_range(py_gap)
-                or py_quote.ask_price > py_limit_price
-            ):
+            if not _quote_is_fresh(py_quote):
                 log(
                     "PYRAMID_SKIPPED",
                     level="INFO",
                     ticker=ticker,
-                    reason="PRICE_CAP_EXCEEDED",
+                    reason="FINAL_QUOTE_STALE",
                     anchor_price=current_price,
                     ask_price=py_quote.ask_price,
                     limit_price=py_limit_price,
-                    slippage_cap_price=py_slippage_cap,
+                    ask_cap_price=py_ask_cap,
                     gap_cap_price=py_gap_cap,
+                    quote_age_ms=_quote_age_ms(py_quote),
+                )
+                return
+            if not _gap_in_order_range(py_gap):
+                log(
+                    "PYRAMID_SKIPPED",
+                    level="INFO",
+                    ticker=ticker,
+                    reason="GAP_CHANGED",
+                    anchor_price=current_price,
+                    ask_price=py_quote.ask_price,
+                    limit_price=py_limit_price,
+                    ask_cap_price=py_ask_cap,
+                    gap_cap_price=py_gap_cap,
+                    gap_pct=round(py_gap * 100, 3),
                     quote_age_ms=_quote_age_ms(py_quote),
                 )
                 return

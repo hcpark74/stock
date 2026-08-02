@@ -29,6 +29,7 @@ from src.api.status_logic import (
 from src.api.status_logic import (
     pipeline_from_logs as _pipeline_from_logs,
 )
+from src.modules import paper_fast_probe
 from src.modules.f1_filter import (
     F1_DEADLINE_H,
     F1_DEADLINE_M,
@@ -180,15 +181,83 @@ def _read_f1_snapshot() -> tuple[Path | None, list[dict]]:
     return path, rows
 
 
+def _fast_candidates_from_logs(logs: list[dict]) -> list[dict]:
+    """Minimal last-resort recovery when the durable probe payload is unavailable."""
+    selected_event = next(
+        (entry for entry in reversed(logs) if entry.get("event") == "PAPER_FAST_PATH_SELECTED"),
+        None,
+    )
+    if not selected_event:
+        return []
+
+    tickers = [
+        str(ticker)
+        for ticker in selected_event.get("tickers", [])
+        if ticker
+    ]
+    if not tickers:
+        return []
+
+    locked_event = next(
+        (
+            entry for entry in reversed(logs)
+            if entry.get("event") == "TARGET_LOCKED"
+            and any(
+                str(ticker) in tickers
+                for ticker in (entry.get("target_tickers") or [entry.get("ticker")])
+                if ticker
+            )
+        ),
+        None,
+    )
+    names: dict[str, str] = {}
+    if locked_event:
+        locked_tickers = list(locked_event.get("target_tickers") or [])
+        locked_names = list(locked_event.get("target_names") or [])
+        for index, ticker in enumerate(locked_tickers):
+            if index < len(locked_names) and locked_names[index]:
+                names[str(ticker)] = str(locked_names[index])
+        if locked_event.get("ticker") and locked_event.get("name"):
+            names[str(locked_event["ticker"])] = str(locked_event["name"])
+
+    rows = []
+    for ticker in tickers:
+        candidate = {
+            "ticker": ticker,
+            "name": names.get(ticker),
+            "gap_source": "fast.selection_log",
+        }
+        recovered_gap = None
+        if locked_event and str(locked_event.get("ticker")) == ticker:
+            if locked_event.get("gap_pct") is not None:
+                recovered_gap = float(locked_event["gap_pct"]) / 100
+                candidate["gap_pct"] = recovered_gap
+            candidate["expected_price"] = locked_event.get("expected_price")
+            candidate["expected_amount"] = locked_event.get("expected_amount")
+        # 갭을 복구한 종목만 통과로 표시한다. 나머지는 선정된 것은 맞지만
+        # 근거 수치가 없으므로 통과로 단정하지 않는다(대시보드 오독 방지).
+        if recovered_gap is not None:
+            candidate["gap_allowed"] = True
+        else:
+            candidate["gap_reason"] = "GAP_UNVERIFIED"
+        rows.append(candidate)
+    return rows
+
+
 def _f1_status_from_logs(logs: list[dict]) -> tuple[str, dict | None]:
     status = "IDLE"
     last_event: dict | None = None
     for entry in logs:
         event = entry.get("event")
-        if not str(event).startswith("F1") and event != "NO_TARGET":
+        if (
+            not str(event).startswith("F1")
+            and event not in {"NO_TARGET", "PAPER_FAST_PATH_SELECTED"}
+        ):
             continue
         last_event = entry
-        if event == "F1_API_ERROR":
+        if event == "PAPER_FAST_PATH_SELECTED":
+            status = "DONE"
+        elif event == "F1_API_ERROR":
             status = "FAILED"
         elif event == "F1_SKIPPED":
             status = "FAILED"
@@ -718,6 +787,15 @@ async def api_f1() -> JSONResponse:
     logs = _read_today_logs(limit=500)
     status, last_event = _f1_status_from_logs(logs)
     snapshot_path, rows = _read_f1_snapshot()
+    selection_data_source = "F1_SNAPSHOT" if rows else None
+    if not rows:
+        snapshot_path, rows = paper_fast_probe.load_persisted_open_candidates()
+        if rows:
+            selection_data_source = "PAPER_FAST_PROBE"
+    if not rows:
+        rows = _fast_candidates_from_logs(logs)
+        if rows:
+            selection_data_source = "PAPER_FAST_LOG"
     summary = _summary_with_trade_anchor(_f1_summary_from_rows(rows), logs, state.get())
     if rows and status in {"IDLE", "NO_TARGET"}:
         status = "DONE" if summary["gap_pass"] else "NO_TARGET"
@@ -730,6 +808,7 @@ async def api_f1() -> JSONResponse:
             datetime.fromtimestamp(snapshot_path.stat().st_mtime, tz=KST).isoformat()
             if snapshot_path else None
         ),
+        "selection_data_source": selection_data_source,
         "selection_process": _selection_process_from_logs(summary, logs),
         **summary,
     })
@@ -1108,7 +1187,11 @@ def _improve_from_rows(
             "giveback_n": len(trailing_gb),
             "stop_eval_n": len(trailing_stop_slip),
             "avg_stop_slip_pp": round(max(0.0, stop_slip_avg), 2),
-            "max_stop_slip_pp": round(max(0.0, max(trailing_stop_slip)), 2) if trailing_stop_slip else 0.0,
+            "max_stop_slip_pp": (
+                round(max(0.0, max(trailing_stop_slip)), 2)
+                if trailing_stop_slip
+                else 0.0
+            ),
             "structural_giveback_min_pp": round(STEP_TRAIL * 100, 2),
             "structural_giveback_max_pp": round((STEP_SIZE + STEP_TRAIL) * 100, 2),
         },

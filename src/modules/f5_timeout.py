@@ -1,4 +1,10 @@
-"""F5. 타임아웃 청산 스케줄러 (11:00:00) — PRD §F5"""
+"""F5. 타임아웃 청산 스케줄러 — PRD §F5
+
+실행 시각은 src/schedule_times.py의 F5_EXEC_*가 단일 출처다.
+장마감 동시호가(15:20~15:30)에 걸리면 시장가 매도가 즉시 체결되지 않아
+아래 체결 폴링과 잔량 재주문이 전부 미체결로 끝나므로, 실행 시각은
+연속매매 구간 안에서 재시도까지 마칠 수 있도록 잡아야 한다.
+"""
 
 import asyncio
 import os
@@ -23,7 +29,7 @@ _PSBL_CNCL_TR = {"REAL": "TTTC0084R"}
 
 # precheck 결과. None=미조회/조회실패(상태 파일 수량 사용), 0=실제 미보유(주문 금지).
 # 프로세스는 여러 거래일을 넘겨 살아 있으므로 날짜를 함께 저장해, precheck가
-# 누락된 날 전일 값(특히 0)이 11시 청산을 건너뛰게 만드는 것을 막는다.
+# 누락된 날 전일 값(특히 0)이 마감 청산을 건너뛰게 만드는 것을 막는다.
 _prefetch_qty: int | None = None
 _prefetch_date: str | None = None
 
@@ -69,7 +75,7 @@ async def _fetch_current_price(ticker: str) -> float:
 
 
 async def precheck() -> None:
-    """10:59:50 — 잔고 조회로 실제 보유 수량 확인."""
+    """F5 사전 점검(F5_PRECHECK_*) — 잔고 조회로 실제 보유 수량 확인."""
     global _prefetch_qty, _prefetch_date
     s = state.get()
     if s.position_status != "HOLDING" or not s.target_ticker:
@@ -87,7 +93,7 @@ async def precheck() -> None:
 
 
 async def execute() -> None:
-    """11:00:00 — 미청산 잔여 전량 시장가 청산. Retry 최대 3회.
+    """청산 시각(F5_EXEC_*) — 미청산 잔여 전량 시장가 청산. Retry 최대 3회.
 
     중복 매도 방지 원칙:
     - 재시도 전에 직전 주문의 체결/미체결 상태를 먼저 조회하고, 미체결 잔량이
@@ -118,7 +124,7 @@ async def execute() -> None:
         await notifier.send(
             "TIMEOUT_NO_HOLDINGS", level="CRIT",
             message=(
-                f"11시 청산: {ticker} 실제 잔고가 0이라 매도 주문을 내지 않았습니다. "
+                f"마감 청산: {ticker} 실제 잔고가 0이라 매도 주문을 내지 않았습니다. "
                 "상태 파일과 계좌가 불일치합니다. 보유/체결 내역을 수동 확인하세요."
             ),
             ticker=ticker,
@@ -320,7 +326,7 @@ async def execute() -> None:
         await notifier.send(
             "TIMEOUT_CLOSE_UNVERIFIED", level="CRIT",
             message=(
-                f"11시 청산: {ticker} 잔고 0으로 매도는 완료된 것으로 보이나 "
+                f"마감 청산: {ticker} 잔고 0으로 매도는 완료된 것으로 보이나 "
                 "체결가를 확인하지 못했습니다. 주문/체결 내역을 수동 확인하세요."
             ),
             ticker=ticker,
@@ -336,7 +342,7 @@ async def execute() -> None:
     log("TIMEOUT_ORDER_FAILED", level="CRIT", ticker=ticker,
         attempt_count=_RETRY, last_error_code="", last_error_msg="Max retries exceeded")
     await notifier.send("TIMEOUT_ORDER_FAILED", level="CRIT",
-                        message=f"11시 청산 실패! 수동 청산 필요. {ticker} {remaining}주",
+                        message=f"마감 청산 실패! 수동 청산 필요. {ticker} {remaining}주",
                         ticker=ticker)
 
 
@@ -373,14 +379,14 @@ async def _finalize_close(
             log("TIMEOUT_CLOSE_DB_FAILED", level="CRIT", ticker=ticker, error=repr(e))
             await notifier.send(
                 "TIMEOUT_CLOSE_DB_FAILED", level="CRIT",
-                message=f"11시 청산 완료 후 DB 기록 실패: {ticker}. 거래 이력을 수동 확인하세요.",
+                message=f"마감 청산 완료 후 DB 기록 실패: {ticker}. 거래 이력을 수동 확인하세요.",
                 ticker=ticker,
             )
     log("TIMEOUT_CLOSE", level="INFO", ticker=ticker,
         entry_price=entry, exit_price=exit_price, exit_qty=exit_qty,
         pnl_pct=pnl_pct, fill_latency_ms=fill_latency_ms)
     await notifier.send("TIMEOUT_CLOSE", level="INFO",
-                        message=f"11시 청산: {ticker} {exit_qty}주 @ {exit_price:,.0f}원",
+                        message=f"마감 청산: {ticker} {exit_qty}주 @ {exit_price:,.0f}원",
                         ticker=ticker)
     await state.persist(os.getenv("STATE_DIR", "data/state"),
                         datetime.now(KST).strftime("%Y%m%d"))
@@ -525,6 +531,10 @@ async def _poll_fill(order_id: str, timeout_sec: int = 30, expect_qty: int = 0) 
     expect_qty가 주어지면 누적 체결 수량이 전량에 도달할 때까지 대기하고,
     타임아웃 시 마지막으로 확인된 부분체결을 반환한다 — 부분체결을 전량으로
     오인해 조기 반환하지 않는다.
+
+    단 rmn_qty == 0은 주문이 이미 종료(전량체결 또는 부분체결 후 취소·소멸)
+    됐다는 뜻이므로 즉시 반환한다. 더 채워질 여지가 없는데 창을 다 소진하면
+    잔량 재주문(최대 3회)에 쓸 시간만 줄어든다.
     """
     mode = os.getenv("KIS_MODE", "PAPER")
     today = datetime.now(KST).strftime("%Y%m%d")
@@ -540,6 +550,7 @@ async def _poll_fill(order_id: str, timeout_sec: int = 30, expect_qty: int = 0) 
                 if item.get("odno") == order_id:
                     tot_qty = int(item.get("tot_ccld_qty") or 0)
                     tot_amt = float(item.get("tot_ccld_amt") or 0)
+                    rmn_qty = item.get("rmn_qty")
                     if tot_qty > 0:
                         last_partial = {
                             "fill_price": round(tot_amt / tot_qty),
@@ -547,6 +558,9 @@ async def _poll_fill(order_id: str, timeout_sec: int = 30, expect_qty: int = 0) 
                             "fill_amt": tot_amt,
                         }
                         if expect_qty <= 0 or tot_qty >= expect_qty:
+                            return last_partial
+                        # 잔량 0 = 주문 종료. 더 기다려도 채워지지 않는다.
+                        if rmn_qty is not None and int(rmn_qty or 0) == 0:
                             return last_partial
         except Exception:
             pass

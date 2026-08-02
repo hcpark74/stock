@@ -375,6 +375,7 @@ async def job_f1() -> None:
     if paper_fast_probe.hybrid_enabled() and fast_candidates:
         _f1_result = fast_candidates
         selection_source = "FAST_MULTI"
+        f1_filter.save_candidate_snapshot(fast_candidates)
         logger.log(
             "PAPER_FAST_PATH_SELECTED",
             level="INFO",
