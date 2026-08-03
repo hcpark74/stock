@@ -110,7 +110,9 @@ F3_LIMIT_FILL_TIMEOUT_SEC = max(
     float(os.getenv("F3_LIMIT_FILL_TIMEOUT_SEC", "2.0")),
 )
 F3_RECHECK_MAX_ATTEMPTS = max(1, int(os.getenv("F3_RECHECK_MAX_ATTEMPTS", "3")))
-F3_RECHECK_RETRY_DELAY_SEC = float(os.getenv("F3_RECHECK_RETRY_DELAY_SEC", "1.0"))
+F3_RECHECK_RETRY_DELAY_SEC = max(0.0, _env_float("F3_RECHECK_RETRY_DELAY_SEC", 0.5))
+# Hard wall-clock cap on the whole opening-transition recheck (all gets + sleeps).
+F3_RECHECK_TOTAL_BUDGET_SEC = max(0.0, _env_float("F3_RECHECK_TOTAL_BUDGET_SEC", 5.0))
 F3_RECHECK_BATCH_TIMEOUT_SEC = float(os.getenv("F3_RECHECK_BATCH_TIMEOUT_SEC", "0"))
 BALANCE_QUERY_MAX_ATTEMPTS = max(1, int(os.getenv("BALANCE_QUERY_MAX_ATTEMPTS", "3")))
 BALANCE_QUERY_RETRY_DELAY_SEC = float(os.getenv("BALANCE_QUERY_RETRY_DELAY_SEC", "1.0"))
@@ -369,11 +371,68 @@ async def _vi_active_or_none(ticker: str, entry_attempt: int) -> dict | None:
         return None
 
 
+def _picked_is_funded(picked: dict | None, ticker: str) -> bool:
+    """A picked object carries pre-fetched funding only when every funding key is
+    present. The multi-candidate ranking path supplies them; the single
+    fresh-FAST branch supplies only quote identity/data, so it must fall through
+    to the legacy deadline-before-balance funding path inside _run_single."""
+    return bool(
+        picked
+        and picked.get("ticker") == ticker
+        and picked.get("cash") is not None
+        and picked.get("total_amount") is not None
+        and picked.get("total_qty") is not None
+    )
+
+
 async def run(force: bool = False) -> None:
     s = state.get()
     candidates = _entry_candidate_tickers(s)
-    if s.day_skip or len(candidates) <= 1 or os.getenv("DRY_RUN", "0") == "1":
+    if s.day_skip or not candidates or os.getenv("DRY_RUN", "0") == "1":
         await _run_single(force=force)
+        return
+
+    if len(candidates) == 1:
+        # Reuse only a fresh PAPER FAST_MULTI snapshot for the single candidate so
+        # a locked ticker is not re-blocked by a stale opening-transition single
+        # quote. Do NOT route through _rank_final_entry_candidates: its eager
+        # parallel balance query changes legacy failure precedence. When no fresh
+        # valid FAST row exists, fall back to the exact legacy _run_single path,
+        # preserving balance / insufficient-balance / close_reason / notifier /
+        # record_skip semantics untouched.
+        ticker = candidates[0]
+        candidate_by_ticker = {
+            c.get("ticker"): c
+            for c in (s.target_candidates or [])
+            if isinstance(c, dict) and c.get("ticker")
+        }
+        fast_rows = _fast_recheck_rows(candidates, candidate_by_ticker)
+        picked = None
+        if fast_rows:
+            row = fast_rows[0]
+            candidate = (
+                row["candidate"]
+                if isinstance(row["candidate"], dict)
+                else {"ticker": ticker}
+            )
+            # Quote identity/data only — no cash query or qty computation here.
+            # _run_single reuses this to skip _fetch_expected_price, then runs the
+            # exact legacy existing-trade → gap → VI → deadline → balance path.
+            picked = {
+                "ticker": ticker,
+                "candidate": candidate,
+                "candidate_rank": row["rank"],
+                "expected_price": float(row["expected_price"]),
+                "prev_close": float(row["prev_close"]),
+            }
+        if picked is not None:
+            s = state.get()
+            s.target_ticker = picked["ticker"]
+            s.target_name = picked["candidate"].get("name")
+            s.target_candidates = [picked["candidate"]]
+            await _run_single(force=force, picked=picked, allow_candidate_retry=False)
+        else:
+            await _run_single(force=force)
         return
 
     original_ticker = s.target_ticker
@@ -882,7 +941,7 @@ async def _run_single(
         return
 
     # ── 잔고 조회 및 수량 산정 ────────────────────────────────────────
-    if picked and picked.get("ticker") == ticker:
+    if _picked_is_funded(picked, ticker):
         cash = float(picked["cash"])
         total_amount = int(picked["total_amount"])
         total_qty = int(picked["total_qty"])
@@ -2702,22 +2761,74 @@ async def _fetch_expected_price(
     ticker: str,
     fallback_prev_close: float = 0.0,
 ) -> tuple[float, float]:
-    """Return expected price and previous close. Before open, prefer antc_cnpr."""
-    last_expected = 0.0
-    last_prev_close = 0.0
+    """Return expected price and previous close. Before open, prefer antc_cnpr.
+
+    An opening-transition stale quote (antc<=0, stck_oprc<=0, current==prev close)
+    is retried within a hard wall-clock budget that bounds every ``kis_rest.get``
+    call and sleep. On exhaustion returns ``(0.0, prev_close)`` so callers emit
+    GAP_RECHECK_UNAVAILABLE rather than a false 0% GAP_CHANGED. External
+    ``CancelledError`` is never swallowed.
+    """
+    last_prev_close = fallback_prev_close
+    budget_deadline = (
+        time.monotonic() + F3_RECHECK_TOTAL_BUDGET_SEC
+        if F3_RECHECK_TOTAL_BUDGET_SEC > 0
+        else None
+    )
     for attempt in range(1, F3_RECHECK_MAX_ATTEMPTS + 1):
-        resp = await kis_rest.get(
+        remaining = None
+        if budget_deadline is not None:
+            remaining = budget_deadline - time.monotonic()
+            if remaining <= 0:
+                log(
+                    "F3_RECHECK_QUOTE_BUDGET_EXHAUSTED",
+                    level="WARN",
+                    ticker=ticker,
+                    attempt=attempt,
+                    max_attempts=F3_RECHECK_MAX_ATTEMPTS,
+                    budget_sec=F3_RECHECK_TOTAL_BUDGET_SEC,
+                )
+                break
+        get_coro = kis_rest.get(
             "/uapi/domestic-stock/v1/quotations/inquire-price",
             tr_id="FHKST01010100",
             params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker},
         )
+        try:
+            if remaining is not None:
+                resp = await asyncio.wait_for(get_coro, timeout=remaining)
+            else:
+                resp = await get_coro
+        except asyncio.TimeoutError:
+            # Budget elapsed mid-call — treat as unavailable, do not retry.
+            log(
+                "F3_RECHECK_QUOTE_TIMEOUT",
+                level="WARN",
+                ticker=ticker,
+                attempt=attempt,
+                max_attempts=F3_RECHECK_MAX_ATTEMPTS,
+                budget_sec=F3_RECHECK_TOTAL_BUDGET_SEC,
+            )
+            break
         out = resp.get("output", {}) if isinstance(resp.get("output"), dict) else {}
         antc_price = float(out.get("antc_cnpr") or 0)
         current_price = float(out.get("stck_prpr") or 0)
-        expected = antc_price or current_price
+        open_price = float(out.get("stck_oprc") or 0)
         prev_close = float(out.get("stck_prdy_clpr") or 0)
         effective_prev_close = prev_close if prev_close > 0 else fallback_prev_close
-        last_expected, last_prev_close = expected, effective_prev_close
+        last_prev_close = effective_prev_close
+
+        if antc_price > 0:
+            expected, source, is_stale = antc_price, "antc_cnpr", False
+        elif current_price <= 0 or effective_prev_close <= 0:
+            expected, source, is_stale = current_price, "stck_prpr", True
+        elif open_price > 0 or current_price != effective_prev_close:
+            # Market-open evidence, or price already moved off prev close → valid.
+            expected, source, is_stale = current_price, "stck_prpr", False
+        else:
+            # antc<=0 and open<=0 and current==prev: opening-transition stale.
+            expected, source, is_stale = current_price, "stck_prpr", True
+
         log(
             "F3_RECHECK_QUOTE_FIELDS",
             level="DEBUG",
@@ -2725,13 +2836,15 @@ async def _fetch_expected_price(
             attempt=attempt,
             antc_cnpr=antc_price,
             stck_prpr=current_price,
+            stck_oprc=open_price,
             selected_price=expected,
-            selected_source="antc_cnpr" if antc_price > 0 else "stck_prpr",
+            selected_source=source,
             prev_close=effective_prev_close,
+            is_stale=is_stale,
             rt_cd=resp.get("rt_cd"),
             msg_cd=resp.get("msg_cd"),
         )
-        if expected and effective_prev_close > 0:
+        if not is_stale and expected and effective_prev_close > 0:
             if attempt > 1:
                 log(
                     "F3_RECHECK_QUOTE_RECOVERED",
@@ -2743,22 +2856,32 @@ async def _fetch_expected_price(
                     prev_close=effective_prev_close,
                 )
             return expected, effective_prev_close
-        if attempt < F3_RECHECK_MAX_ATTEMPTS:
-            log(
-                "F3_RECHECK_QUOTE_RETRY",
-                level="WARN",
-                ticker=ticker,
-                attempt=attempt,
-                max_attempts=F3_RECHECK_MAX_ATTEMPTS,
-                retry_after_sec=F3_RECHECK_RETRY_DELAY_SEC,
-                expected_price=expected,
-                prev_close=effective_prev_close,
-                rt_cd=resp.get("rt_cd"),
-                msg_cd=resp.get("msg_cd"),
-                msg1=resp.get("msg1"),
-            )
-            await asyncio.sleep(F3_RECHECK_RETRY_DELAY_SEC)
-    return last_expected, last_prev_close
+        if attempt >= F3_RECHECK_MAX_ATTEMPTS:
+            break
+        sleep_for = F3_RECHECK_RETRY_DELAY_SEC
+        if budget_deadline is not None:
+            remaining = budget_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            sleep_for = min(F3_RECHECK_RETRY_DELAY_SEC, remaining)
+        log(
+            "F3_RECHECK_QUOTE_RETRY",
+            level="WARN",
+            ticker=ticker,
+            attempt=attempt,
+            max_attempts=F3_RECHECK_MAX_ATTEMPTS,
+            retry_after_sec=sleep_for,
+            reason="OPENING_TRANSITION_STALE",
+            expected_price=expected,
+            prev_close=effective_prev_close,
+            rt_cd=resp.get("rt_cd"),
+            msg_cd=resp.get("msg_cd"),
+            msg1=resp.get("msg1"),
+        )
+        if sleep_for > 0:
+            await asyncio.sleep(sleep_for)
+    # Stale / missing / timed-out after exhaustion → unavailable (not a real gap).
+    return 0.0, last_prev_close
 
 async def _fetch_current_price(ticker: str) -> float:
     """현재 체결가 반환."""

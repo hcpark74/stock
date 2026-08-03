@@ -3736,3 +3736,356 @@ def test_fast_recheck_rows_rejects_stale_snapshot(monkeypatch):
     monkeypatch.setattr(f3.paper_fast_probe, "get_open_candidates", lambda: fast)
 
     assert f3._fast_recheck_rows(["005930"], {"005930": fast[0]}) is None
+
+
+# ── Single-candidate fresh FAST_MULTI reuse (Option B; no final ranking) ──
+
+
+def _open_boundary_price_resp(**out):
+    """inquire-price response with all opening fields defaulting to 0."""
+    base = {
+        "antc_cnpr": "0",
+        "stck_prpr": "0",
+        "stck_prdy_clpr": "0",
+        "stck_oprc": "0",
+    }
+    base.update({key: str(value) for key, value in out.items()})
+    return {"rt_cd": "0", "output": base}
+
+
+def _wire_successful_entry(monkeypatch, send_buy):
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    # first_qty = int(int(1_000_000*ALLOC_RATIO) / 3985) = 238. Fill exactly the
+    # requested qty so the loop breaks into HOLDING (not the unmocked cancel path).
+    monkeypatch.setattr(
+        f3, "_poll_fill", AsyncMock(return_value={"fill_price": 3985, "fill_qty": 238})
+    )
+    monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=3985))
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "record_order", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "update_order_fill", AsyncMock())
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+
+
+@pytest.mark.asyncio
+async def test_run_single_candidate_reuses_fresh_fast_snapshot(monkeypatch):
+    _reset_state()
+    fast = {
+        "ticker": "413630",
+        "name": "FastCo",
+        "expected_price": 3985.0,
+        "prev_close": 3865.0,
+        "expected_amount": 3_000_000.0,
+        "fast_observed_monotonic": 100.0,
+    }
+    state.get().target_ticker = fast["ticker"]
+    state.get().target_candidates = [fast]
+
+    monkeypatch.setattr(f3.paper_fast_probe, "hybrid_enabled", lambda: True)
+    monkeypatch.setattr(f3.paper_fast_probe, "get_open_candidates", lambda: [fast])
+    monkeypatch.setattr(f3.time, "monotonic", lambda: 101.0)
+    monkeypatch.setattr(f3, "F3_FAST_RECHECK_MAX_AGE_SEC", 15.0)
+    monkeypatch.setattr(f3, "_available_cash_for_entry", AsyncMock(return_value=1_000_000.0))
+    # If routing still short-circuited to _run_single(picked=None), this stale
+    # single quote would be used and (gap 0%) block the candidate as GAP_CHANGED.
+    single_quote = AsyncMock(return_value=(3865.0, 3865.0))
+    monkeypatch.setattr(f3, "_fetch_expected_price", single_quote)
+    send_buy = AsyncMock(return_value={
+        "rt_cd": "0", "msg_cd": "MCA00000", "msg1": "OK",
+        "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
+    })
+    _wire_successful_entry(monkeypatch, send_buy)
+    monkeypatch.setattr(f3, "log", lambda *a, **k: None)
+
+    await f3.run(force=True)
+
+    single_quote.assert_not_awaited()
+    send_buy.assert_awaited()
+    assert send_buy.await_args.args[0] == "413630"
+    assert state.get().position_status == "HOLDING"
+    assert state.get().day_skip is False
+
+
+@pytest.mark.asyncio
+async def test_run_single_candidate_gap_changed_sets_day_skip(monkeypatch):
+    _reset_state()
+    state.get().target_ticker = "413630"
+    state.get().target_candidates = [{"ticker": "413630", "name": "FastCo"}]
+
+    monkeypatch.setattr(f3.paper_fast_probe, "hybrid_enabled", lambda: False)
+    monkeypatch.setattr(f3, "_available_cash_for_entry", AsyncMock(return_value=1_000_000.0))
+    # 0% gap -> below GAP_MIN_RECHECK -> GAP_CHANGED, terminal day-skip.
+    monkeypatch.setattr(
+        f3, "_fetch_expected_price", AsyncMock(return_value=(3865.0, 3865.0))
+    )
+    send_buy = AsyncMock()
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda *a, **k: None)
+
+    await f3.run(force=True)
+
+    send_buy.assert_not_awaited()
+    assert state.get().day_skip is True
+    assert state.get().close_reason == "GAP_CHANGED"
+
+
+@pytest.mark.asyncio
+async def test_run_single_candidate_stale_fast_falls_back_to_single_quote(monkeypatch):
+    _reset_state()
+    fast = {
+        "ticker": "413630",
+        "name": "FastCo",
+        "expected_price": 3985.0,
+        "prev_close": 3865.0,
+        "expected_amount": 3_000_000.0,
+        "fast_observed_monotonic": 100.0,
+    }
+    state.get().target_ticker = fast["ticker"]
+    state.get().target_candidates = [fast]
+
+    monkeypatch.setattr(f3.paper_fast_probe, "hybrid_enabled", lambda: True)
+    monkeypatch.setattr(f3.paper_fast_probe, "get_open_candidates", lambda: [fast])
+    # Snapshot observed at 100.0 but now 200.0 -> aged out (>15s) -> SINGLE_QUOTE.
+    monkeypatch.setattr(f3.time, "monotonic", lambda: 200.0)
+    monkeypatch.setattr(f3, "F3_FAST_RECHECK_MAX_AGE_SEC", 15.0)
+    monkeypatch.setattr(f3, "_available_cash_for_entry", AsyncMock(return_value=1_000_000.0))
+    single_quote = AsyncMock(return_value=(3985.0, 3865.0))
+    monkeypatch.setattr(f3, "_fetch_expected_price", single_quote)
+    send_buy = AsyncMock(return_value={
+        "rt_cd": "0", "msg_cd": "MCA00000", "msg1": "OK",
+        "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
+    })
+    _wire_successful_entry(monkeypatch, send_buy)
+    monkeypatch.setattr(f3, "log", lambda *a, **k: None)
+
+    await f3.run(force=True)
+
+    single_quote.assert_awaited()
+    send_buy.assert_awaited()
+    assert send_buy.await_args.args[0] == "413630"
+    assert state.get().position_status == "HOLDING"
+    assert state.get().day_skip is False
+
+
+@pytest.mark.asyncio
+async def test_run_single_candidate_fresh_fast_skips_balance_on_existing_trade(monkeypatch):
+    """Fresh FAST reuse must not query balance before the existing-trade check."""
+    _reset_state()
+    fast = {
+        "ticker": "413630",
+        "name": "FastCo",
+        "expected_price": 3985.0,
+        "prev_close": 3865.0,
+        "expected_amount": 3_000_000.0,
+        "fast_observed_monotonic": 100.0,
+    }
+    state.get().target_ticker = fast["ticker"]
+    state.get().target_candidates = [fast]
+
+    monkeypatch.setattr(f3.paper_fast_probe, "hybrid_enabled", lambda: True)
+    monkeypatch.setattr(f3.paper_fast_probe, "get_open_candidates", lambda: [fast])
+    monkeypatch.setattr(f3.time, "monotonic", lambda: 101.0)
+    monkeypatch.setattr(f3, "F3_FAST_RECHECK_MAX_AGE_SEC", 15.0)
+    cash_spy = AsyncMock(return_value=1_000_000.0)
+    monkeypatch.setattr(f3, "_available_cash_for_entry", cash_spy)
+    fetch_spy = AsyncMock(return_value=(3985.0, 3865.0))
+    monkeypatch.setattr(f3, "_fetch_expected_price", fetch_spy)
+    monkeypatch.setattr(
+        f3,
+        "_existing_trade_for_today",
+        AsyncMock(return_value={
+            "status": "OPEN", "id": 7, "ticker": "413630",
+            "entry_price": 3900.0, "entry_qty": 10, "name": "FastCo",
+        }),
+    )
+    send_buy = AsyncMock()
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda *a, **k: None)
+
+    await f3.run(force=True)
+
+    cash_spy.assert_not_awaited()
+    fetch_spy.assert_not_awaited()
+    send_buy.assert_not_awaited()
+    assert state.get().position_status == "HOLDING"
+
+
+@pytest.mark.asyncio
+async def test_run_single_candidate_fresh_fast_gap_rejected_skips_balance(monkeypatch):
+    """A rejected FAST gap must block before any balance query."""
+    _reset_state()
+    # Fresh snapshot but 0% gap (below GAP_MIN_RECHECK) -> GAP_CHANGED.
+    fast = {
+        "ticker": "413630",
+        "name": "FastCo",
+        "expected_price": 3865.0,
+        "prev_close": 3865.0,
+        "expected_amount": 3_000_000.0,
+        "fast_observed_monotonic": 100.0,
+    }
+    state.get().target_ticker = fast["ticker"]
+    state.get().target_candidates = [fast]
+
+    monkeypatch.setattr(f3.paper_fast_probe, "hybrid_enabled", lambda: True)
+    monkeypatch.setattr(f3.paper_fast_probe, "get_open_candidates", lambda: [fast])
+    monkeypatch.setattr(f3.time, "monotonic", lambda: 101.0)
+    monkeypatch.setattr(f3, "F3_FAST_RECHECK_MAX_AGE_SEC", 15.0)
+    cash_spy = AsyncMock(return_value=1_000_000.0)
+    monkeypatch.setattr(f3, "_available_cash_for_entry", cash_spy)
+    monkeypatch.setattr(f3, "_existing_trade_for_today", AsyncMock(return_value=None))
+    send_buy = AsyncMock()
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda *a, **k: None)
+
+    await f3.run(force=True)
+
+    cash_spy.assert_not_awaited()
+    send_buy.assert_not_awaited()
+    assert state.get().day_skip is True
+    assert state.get().close_reason == "GAP_CHANGED"
+
+
+# ── Opening-transition stale classification + hard recheck budget ──
+
+
+@pytest.mark.asyncio
+async def test_fetch_expected_price_retries_opening_transition_then_recovers(monkeypatch):
+    monkeypatch.setattr(f3, "F3_RECHECK_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(f3, "F3_RECHECK_RETRY_DELAY_SEC", 0.0)
+    monkeypatch.setattr(f3, "F3_RECHECK_TOTAL_BUDGET_SEC", 5.0)
+    monkeypatch.setattr(f3.asyncio, "sleep", AsyncMock())
+    get = AsyncMock(side_effect=[
+        _open_boundary_price_resp(stck_prpr=3865, stck_prdy_clpr=3865, stck_oprc=0),
+        _open_boundary_price_resp(
+            antc_cnpr=3985, stck_prpr=3985, stck_prdy_clpr=3865, stck_oprc=3900
+        ),
+    ])
+    monkeypatch.setattr(f3.kis_rest, "get", get)
+    monkeypatch.setattr(f3, "log", lambda *a, **k: None)
+
+    result = await f3._fetch_expected_price("413630", fallback_prev_close=3865.0)
+
+    assert result == (3985.0, 3865.0)
+    assert get.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_expected_price_stale_exhaustion_returns_unavailable(monkeypatch):
+    monkeypatch.setattr(f3, "F3_RECHECK_MAX_ATTEMPTS", 3)
+    # Positive delay so the retry sleep fires; sleep is mocked, so no real wait.
+    monkeypatch.setattr(f3, "F3_RECHECK_RETRY_DELAY_SEC", 0.01)
+    monkeypatch.setattr(f3, "F3_RECHECK_TOTAL_BUDGET_SEC", 5.0)
+    sleep = AsyncMock()
+    monkeypatch.setattr(f3.asyncio, "sleep", sleep)
+    get = AsyncMock(return_value=_open_boundary_price_resp(
+        stck_prpr=3865, stck_prdy_clpr=3865, stck_oprc=0
+    ))
+    monkeypatch.setattr(f3.kis_rest, "get", get)
+    monkeypatch.setattr(f3, "log", lambda *a, **k: None)
+
+    expected, prev_close = await f3._fetch_expected_price("413630", fallback_prev_close=3865.0)
+
+    assert expected == 0.0
+    assert prev_close == 3865.0
+    assert get.await_count == 3
+    assert sleep.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_expected_price_hard_budget_stops_before_max_attempts(monkeypatch):
+    monkeypatch.setattr(f3, "F3_RECHECK_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(f3, "F3_RECHECK_RETRY_DELAY_SEC", 0.5)
+    monkeypatch.setattr(f3, "F3_RECHECK_TOTAL_BUDGET_SEC", 5.0)
+    monkeypatch.setattr(f3.asyncio, "sleep", AsyncMock())
+    # Deterministic wall clock: budget deadline is set at 1000+5=1005; the clock
+    # jumps past it before the 2nd attempt, so the loop must stop early.
+    ticks = iter([1000.0, 1000.0, 1001.0, 1006.0, 1006.0, 1006.0, 1006.0])
+    last = [1006.0]
+
+    def fake_monotonic():
+        try:
+            last[0] = next(ticks)
+        except StopIteration:
+            pass
+        return last[0]
+
+    monkeypatch.setattr(f3.time, "monotonic", fake_monotonic)
+    get = AsyncMock(return_value=_open_boundary_price_resp(
+        stck_prpr=3865, stck_prdy_clpr=3865, stck_oprc=0
+    ))
+    monkeypatch.setattr(f3.kis_rest, "get", get)
+    monkeypatch.setattr(f3, "log", lambda *a, **k: None)
+
+    expected, prev_close = await f3._fetch_expected_price("413630", fallback_prev_close=3865.0)
+
+    assert expected == 0.0
+    assert prev_close == 3865.0
+    assert get.await_count < 3
+
+
+@pytest.mark.asyncio
+async def test_fetch_expected_price_get_timeout_returns_unavailable(monkeypatch):
+    monkeypatch.setattr(f3, "F3_RECHECK_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(f3, "F3_RECHECK_TOTAL_BUDGET_SEC", 5.0)
+    monkeypatch.setattr(f3.asyncio, "sleep", AsyncMock())
+
+    async def fake_wait_for(coro, timeout):
+        coro.close()
+        raise f3.asyncio.TimeoutError()
+
+    monkeypatch.setattr(f3.asyncio, "wait_for", fake_wait_for)
+    get = AsyncMock(return_value=_open_boundary_price_resp(
+        stck_prpr=3865, stck_prdy_clpr=3865, stck_oprc=0
+    ))
+    monkeypatch.setattr(f3.kis_rest, "get", get)
+    monkeypatch.setattr(f3, "log", lambda *a, **k: None)
+
+    expected, prev_close = await f3._fetch_expected_price("413630", fallback_prev_close=3865.0)
+
+    assert expected == 0.0
+    assert prev_close == 3865.0
+
+
+@pytest.mark.asyncio
+async def test_fetch_expected_price_propagates_cancelled_error(monkeypatch):
+    monkeypatch.setattr(f3, "F3_RECHECK_TOTAL_BUDGET_SEC", 5.0)
+
+    async def fake_wait_for(coro, timeout):
+        coro.close()
+        raise f3.asyncio.CancelledError()
+
+    monkeypatch.setattr(f3.asyncio, "wait_for", fake_wait_for)
+    get = AsyncMock(return_value=_open_boundary_price_resp(
+        stck_prpr=3865, stck_prdy_clpr=3865, stck_oprc=0
+    ))
+    monkeypatch.setattr(f3.kis_rest, "get", get)
+    monkeypatch.setattr(f3, "log", lambda *a, **k: None)
+
+    with pytest.raises(f3.asyncio.CancelledError):
+        await f3._fetch_expected_price("413630", fallback_prev_close=3865.0)
+
+
+@pytest.mark.asyncio
+async def test_fetch_expected_price_accepts_legit_post_open_zero_gap(monkeypatch):
+    monkeypatch.setattr(f3, "F3_RECHECK_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(f3, "F3_RECHECK_TOTAL_BUDGET_SEC", 5.0)
+    monkeypatch.setattr(f3.asyncio, "sleep", AsyncMock())
+    # stck_oprc>0 with current==prev is real market data (0% gap): accept, no retry.
+    get = AsyncMock(return_value=_open_boundary_price_resp(
+        stck_prpr=3865, stck_prdy_clpr=3865, stck_oprc=3870
+    ))
+    monkeypatch.setattr(f3.kis_rest, "get", get)
+    monkeypatch.setattr(f3, "log", lambda *a, **k: None)
+
+    result = await f3._fetch_expected_price("413630", fallback_prev_close=3865.0)
+
+    assert result == (3865.0, 3865.0)
+    assert get.await_count == 1
