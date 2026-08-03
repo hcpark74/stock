@@ -24,6 +24,7 @@ def _clear_state() -> None:
     s.daily_pnl_pct = 0.0
     s.day_skip = False
     s.pending_entry = None
+    s.post_close_tracking_stopped = False
 
 
 @pytest.fixture(autouse=True)
@@ -157,6 +158,32 @@ async def test_set_closed_keeps_tick_history_for_review():
     assert len(live.tick_history()) == 1
 
     live.clear_tick_history()
+
+
+async def test_post_close_tracking_stop_is_closed_only_and_persists(tmp_path):
+    s = state.get()
+    assert await state.stop_post_close_tracking() is False
+
+    s.trading_date = "20260803"
+    s.position_status = "CLOSED"
+    assert await state.stop_post_close_tracking() is True
+    assert s.post_close_tracking_stopped is True
+
+    await state.persist(str(tmp_path), "20260803")
+    _clear_state()
+    state.restore_from(state.load(str(tmp_path)))
+
+    assert state.get().post_close_tracking_stopped is True
+
+
+async def test_new_holding_rearms_post_close_tracking():
+    s = state.get()
+    s.position_status = "ENTERING"
+    s.post_close_tracking_stopped = True
+
+    await state.set_holding(75_000.0, 10, "ORD001")
+
+    assert s.post_close_tracking_stopped is False
 
 
 async def test_exiting_blocks_daily_reset_until_reconciled():

@@ -86,6 +86,7 @@ _last_state_persist_at = 0.0
 _close_in_progress = False
 _close_in_progress_warned = False
 _closing_task: asyncio.Task | None = None
+_active_monitor_tasks: set[asyncio.Task] = set()
 
 _REARM_INTERVAL_SEC = 0.5
 _REARM_HOLDING_INTERVAL_SEC = 5.0
@@ -118,6 +119,8 @@ def _price_observation_active(now: datetime | None = None) -> bool:
         return True
     if s.position_status != "CLOSED" or not s.target_ticker or not s.entry_at:
         return False
+    if s.post_close_tracking_stopped:
+        return False
 
     now = now or datetime.now(KST)
     try:
@@ -141,6 +144,63 @@ def _price_observation_active(now: datetime | None = None) -> bool:
         hour=observe_until[0], minute=observe_until[1], second=0, microsecond=0
     )
     return entry_at.astimezone(KST).date() == now.date() and now < cutoff
+
+
+def post_close_observation_active(now: datetime | None = None) -> bool:
+    """UI/API용: 현재 CLOSED 거래의 사후 가격 관측이 진행 중인지 반환한다."""
+    return state.get().position_status == "CLOSED" and _price_observation_active(now)
+
+
+async def stop_post_close_observation() -> dict:
+    """매도 완료 후 가격 관측만 종료하고 그 선택을 상태 파일에 보존한다."""
+    s = state.get()
+    if s.position_status != "CLOSED":
+        return {"ok": False, "reason": "POSITION_NOT_CLOSED"}
+
+    closing = _closing_task
+    if closing is not None and not closing.done():
+        await asyncio.shield(closing)
+
+    already_stopped = s.post_close_tracking_stopped
+    if not await state.stop_post_close_tracking():
+        return {"ok": False, "reason": "POSITION_NOT_CLOSED"}
+
+    cancelled = 0
+    for task in tuple(_active_monitor_tasks):
+        if task is closing or task.done():
+            continue
+        task.cancel()
+        cancelled += 1
+
+    persisted = True
+    try:
+        await state.persist(
+            os.getenv("STATE_DIR", "data/state"),
+            datetime.now(KST).strftime("%Y%m%d"),
+        )
+    except Exception as exc:
+        persisted = False
+        log(
+            "F4_POST_CLOSE_TRACKING_STOP_PERSIST_ERROR",
+            level="WARN",
+            ticker=s.target_ticker,
+            error=repr(exc),
+        )
+
+    log(
+        "F4_POST_CLOSE_TRACKING_STOPPED",
+        level="INFO",
+        ticker=s.target_ticker,
+        already_stopped=already_stopped,
+        cancelled_tasks=cancelled,
+        persisted=persisted,
+    )
+    return {
+        "ok": True,
+        "already_stopped": already_stopped,
+        "cancelled_tasks": cancelled,
+        "persisted": persisted,
+    }
 
 
 async def run_forever() -> None:
@@ -274,6 +334,7 @@ async def run() -> None:
                 _run_monitor_heartbeat(ticker, is_ws_stale, ws_tick_age_ms)
             )
         )
+    _active_monitor_tasks.update(tasks)
     try:
         # 모니터 태스크 하나가 예외로 죽어도 나머지 태스크는 유지한다.
         # 정상 종료(HOLDING 해제)만 감시 종료로 취급.
@@ -311,6 +372,7 @@ async def run() -> None:
         if closing is not None and not closing.done():
             await asyncio.shield(closing)
         await asyncio.gather(*tasks, return_exceptions=True)
+        _active_monitor_tasks.difference_update(tasks)
         live.ws_connected = False
 
 

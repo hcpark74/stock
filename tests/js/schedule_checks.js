@@ -84,5 +84,29 @@ const scriptTag = html.slice(html.indexOf('app.js?v='), html.indexOf('app.js?v='
 check('index: app.js cache-buster is not old version',
   html.includes('app.js?v=') && !scriptTag.includes('20260717-market-closed'));
 
+// 7) 매도 후 추적 종료 제어
+check('index: post-close tracking stop button present', html.includes('id="tracking-stop-btn"'));
+check('app.js: post-close tracking stop handler present', src.includes('function stopPostCloseTracking()'));
+check('app.js: tracking stop uses POST endpoint',
+  src.includes("fetch('/api/tracking/stop', {method:'POST'})"));
+check('app.js: tracking stop button is CLOSED-only',
+  src.includes("const closed = d.position_status === 'CLOSED'"));
+
+// 8) 가격흐름 세로 스케일 토글
+check('index: 전체 스케일 버튼 present', html.includes('id="scale-full"'));
+check('index: 트레일링 스케일 버튼 present', html.includes('id="scale-trailing"'));
+check('index: 스케일 data 속성 present', html.includes('data-scale="trailing"'));
+check('index: 스케일 버튼 aria-pressed present', html.includes('aria-pressed'));
+check('app.js: priceFlowYDomain 헬퍼 present', src.includes('function priceFlowYDomain('));
+check('app.js: setPriceFlowScale 핸들러 present', src.includes('function setPriceFlowScale('));
+check('app.js: 스케일 localStorage 키 present', src.includes('PRICE_FLOW_SCALE_KEY'));
+check('app.js: guarded localStorage getter present', src.includes('function lsGet('));
+check('app.js: guarded localStorage setter present', src.includes('function lsSet('));
+check('app.js: 플롯 클리핑 present', src.includes('ctx.clip()'));
+check('index: app.js cache-buster bumped off post-close-stop', (function () {
+  const tag = html.slice(html.indexOf('app.js?v='), html.indexOf('app.js?v=') + 60);
+  return !tag.includes('20260803-post-close-stop');
+})());
+
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : '\n' + failures + ' CHECK(S) FAILED');
 process.exit(failures ? 1 : 0);

@@ -34,6 +34,7 @@ class State:
     daily_pnl_pct: float = 0.0
     day_skip: bool = False
     pending_entry: dict | None = None   # 접수 후 체결/취소 대조 전인 매수 주문
+    post_close_tracking_stopped: bool = False  # 매도 후 가격 관측 수동 종료
 
 
 _state = State()
@@ -64,6 +65,7 @@ def _clear_for_trading_day(date_str: str) -> None:
     _state.daily_pnl_pct = 0.0
     _state.day_skip = False
     _state.pending_entry = None
+    _state.post_close_tracking_stopped = False
 
 
 async def ensure_trading_day(date_str: str) -> bool:
@@ -136,6 +138,7 @@ async def set_holding(entry_price: float, entry_qty: int, order_id: str) -> None
         _state.highest_step = 0.0
         _state.trade_id = 0
         _state.pending_entry = None
+        _state.post_close_tracking_stopped = False
 
 
 async def set_pending_entry(pending: dict) -> None:
@@ -188,6 +191,15 @@ async def set_closed(reason: str) -> bool:
         return True
 
 
+async def stop_post_close_tracking() -> bool:
+    """CLOSED 상태의 사후 가격 관측을 멈춘다. 이미 멈춘 경우도 성공이다."""
+    async with _lock:
+        if _state.position_status != "CLOSED":
+            return False
+        _state.post_close_tracking_stopped = True
+        return True
+
+
 async def reset_to_idle(reason: str) -> None:
     """ENTERING → IDLE. F3 미체결 확정 시 호출."""
     async with _lock:
@@ -199,6 +211,7 @@ async def reset_to_idle(reason: str) -> None:
         _state.entry_at = None
         _state.order_id = None
         _state.pending_entry = None
+        _state.post_close_tracking_stopped = False
         live.clear_tick_history()
 
 
@@ -230,6 +243,7 @@ async def persist(state_dir: str, date_str: str) -> None:
         "position_status": _state.position_status,
         "close_reason": _state.close_reason,
         "pending_entry": _state.pending_entry,
+        "post_close_tracking_stopped": _state.post_close_tracking_stopped,
     }
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(dst)
@@ -292,3 +306,6 @@ def restore_from(data: dict) -> None:
     _state.close_reason = data.get("close_reason")
     pending = data.get("pending_entry")
     _state.pending_entry = dict(pending) if isinstance(pending, dict) else None
+    _state.post_close_tracking_stopped = bool(
+        data.get("post_close_tracking_stopped", False)
+    )

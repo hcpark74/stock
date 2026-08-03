@@ -71,6 +71,13 @@
           <span class="st-tk" id="st-tk"></span>
           <span class="st-name" id="st-name"></span>
           <div class="tv-pills" id="tv-pills"></div>
+          <button
+            class="tracking-stop-btn"
+            id="tracking-stop-btn"
+            type="button"
+            onclick="stopPostCloseTracking()"
+            hidden
+          >추적 종료</button>
         </div>
 
         <div class="asset-strip" id="asset-strip">
@@ -119,12 +126,23 @@
               <div class="flow-title">오늘 가격흐름</div>
               <div class="flow-sub" id="flow-sub">틱 수신 대기</div>
             </div>
-            <div class="flow-legend">
-              <span><i class="lg-cur"></i>현재</span>
-              <span><i class="lg-entry"></i>진입</span>
-              <span><i class="lg-stop"></i>스탑</span>
-              <span><i class="lg-buy"></i>매수</span>
-              <span><i class="lg-sell"></i>매도</span>
+            <div class="flow-head-right">
+              <div class="flow-scale" role="group" aria-label="세로 스케일 모드">
+                <button class="fp on" id="scale-full" type="button" data-scale="full"
+                  aria-pressed="true" title="전체 가시 가격 범위로 세로 축을 맞춥니다."
+                  onclick="setPriceFlowScale('full')">전체</button>
+                <button class="fp" id="scale-trailing" type="button" data-scale="trailing"
+                  aria-pressed="false"
+                  title="trail_stop·현재가·최고가 기준 트레일링 구간에 세로 축을 집중합니다(데이터 없으면 전체로 자동 대체)."
+                  onclick="setPriceFlowScale('trailing')">트레일링</button>
+              </div>
+              <div class="flow-legend">
+                <span><i class="lg-cur"></i>현재</span>
+                <span><i class="lg-entry"></i>진입</span>
+                <span><i class="lg-stop"></i>스탑</span>
+                <span><i class="lg-buy"></i>매수</span>
+                <span><i class="lg-sell"></i>매도</span>
+              </div>
             </div>
           </div>
           <canvas id="price-flow" width="760" height="180"></canvas>
@@ -368,4 +386,4 @@
   </div>
 </div>
 
-<script src="assets/app.js?v=20260801-f5-close-1515"></script>
+<script src="assets/app.js?v=20260803-flow-scale"></script>

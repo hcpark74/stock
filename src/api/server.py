@@ -29,7 +29,7 @@ from src.api.status_logic import (
 from src.api.status_logic import (
     pipeline_from_logs as _pipeline_from_logs,
 )
-from src.modules import paper_fast_probe
+from src.modules import f4_tracking, paper_fast_probe
 from src.modules.f1_filter import (
     F1_DEADLINE_H,
     F1_DEADLINE_M,
@@ -583,6 +583,8 @@ async def api_status() -> JSONResponse:
         "ntp_offset_ms": live.ntp_offset_ms,
         "ntp_level": live.ntp_level,
         "close_reason": s.close_reason,
+        "post_close_tracking_active": f4_tracking.post_close_observation_active(),
+        "post_close_tracking_stopped": s.post_close_tracking_stopped,
         "assets": assets,
         # 청산(CLOSED) 후에도 당일 리뷰용으로 tick 이력을 유지해 내려준다.
         "tick_history": (
@@ -603,6 +605,15 @@ async def api_status() -> JSONResponse:
         ),
         **_pipeline_from_logs(logs, s.position_status),
     })
+
+
+@app.post("/api/tracking/stop")
+async def api_stop_post_close_tracking() -> JSONResponse:
+    """매도 완료 후 진행 중인 가격 관측만 수동 종료한다."""
+    result = await f4_tracking.stop_post_close_observation()
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=409)
+    return JSONResponse(result)
 
 
 # ─── /api/logs ────────────────────────────────────────────────────────

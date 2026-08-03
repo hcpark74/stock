@@ -178,6 +178,10 @@ EVENT_LABELS = {
     "VI_WATCH_ERROR": "VI 감시 오류(VI Watch Error)",
     "F4_STATE_PERSISTED": "F4 추적 상태 저장(F4 State Persisted)",
     "F4_STATE_PERSIST_ERROR": "F4 추적 상태 저장 오류(F4 State Persist Error)",
+    "F4_POST_CLOSE_TRACKING_STOPPED": "매도 후 추적 종료(Post-close Tracking Stopped)",
+    "F4_POST_CLOSE_TRACKING_STOP_PERSIST_ERROR": (
+        "매도 후 추적 종료 저장 오류(Post-close Tracking Stop Persist Error)"
+    ),
     "F4_DB_PROGRESS_ERROR": "F4 DB 진행 상태 저장 오류(F4 DB Progress Error)",
     "F4_ENTRY_AT_INVALID": "F4 진입시각 오류(F4 Entry Time Invalid)",
     "TICK_SPIKE_DROPPED": "이상 틱 제외(Tick Spike Dropped)",

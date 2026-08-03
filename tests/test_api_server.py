@@ -220,6 +220,49 @@ async def test_status_does_not_fetch_asset_snapshot(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_status_exposes_post_close_tracking_state(monkeypatch):
+    s = server.state.get()
+    monkeypatch.setattr(server, "_read_today_logs", lambda limit=None: [])
+    monkeypatch.setattr(s, "position_status", "CLOSED")
+    monkeypatch.setattr(s, "post_close_tracking_stopped", False)
+    monkeypatch.setattr(
+        server.f4_tracking,
+        "post_close_observation_active",
+        lambda: True,
+    )
+
+    payload = json.loads((await server.api_status()).body.decode("utf-8"))
+
+    assert payload["post_close_tracking_active"] is True
+    assert payload["post_close_tracking_stopped"] is False
+
+
+@pytest.mark.asyncio
+async def test_stop_post_close_tracking_api_returns_result(monkeypatch):
+    stop = AsyncMock(return_value={"ok": True, "persisted": True})
+    monkeypatch.setattr(server.f4_tracking, "stop_post_close_observation", stop)
+
+    response = await server.api_stop_post_close_tracking()
+
+    assert response.status_code == 200
+    assert json.loads(response.body.decode("utf-8"))["ok"] is True
+    stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stop_post_close_tracking_api_rejects_non_closed(monkeypatch):
+    monkeypatch.setattr(
+        server.f4_tracking,
+        "stop_post_close_observation",
+        AsyncMock(return_value={"ok": False, "reason": "POSITION_NOT_CLOSED"}),
+    )
+
+    response = await server.api_stop_post_close_tracking()
+
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
 async def test_status_includes_tick_history_while_holding_and_closed(monkeypatch):
     s = server.state.get()
     server.live.clear_tick_history()

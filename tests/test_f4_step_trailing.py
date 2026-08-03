@@ -71,6 +71,7 @@ def holding_state():
     s.highest_step = 0.0
     s.trade_id = 0
     s.entry_at = None
+    s.post_close_tracking_stopped = False
 
 
 # ── 스텝 갱신 정확성 ──────────────────────────────────────────────────
@@ -607,6 +608,43 @@ def test_post_close_observation_stops_at_0910():
     assert _price_observation_active(_kst(9, 9)) is True
     assert _price_observation_active(_kst(9, 10)) is False
     assert _price_observation_active(_dt(2026, 6, 24, 9, 9, tzinfo=KST)) is False
+
+
+def test_post_close_observation_stops_when_manually_disabled():
+    s = _state_mod.get()
+    s.position_status = "CLOSED"
+    s.entry_at = _kst(9, 1).isoformat()
+    s.post_close_tracking_stopped = True
+
+    assert _price_observation_active(_kst(9, 9)) is False
+
+
+@pytest.mark.asyncio
+async def test_stop_post_close_observation_cancels_monitors_and_persists(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    s = _state_mod.get()
+    s.position_status = "CLOSED"
+    s.entry_at = _kst(9, 1).isoformat()
+    monitor = asyncio.create_task(asyncio.sleep(60))
+    persist = AsyncMock()
+    monkeypatch.setattr(f4, "_closing_task", None)
+    monkeypatch.setattr(f4, "_active_monitor_tasks", {monitor})
+    monkeypatch.setattr(f4.state, "persist", persist)
+    monkeypatch.setattr(f4, "log", lambda *args, **kwargs: None)
+
+    result = await f4.stop_post_close_observation()
+    await asyncio.gather(monitor, return_exceptions=True)
+
+    assert result.items() >= {
+        "ok": True,
+        "already_stopped": False,
+        "cancelled_tasks": 1,
+        "persisted": True,
+    }.items()
+    assert s.post_close_tracking_stopped is True
+    assert monitor.cancelled()
+    persist.assert_awaited_once()
 
 
 def test_price_observation_always_active_while_holding():

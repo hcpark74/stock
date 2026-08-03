@@ -26,6 +26,10 @@ const stockText = (ticker, name, fallback='—') => {
   return code || nm || fallback;
 };
 
+// localStorage 접근 가드 — 프라이빗 모드/쿼터 초과 시 예외를 삼킨다.
+function lsGet(key) { try { return localStorage.getItem(key); } catch(e) { return null; } }
+function lsSet(key, val) { try { localStorage.setItem(key, val); } catch(e) {} }
+
 // ── 탭 전환 ──────────────────────────────────────────────────────────────
 function go(id, btn) {
   document.querySelectorAll('.sc').forEach(s=>s.classList.remove('on'));
@@ -163,8 +167,12 @@ let _lastAssets = null;
 let _priceFlow = [];
 let _priceFlowTicks = [];
 let _priceFlowTicker = null;
+let _trackingStopPending = false;
 const PRICE_FLOW_TICK_WINDOW = 5000;  // 서버 tick 버퍼(live._TICK_HISTORY_MAX)와 동일
 const PRICE_FLOW_VIEW_MIN = 20;       // 보유 중 슬라이딩 창 크기(분)
+const PRICE_FLOW_SCALE_KEY = 'priceFlowScale';  // 세로 스케일 모드 저장 키
+// 'full'=전체 가시 범위, 'trailing'=트레일링 밴드 집중. localStorage에서 복원.
+let _priceFlowScaleMode = lsGet(PRICE_FLOW_SCALE_KEY) === 'trailing' ? 'trailing' : 'full';
 
 function applyStatus(d) {
   if(d.assets) _lastAssets = d.assets;
@@ -200,6 +208,22 @@ function applyStatus(d) {
   badge.className = 'st-badge '+(d.position_status||'IDLE');
   $('st-tk').textContent  = d.ticker || '';
   $('st-name').textContent = d.ticker ? tickerName(d.ticker, d.name) : '';
+  const trackingStopBtn = $('tracking-stop-btn');
+  if(trackingStopBtn) {
+    const closed = d.position_status === 'CLOSED';
+    trackingStopBtn.hidden = !closed;
+    if(closed) {
+      const manuallyStopped = Boolean(d.post_close_tracking_stopped);
+      const trackingActive = Boolean(d.post_close_tracking_active);
+      trackingStopBtn.disabled = _trackingStopPending || !trackingActive;
+      trackingStopBtn.textContent = _trackingStopPending
+        ? '종료 중…'
+        : manuallyStopped ? '추적 종료됨' : trackingActive ? '추적 종료' : '추적 완료';
+      trackingStopBtn.title = trackingActive
+        ? '매도 후 가격 관측을 즉시 종료합니다. 기존 차트 데이터는 유지됩니다.'
+        : '매도 후 가격 관측이 종료되었습니다.';
+    }
+  }
 
   // PnL 필
   const pills = $('tv-pills');
@@ -538,6 +562,56 @@ function resizePriceFlowCanvas(c) {
   return {ctx, W: displayW, H: displayH};
 }
 
+// 세로 스케일 도메인 헬퍼(순수). 전체(full)와 트레일링(trailing) 두 모드의
+// 최종 패딩 도메인 {min, max, mode}를 반환한다. Node extract/eval 하네스에서
+// 단독 실행되도록 Math 외 외부 의존이 없다.
+//   mode:       'full' | 'trailing'
+//   fullValues: number[] — 전체 모드에서 고려하는 모든 후보 가격
+//   focus:      {trailStop, price, high} — 트레일링 밴드 기준값(무효 시 0/undefined)
+function priceFlowYDomain(mode, fullValues, focus) {
+  const clean = (Array.isArray(fullValues) ? fullValues : [])
+    .map(Number).filter(v => v > 0);
+  let lo, hi, applied = 'full';
+  if (mode === 'trailing') {
+    const ts = Number(focus && focus.trailStop) || 0;
+    const pr = Number(focus && focus.price) || 0;
+    const hp = Number(focus && focus.high) || 0;
+    const band = [ts, pr, hp].filter(v => v > 0);
+    // valid trail_stop이 있고 밴드에 2점 이상 있을 때만 트레일링 집중.
+    if (ts > 0 && band.length >= 2) {
+      lo = Math.min.apply(null, band);
+      hi = Math.max.apply(null, band);
+      applied = 'trailing';
+    }
+  }
+  if (applied !== 'trailing') {  // fallback = 기존 전체 동작과 동일
+    if (!clean.length) return {min: 0, max: 1, mode: 'full'};
+    lo = Math.min.apply(null, clean);
+    hi = Math.max.apply(null, clean);
+  }
+  if (lo === hi) { lo *= 0.998; hi *= 1.002; }  // 기존 degenerate 가드 유지
+  const span = hi - lo;
+  lo -= span * 0.12; hi += span * 0.12;         // 기존 12% 여백 유지
+  return {min: lo, max: hi, mode: applied};
+}
+
+function syncPriceFlowScaleButtons() {
+  const full = $('scale-full'), tr = $('scale-trailing');
+  if(!full || !tr) return;
+  const trailing = _priceFlowScaleMode === 'trailing';
+  full.classList.toggle('on', !trailing);
+  tr.classList.toggle('on', trailing);
+  full.setAttribute('aria-pressed', String(!trailing));
+  tr.setAttribute('aria-pressed', String(trailing));
+}
+
+function setPriceFlowScale(mode) {
+  _priceFlowScaleMode = mode === 'trailing' ? 'trailing' : 'full';
+  lsSet(PRICE_FLOW_SCALE_KEY, _priceFlowScaleMode);
+  syncPriceFlowScaleButtons();
+  drawPriceFlow(_lastStatus);   // 즉시 로컬 재렌더 — 네트워크/타이머 없음
+}
+
 function drawPriceFlow(d) {
   const c = $('price-flow');
   if(!c) return;
@@ -661,10 +735,12 @@ function drawPriceFlow(d) {
     sub.textContent = `${fmtFlowMinute(startTs)}-${fmtFlowMinute(endTs)} · ${stateLabel} · 틱 ${points.length}개 · ${timeLabel}${priceLabel}`;
   }
 
-  let min = Math.min(...values), max = Math.max(...values);
-  if(min === max) { min *= .998; max *= 1.002; }
-  const span = max - min;
-  min -= span * .12; max += span * .12;
+  const dom = priceFlowYDomain(_priceFlowScaleMode, values, {
+    trailStop: Number(d && d.trail_stop) || 0,
+    price: lastPrice || Number(d && d.current_price) || 0,
+    high: Number(d && d.high_price) || 0,
+  });
+  const min = dom.min, max = dom.max;
   const yAt = v => pad.t + (max - v) / (max - min) * chartH;
 
   const drawRef = (value, color, label) => {
@@ -675,6 +751,10 @@ function drawPriceFlow(d) {
     ctx.fillStyle = color; ctx.font = '10px Noto Sans KR,sans-serif'; ctx.textAlign = 'left';
     ctx.fillText(label, pad.l + 4, y - 4);
   };
+  // 데이터 레이어는 플롯 사각형에 클리핑 — 트레일링 집중 모드에서 도메인 밖
+  // 참조선/포인트/마커가 그리드·축·라벨 위로 새어나오지 않게 한다.
+  ctx.save();
+  ctx.beginPath(); ctx.rect(pad.l, pad.t, chartW, chartH); ctx.clip();
   drawRef(d.entry_price, '#f7a600', '진입');
   drawRef(d.trail_stop || d.hard_stop, '#ef5350', d.trail_stop ? 'Trail Stop' : 'Hard Stop');
   drawRef(d.high_price, '#7b9ef9', '최고');
@@ -716,6 +796,7 @@ function drawPriceFlow(d) {
     ctx.fillText(label, x, y + dir * 14);
   });
   ctx.textBaseline = 'alphabetic';
+  ctx.restore();  // 데이터 레이어 클리핑 해제 — 축 라벨은 플롯 밖(pad.l 좌측)에 그린다
 
   ctx.fillStyle = themeVal('#787b86', '#4f5260');
   ctx.font = '10px Noto Sans KR,sans-serif';
@@ -1369,6 +1450,30 @@ async function loadStatus() {
   } catch(e){}
 }
 
+async function stopPostCloseTracking() {
+  if(_trackingStopPending || _lastStatus?.position_status !== 'CLOSED') return;
+  if(!confirm('매도 후 가격 추적을 종료할까요?\n이미 수집된 차트 데이터는 유지됩니다.')) return;
+
+  _trackingStopPending = true;
+  applyStatus(_lastStatus);
+  try {
+    const r = await fetch('/api/tracking/stop', {method:'POST'});
+    const result = await r.json().catch(() => ({}));
+    if(!r.ok || !result.ok) {
+      throw new Error(result.reason || `HTTP ${r.status}`);
+    }
+    await loadStatus();
+    if(result.persisted === false) {
+      alert('추적은 종료됐지만 상태 파일 저장에 실패했습니다. 재시작 시 다시 확인해 주세요.');
+    }
+  } catch(err) {
+    alert(`추적 종료 실패: ${err?.message || err}`);
+  } finally {
+    _trackingStopPending = false;
+    if(_lastStatus) applyStatus(_lastStatus);
+  }
+}
+
 async function loadAssets(refresh) {
   const btn = $('asset-refresh');
   const meta = $('asset-updated');
@@ -1702,6 +1807,7 @@ function toggleTheme() {
 })();
 
 // ── 초기 로드 ────────────────────────────────────────────────────────────
+syncPriceFlowScaleButtons();  // 저장된 세로 스케일 모드로 버튼 상태 동기화
 loadSchedule();
 loadStatus();
 loadF1();

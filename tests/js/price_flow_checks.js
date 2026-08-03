@@ -110,6 +110,33 @@ check('VI 파싱: vi_events 없음 → []', parseViEvents({}).length === 0);
 check('VI 파싱: ts 불량 행 제거',
   parseViEvents({vi_events: [{ts: null, vi_prc: '1'}]}).length === 0);
 
+// 8) priceFlowYDomain — 세로 스케일 순수 도메인 헬퍼 (전체/트레일링 + fallback)
+eval(extract('priceFlowYDomain'));
+// 전체: 아웃라이어(5000) 포함해 범위가 늘어난다
+const full = priceFlowYDomain('full', [5000, 10000, 10400, 10600], {});
+check('도메인 전체: mode=full', full.mode === 'full');
+check('도메인 전체: 아웃라이어 포함(min<5000)', full.min < 5000);
+check('도메인 전체: min<max', full.min < full.max);
+// 트레일링: trail_stop·현재가·최고가 밴드에 집중, 아웃라이어 5000 제외
+const tr = priceFlowYDomain('trailing', [5000, 10000, 10400, 10600],
+  {trailStop: 10000, price: 10400, high: 10600});
+check('도메인 트레일링: mode=trailing', tr.mode === 'trailing');
+check('도메인 트레일링: 아웃라이어 제외(min>9000)', tr.min > 9000);
+check('도메인 트레일링: 상단은 최고가 위(max>10600)', tr.max > 10600);
+check('도메인 트레일링: min<max', tr.min < tr.max);
+// fallback: trail_stop 무효(0) → 전체로 대체
+const fb1 = priceFlowYDomain('trailing', [5000, 10000, 10400, 10600],
+  {trailStop: 0, price: 10400, high: 10600});
+check('도메인 fallback: trail_stop 무효 → full', fb1.mode === 'full' && fb1.min < 6000);
+// fallback: 밴드 점 2개 미만 → 전체로 대체
+const fb2 = priceFlowYDomain('trailing', [5000, 10000, 10400, 10600],
+  {trailStop: 10000, price: 0, high: 0});
+check('도메인 fallback: 밴드<2점 → full', fb2.mode === 'full');
+// degenerate: 단일 값도 NaN 없이 min<max
+const one = priceFlowYDomain('full', [10000], {});
+check('도메인 degenerate: 단일 값 min<max(NaN 없음)',
+  one.min < one.max && Number.isFinite(one.min) && Number.isFinite(one.max));
+
 Date.now = realNow;
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures ? 1 : 0);
