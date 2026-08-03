@@ -18,7 +18,6 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import api_tests._helper as h
-
 from src import db, state
 from src.api import auth
 from src.modules import f1_filter, f2_lockup, f3_entry

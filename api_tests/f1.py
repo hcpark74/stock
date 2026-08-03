@@ -19,8 +19,8 @@ async def run() -> tuple[bool, list[dict]]:
     """Return (ok, liquidity-filtered candidates)."""
     h.header("F1. premarket filter  ranking + expected execution")
 
-    from src.api import auth
     import src.modules.f1_filter as mod
+    from src.api import auth
 
     if not await auth.load_or_refresh():
         h.fail("token")
@@ -43,7 +43,10 @@ async def run() -> tuple[bool, list[dict]]:
         f"  liquidity pass: {len(candidates)}"
     )
     print()
-    print("  ticker  gap(final) band          reason             rank_gap  exp_gap   price      qty      amount")
+    print(
+        "  ticker  gap(final) band          reason             "
+        "rank_gap  exp_gap   price      qty      amount"
+    )
     print("  " + "-" * 112)
     for c in raw[:20]:
         exp_gap = c.get("expected_api_gap_pct")

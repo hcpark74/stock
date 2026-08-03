@@ -6,7 +6,6 @@ import pytest
 from src import state as _state_mod
 from src.modules.f2_lockup import VI_GAP_MIN, run
 
-
 # ── 헬퍼 ──────────────────────────────────────────────────────────────
 
 def _candidate(

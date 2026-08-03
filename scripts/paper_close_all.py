@@ -113,7 +113,10 @@ async def _fetch_today_orders(mode: str) -> list[dict]:
 async def _close_one(holding: dict, mode: str, qty: int) -> dict:
     ticker = holding["ticker"]
     if qty <= 0:
-        return {"ticker": ticker, "name": holding.get("name"), "qty": 0, "skipped": "NO_SELLABLE_QTY"}
+        return {
+            "ticker": ticker, "name": holding.get("name"), "qty": 0,
+            "skipped": "NO_SELLABLE_QTY",
+        }
 
     sell_resp = await f4_tracking._send_sell(ticker, qty, mode)
     order_id = (sell_resp.get("output") or {}).get("ODNO", "")
@@ -132,7 +135,9 @@ async def _close_one(holding: dict, mode: str, qty: int) -> dict:
     return result
 
 
-def _print_holdings(holdings: list[dict], pending_sells: dict[str, int], planned: dict[str, int]) -> None:
+def _print_holdings(
+    holdings: list[dict], pending_sells: dict[str, int], planned: dict[str, int]
+) -> None:
     print("\n모의투자 보유 종목", flush=True)
     print("-" * 100, flush=True)
     for h in holdings:
@@ -146,7 +151,8 @@ def _print_holdings(holdings: list[dict], pending_sells: dict[str, int], planned
             f"{ticker} {h.get('name') or ''} "
             f"보유 {qty:,}주 / 매도가능 {orderable:,}주 / 미체결매도 {pending:,}주 / "
             f"재청산주문 {sell_qty:,}주 / {status} / "
-            f"현재가 {_money(h.get('current_price'))}원 / 평가 {_money(h.get('evaluation_amount'))}원",
+            f"현재가 {_money(h.get('current_price'))}원 / "
+            f"평가 {_money(h.get('evaluation_amount'))}원",
             flush=True,
         )
     print("-" * 100, flush=True)
@@ -157,7 +163,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--force-held-qty",
         action="store_true",
-        help="매도가능수량이 0이어도 오늘 미체결 매도수량을 제외한 남은 보유수량 재청산을 시도합니다.",
+        help=(
+            "매도가능수량이 0이어도 오늘 미체결 매도수량을 제외한 "
+            "남은 보유수량 재청산을 시도합니다."
+        ),
     )
     return parser.parse_args()
 
@@ -179,7 +188,9 @@ async def main() -> int:
     order_rows = await _fetch_today_orders(mode)
     pending_sells = _pending_sell_qty_by_ticker(order_rows)
     planned = {
-        str(h.get("ticker") or ""): _qty_to_sell(h, pending_sells, force_held_qty=args.force_held_qty)
+        str(h.get("ticker") or ""): _qty_to_sell(
+            h, pending_sells, force_held_qty=args.force_held_qty
+        )
         for h in holdings
     }
     targets = [h for h in holdings if planned.get(str(h.get("ticker") or ""), 0) > 0]
@@ -192,11 +203,19 @@ async def main() -> int:
     if not targets:
         print("새로 주문할 수량이 없습니다.", flush=True)
         print("미체결 매도 주문이 있거나 매도가능수량이 0입니다.", flush=True)
-        print("매도가능수량 0이어도 남은 보유수량 재주문을 시도하려면 --force-held-qty 옵션을 붙이세요.", flush=True)
+        print(
+            "매도가능수량 0이어도 남은 보유수량 재주문을 시도하려면 "
+            "--force-held-qty 옵션을 붙이세요.",
+            flush=True,
+        )
         return 0
 
     if args.force_held_qty:
-        print("주의: --force-held-qty 활성화. 매도가능수량 0인 종목도 미체결 매도분을 제외하고 재주문을 시도합니다.", flush=True)
+        print(
+            "주의: --force-held-qty 활성화. 매도가능수량 0인 종목도 "
+            "미체결 매도분을 제외하고 재주문을 시도합니다.",
+            flush=True,
+        )
     print("위 재청산주문 수량을 시장가 매도합니다.", flush=True)
     print("주문을 보내려면 YES 를 정확히 입력하세요.", flush=True)
     confirm = input("> ").strip()

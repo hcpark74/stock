@@ -105,7 +105,9 @@ def test_notifier_accepts_legacy_and_standard_error_levels():
 async def test_market_closed_alert_passes_filter_and_reaches_queue():
     notifier._queue = asyncio.Queue()
 
-    await notifier.send("MARKET_CLOSED", level="INFO", message="휴장일 감지(20260712). 당일 거래 없음.")
+    await notifier.send(
+        "MARKET_CLOSED", level="INFO", message="휴장일 감지(20260712). 당일 거래 없음."
+    )
 
     assert notifier._queue.qsize() == 1
     text = notifier._queue.get_nowait()

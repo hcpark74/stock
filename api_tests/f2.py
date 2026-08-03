@@ -36,8 +36,8 @@ async def run(candidates: list[dict] | None = None) -> bool:
     """candidates=None 이면 F1 먼저 실행, 없으면 합성 데이터 사용."""
     h.header("F2. 타겟 락업  VI_GAP_MIN=3%  복합정렬")
 
-    from src import state
     import src.modules.f2_lockup as mod
+    from src import state
 
     # candidates 확보
     if candidates is None:

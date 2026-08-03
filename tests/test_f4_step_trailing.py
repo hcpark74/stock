@@ -391,7 +391,10 @@ async def test_dry_run_ticks_finish_below_trailing_stop(monkeypatch):
     s.position_status = "HOLDING"
 
     monkeypatch.setenv("DRY_RUN_STEP_DELAY", "0")
-    monkeypatch.setattr("src.modules.f4_tracking.log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(
+        "src.modules.f4_tracking.log",
+        lambda event, **kwargs: events.append((event, kwargs)),
+    )
     monkeypatch.setattr("src.modules.f4_tracking._process_tick", AsyncMock())
 
     await _run_dry_ticks("005930", _spike_always_pass())
@@ -409,7 +412,10 @@ async def test_rest_backup_skips_poll_when_websocket_is_fresh(monkeypatch):
         _state_mod.get().position_status = "CLOSED"
 
     monkeypatch.setattr("src.modules.f4_tracking._fetch_current_price", fetch)
-    monkeypatch.setattr("src.modules.f4_tracking.asyncio.sleep", AsyncMock(side_effect=stop_after_sleep))
+    monkeypatch.setattr(
+        "src.modules.f4_tracking.asyncio.sleep",
+        AsyncMock(side_effect=stop_after_sleep),
+    )
     monkeypatch.setattr("src.modules.f4_tracking.log", lambda *args, **kwargs: None)
 
     await _run_rest_price_backup("005930", _spike_always_pass(), lambda: False)
@@ -427,7 +433,10 @@ async def test_rest_backup_polls_when_websocket_is_stale(monkeypatch):
 
     monkeypatch.setattr("src.modules.f4_tracking._fetch_current_price", fetch)
     monkeypatch.setattr("src.modules.f4_tracking._process_tick", process_tick)
-    monkeypatch.setattr("src.modules.f4_tracking.asyncio.sleep", AsyncMock(side_effect=stop_after_sleep))
+    monkeypatch.setattr(
+        "src.modules.f4_tracking.asyncio.sleep",
+        AsyncMock(side_effect=stop_after_sleep),
+    )
     monkeypatch.setattr("src.modules.f4_tracking.log", lambda *args, **kwargs: None)
 
     await _run_rest_price_backup("005930", _spike_always_pass(), lambda: True)
@@ -450,8 +459,14 @@ async def test_rest_backup_survives_fetch_error(monkeypatch):
 
     monkeypatch.setattr("src.modules.f4_tracking._fetch_current_price", fetch)
     monkeypatch.setattr("src.modules.f4_tracking._process_tick", process_tick)
-    monkeypatch.setattr("src.modules.f4_tracking.asyncio.sleep", AsyncMock(side_effect=stop_after_two_sleeps))
-    monkeypatch.setattr("src.modules.f4_tracking.log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(
+        "src.modules.f4_tracking.asyncio.sleep",
+        AsyncMock(side_effect=stop_after_two_sleeps),
+    )
+    monkeypatch.setattr(
+        "src.modules.f4_tracking.log",
+        lambda event, **kwargs: events.append((event, kwargs)),
+    )
 
     await _run_rest_price_backup("005930", _spike_always_pass(), lambda: True)
 
@@ -993,7 +1008,10 @@ async def test_execute_close_sends_critical_alert_on_sell_error(monkeypatch):
     persist = AsyncMock()
 
     monkeypatch.setenv("DRY_RUN", "0")
-    monkeypatch.setattr("src.modules.f4_tracking._send_sell", AsyncMock(side_effect=RuntimeError("sell failed")))
+    monkeypatch.setattr(
+        "src.modules.f4_tracking._send_sell",
+        AsyncMock(side_effect=RuntimeError("sell failed")),
+    )
     monkeypatch.setattr("src.modules.f4_tracking.notifier.send", notify)
     monkeypatch.setattr("src.modules.f4_tracking.db.record_order", record_order)
     monkeypatch.setattr("src.modules.f4_tracking.state.persist", persist)
@@ -1137,7 +1155,9 @@ async def test_execute_close_treats_rejected_sell_response_as_failure(monkeypatc
 
     monkeypatch.setattr(
         "src.modules.f4_tracking._send_sell",
-        AsyncMock(return_value={"rt_cd": "1", "msg_cd": "EGW00001", "msg1": "rejected", "output": {}}),
+        AsyncMock(return_value={
+            "rt_cd": "1", "msg_cd": "EGW00001", "msg1": "rejected", "output": {},
+        }),
     )
     monkeypatch.setattr("src.modules.f4_tracking.notifier.send", notify)
     monkeypatch.setattr("src.modules.f4_tracking.db.record_order", record_order)
@@ -1189,7 +1209,10 @@ async def test_execute_close_closes_state_when_db_recording_fails_after_sell(mon
         "_send_sell",
         AsyncMock(return_value={"rt_cd": "0", "output": {"ODNO": "SELL001"}}),
     )
-    monkeypatch.setattr(f4, "_poll_fill", AsyncMock(return_value={"fill_price": round(ENTRY * 0.98), "fill_qty": 100}))
+    monkeypatch.setattr(
+        f4, "_poll_fill",
+        AsyncMock(return_value={"fill_price": round(ENTRY * 0.98), "fill_qty": 100}),
+    )
     monkeypatch.setattr(f4.db, "record_order", AsyncMock(side_effect=RuntimeError("db down")))
     monkeypatch.setattr(f4.db, "close_trade", close_trade)
     monkeypatch.setattr(f4.state, "persist", persist)

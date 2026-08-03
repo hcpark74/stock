@@ -44,11 +44,20 @@ def test_volume_surge_can_outrank_larger_absolute_amount():
 
 def test_high_gap_requires_amount_and_vi_distance():
     rejected = f1_selector.select_candidates([
-        _candidate("LOW_AMOUNT", expected_amount=1_000_000_000, avg_amount_5d=100_000_000, gap_pct=0.085),
-        _candidate("VI_NEAR", expected_amount=6_000_000_000, avg_amount_5d=100_000_000, gap_pct=0.085, vi_gap=0.005),
+        _candidate(
+            "LOW_AMOUNT", expected_amount=1_000_000_000,
+            avg_amount_5d=100_000_000, gap_pct=0.085,
+        ),
+        _candidate(
+            "VI_NEAR", expected_amount=6_000_000_000, avg_amount_5d=100_000_000,
+            gap_pct=0.085, vi_gap=0.005,
+        ),
     ])
     accepted = f1_selector.select_candidates([
-        _candidate("HIGH_GAP_OK", expected_amount=6_000_000_000, avg_amount_5d=100_000_000, gap_pct=0.085, vi_gap=0.015),
+        _candidate(
+            "HIGH_GAP_OK", expected_amount=6_000_000_000, avg_amount_5d=100_000_000,
+            gap_pct=0.085, vi_gap=0.015,
+        ),
     ])
 
     assert rejected == []
@@ -73,8 +82,14 @@ def test_illiquid_candidates_rejected_by_default_floor():
 
 def test_invalid_gap_and_vi_floor_are_rejected():
     ranked = f1_selector.select_candidates([
-        _candidate("LOW_GAP", expected_amount=10_000_000_000, avg_amount_5d=100_000_000, gap_pct=0.02),
-        _candidate("VI_TOO_NEAR", expected_amount=10_000_000_000, avg_amount_5d=100_000_000, vi_gap=0.005),
+        _candidate(
+            "LOW_GAP", expected_amount=10_000_000_000,
+            avg_amount_5d=100_000_000, gap_pct=0.02,
+        ),
+        _candidate(
+            "VI_TOO_NEAR", expected_amount=10_000_000_000,
+            avg_amount_5d=100_000_000, vi_gap=0.005,
+        ),
     ])
 
     assert ranked == []

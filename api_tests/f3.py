@@ -20,9 +20,9 @@ async def run(confirm: bool = False) -> bool:
     h.header(f"F3. 진입 주문  ticker={TICKER}"
              + ("  [!] --confirm 활성화" if confirm else ""))
 
-    from src.api import auth
-    from src import db, state
     import src.modules.f3_entry as mod
+    from src import db, state
+    from src.api import auth
 
     if not await auth.load_or_refresh():
         h.fail("token")

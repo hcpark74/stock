@@ -53,7 +53,8 @@ async def run(confirm: bool = False) -> bool:
     if not current_price:
         h.fail("현재가 조회", "stck_prpr=0")
         return False
-    limit_price = str(int(current_price * 0.85 // 500 * 500))   # 500원 단위 절사 (10~50만원 호가단위)
+    # 500원 단위 절사 (10~50만원 호가단위)
+    limit_price = str(int(current_price * 0.85 // 500 * 500))
     print(f"  현재가={current_price:,}원  → 주문가={limit_price}원 (×0.85)")
 
     # Step 1: 지정가 매수 주문 (미체결 확정)

@@ -433,7 +433,10 @@ async def run(force: bool = False) -> None:
             await notifier.send(
                 "ENTRY_FAIL",
                 level="WARN",
-                message=f"진입 재시도 마감시각 초과로 거래를 중단합니다. 마지막 거절={picked['ticker']}",
+                message=(
+                    f"진입 재시도 마감시각 초과로 거래를 중단합니다. "
+                    f"마지막 거절={picked['ticker']}"
+                ),
                 ticker=picked["ticker"],
             )
             await db.record_skip(
@@ -734,7 +737,9 @@ async def recover_pending_entry() -> bool:
     return True
 
 
-async def _run_single(force: bool = False, picked: dict | None = None, allow_candidate_retry: bool = False) -> str | None:
+async def _run_single(
+    force: bool = False, picked: dict | None = None, allow_candidate_retry: bool = False
+) -> str | None:
     """
     갭 재검증 후 설정된 시각에 배정 수량을 가격 상한 지정가로 매수하고,
     체결 확인 / 잔량 취소 / 슬리피지 가드 / 선택적 피라미딩을 수행한다.
@@ -1831,7 +1836,10 @@ async def _run_single(force: bool = False, picked: dict | None = None, allow_can
             await notifier.send(
                 "PYRAMID_EXECUTED",
                 level="INFO",
-                message=f"추가 매수: {ticker} {py_fill['fill_qty']}주 @ {py_fill['fill_price']:,}원",
+                message=(
+                    f"추가 매수: {ticker} {py_fill['fill_qty']}주 "
+                    f"@ {py_fill['fill_price']:,}원"
+                ),
                 ticker=ticker,
             )
     elif second_qty > 0:
@@ -2868,7 +2876,10 @@ async def _fetch_available_cash() -> float | None:
         await asyncio.sleep(BALANCE_QUERY_RETRY_DELAY_SEC)
 
     summary = output2[0]
-    ord_psbl_present = "ord_psbl_cash" in summary and str(summary.get("ord_psbl_cash", "")).strip() != ""
+    ord_psbl_present = (
+        "ord_psbl_cash" in summary
+        and str(summary.get("ord_psbl_cash", "")).strip() != ""
+    )
     ord_psbl_cash = to_float(summary.get("ord_psbl_cash"))
     dnca_tot_amt = to_float(summary.get("dnca_tot_amt"))
     prvs_rcdl_excc_amt = to_float(summary.get("prvs_rcdl_excc_amt"))

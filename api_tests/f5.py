@@ -20,9 +20,9 @@ TICKER = "005930"   # 삼성전자
 async def run(confirm: bool = False) -> bool:
     h.header("F5. 타임아웃 청산  precheck() + execute()")
 
-    from src.api import auth
-    from src import db, state
     import src.modules.f5_timeout as mod
+    from src import db, state
+    from src.api import auth
 
     if not await auth.load_or_refresh():
         h.fail("token")

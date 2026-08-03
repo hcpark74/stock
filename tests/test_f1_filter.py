@@ -41,7 +41,10 @@ def _classified_candidate(
 async def _run(candidates: list[dict]) -> list[dict]:
     """_fetch_all_premarket, notifier.send, db.record_skip 모킹 후 run() 실행."""
     with (
-        patch("src.modules.f1_filter._fetch_all_premarket", new_callable=AsyncMock, return_value=candidates),
+        patch(
+            "src.modules.f1_filter._fetch_all_premarket",
+            new_callable=AsyncMock, return_value=candidates,
+        ),
         patch("src.notifier.send", new_callable=AsyncMock),
         patch("src.db.record_skip", new_callable=AsyncMock),
     ):
@@ -150,7 +153,10 @@ async def test_ranking_candidate_uses_expected_quote_when_valid():
         "expected_gap_pct": 5.0,
         "prev_close": 10000.0,
     }
-    with patch("src.modules.f1_filter._fetch_expected_quote", new_callable=AsyncMock, return_value=quote):
+    with patch(
+        "src.modules.f1_filter._fetch_expected_quote",
+        new_callable=AsyncMock, return_value=quote,
+    ):
         result = await f1_mod._parse_candidate(item)
 
     assert result["gap_pct"] == pytest.approx(0.05)
@@ -182,7 +188,10 @@ async def test_expected_quote_drift_can_promote_candidate_to_high_gap():
         "prev_close": 10000.0,
     }
 
-    with patch("src.modules.f1_filter._fetch_expected_quote", new_callable=AsyncMock, return_value=quote):
+    with patch(
+        "src.modules.f1_filter._fetch_expected_quote",
+        new_callable=AsyncMock, return_value=quote,
+    ):
         result = await f1_mod._parse_candidate(item)
 
     assert result["ranking_gap_pct"] == pytest.approx(0.06)
@@ -205,7 +214,10 @@ async def test_parse_candidate_keeps_kosdaq_label_but_uses_kis_quote_market():
         "acml_vol": "1000",
     }
 
-    with patch("src.modules.f1_filter._fetch_expected_quote", new_callable=AsyncMock, return_value=None) as quote:
+    with patch(
+        "src.modules.f1_filter._fetch_expected_quote",
+        new_callable=AsyncMock, return_value=None,
+    ) as quote:
         result = await f1_mod._parse_candidate(item, "Q")
 
     quote.assert_awaited_once_with("126640", "J")
@@ -224,7 +236,10 @@ async def test_parse_candidate_preserves_unrounded_prev_close_for_replay():
         "acml_vol": "1000",
     }
 
-    with patch("src.modules.f1_filter._fetch_expected_quote", new_callable=AsyncMock, return_value=None):
+    with patch(
+        "src.modules.f1_filter._fetch_expected_quote",
+        new_callable=AsyncMock, return_value=None,
+    ):
         result = await f1_mod._parse_candidate(item)
 
     assert result["prev_close"] == pytest.approx(12345 / 1.037)
@@ -291,7 +306,10 @@ async def test_fetch_all_premarket_waits_between_markets(monkeypatch):
 
 
 async def test_fetch_all_premarket_enriches_expected_quotes_with_limited_concurrency(monkeypatch):
-    """Expected quote enrichment should be concurrent without exceeding the configured slot count."""
+    (
+        "Expected quote enrichment should be concurrent without exceeding the "
+        "configured slot count."
+    )
     monkeypatch.setattr(f1_mod, "F1_EXPECTED_QUOTE_CONCURRENCY", 3)
     active = 0
     max_active = 0
@@ -361,7 +379,10 @@ async def test_fetch_all_premarket_logs_progress_while_fetching(monkeypatch):
 
     with (
         patch("src.api.kis_rest.get", new=fake_get),
-        patch("src.modules.f1_filter._fetch_expected_quote", new_callable=AsyncMock, return_value=None),
+        patch(
+            "src.modules.f1_filter._fetch_expected_quote",
+            new_callable=AsyncMock, return_value=None,
+        ),
         patch("src.modules.f1_filter.F1_MARKET_INTERVAL_SEC", 0),
         patch("src.modules.f1_filter.log", lambda event, **kwargs: events.append((event, kwargs))),
     ):

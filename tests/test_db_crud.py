@@ -3,7 +3,6 @@ import pytest
 
 from src import db
 
-
 # ── 픽스처 ────────────────────────────────────────────────────────────
 
 @pytest.fixture
@@ -68,7 +67,9 @@ async def test_open_trade_reuses_existing_same_day_trade(mem):
     second_id = await db.open_trade("20260623", "000660", 120_000.0, 1)
 
     conn = db.get()
-    async with conn.execute("SELECT COUNT(*) AS cnt FROM trades WHERE date=?", ("20260623",)) as cur:
+    async with conn.execute(
+        "SELECT COUNT(*) AS cnt FROM trades WHERE date=?", ("20260623",)
+    ) as cur:
         row = await cur.fetchone()
 
     assert second_id == first_id

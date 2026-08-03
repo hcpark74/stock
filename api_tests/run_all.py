@@ -34,11 +34,21 @@ async def main() -> None:
     print("=" * 56)
 
     from api_tests import (
-        auth, ccld, balance,
+        auth,
+        balance,
+        ccld,
+    )
+    from api_tests import (
         buy_psbl as buy_psbl_mod,
-        cancel_psbl as cancel_psbl_mod,
-        order as order_mod,
+    )
+    from api_tests import (
         cancel as cancel_mod,
+    )
+    from api_tests import (
+        cancel_psbl as cancel_psbl_mod,
+    )
+    from api_tests import (
+        order as order_mod,
     )
 
     results: dict[str, bool] = {}

@@ -753,7 +753,10 @@ async def test_send_buy_blocked_when_deadline_passes_during_rest_rate_wait(monke
 
 @pytest.mark.asyncio
 async def test_run_single_cash_none_blocks_with_balance_query_failed(monkeypatch):
-    """단일 진입 경로에서도 잔고 조회 실패(None)는 QTY_ZERO가 아니라 BALANCE_QUERY_FAILED로 차단한다."""
+    (
+        "단일 진입 경로에서도 잔고 조회 실패(None)는 QTY_ZERO가 아니라 "
+        "BALANCE_QUERY_FAILED로 차단한다."
+    )
     events = []
     send_buy = AsyncMock()
     _reset_state()
@@ -1021,7 +1024,9 @@ async def test_full_cash_quantity_places_first_buy(monkeypatch):
     monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(1000.0, 970.0)))
     monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=10_000.0))
     monkeypatch.setattr(f3, "_send_buy", send_buy)
-    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1000, "fill_qty": 9}))
+    monkeypatch.setattr(
+        f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1000, "fill_qty": 9})
+    )
     monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=1000))
     monkeypatch.setattr(f3.notifier, "send", AsyncMock())
     monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
@@ -1466,7 +1471,9 @@ async def test_entry_separates_market_order_and_trigger_price(monkeypatch):
         "msg1": "OK",
         "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
     }))
-    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1010, "fill_qty": 9}))
+    monkeypatch.setattr(
+        f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1010, "fill_qty": 9})
+    )
     monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=1010))
     monkeypatch.setattr(f3.notifier, "send", AsyncMock())
     monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
@@ -1588,9 +1595,13 @@ async def test_entry_qty_is_clamped_by_buyable_quantity(monkeypatch):
     monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
     monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(1000.0, 970.0)))
     monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=10_000.0))
-    monkeypatch.setattr(f3, "_fetch_buyable_qty", AsyncMock(return_value=_buyable(qty=5, amt=5_000.0)))
+    monkeypatch.setattr(
+        f3, "_fetch_buyable_qty", AsyncMock(return_value=_buyable(qty=5, amt=5_000.0))
+    )
     monkeypatch.setattr(f3, "_send_buy", send_buy)
-    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1000, "fill_qty": 5}))
+    monkeypatch.setattr(
+        f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1000, "fill_qty": 5})
+    )
     monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=1000))
     monkeypatch.setattr(f3.notifier, "send", AsyncMock())
     monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
@@ -1666,7 +1677,9 @@ async def test_buyable_query_failure_retries_without_day_skip(monkeypatch):
         ]),
     )
     monkeypatch.setattr(f3, "_send_buy", send_buy)
-    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1000, "fill_qty": 9}))
+    monkeypatch.setattr(
+        f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1000, "fill_qty": 9})
+    )
     monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=1000))
     monkeypatch.setattr(f3.notifier, "send", AsyncMock())
     monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
@@ -1750,7 +1763,9 @@ async def test_full_first_entry_skips_pyramid_wait_when_no_second_qty(monkeypatc
             "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
         }),
     )
-    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1000, "fill_qty": 9}))
+    monkeypatch.setattr(
+        f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1000, "fill_qty": 9})
+    )
     monkeypatch.setattr(f3, "_fetch_current_price", fetch_current_price)
     monkeypatch.setattr(f3.notifier, "send", AsyncMock())
     monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
@@ -1908,7 +1923,9 @@ async def test_entry_rechecks_all_candidates_and_picks_one_before_order(monkeypa
     )
     monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
     monkeypatch.setattr(f3, "_send_buy", send_buy)
-    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 10310, "fill_qty": 92}))
+    monkeypatch.setattr(
+        f3, "_poll_fill", AsyncMock(return_value={"fill_price": 10310, "fill_qty": 92})
+    )
     monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=10300))
     monkeypatch.setattr(f3.notifier, "send", AsyncMock())
     monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
@@ -1961,7 +1978,9 @@ async def test_entry_retries_next_candidate_when_order_rejected(monkeypatch):
     )
     monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
     monkeypatch.setattr(f3, "_send_buy", send_buy)
-    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 10400, "fill_qty": 91}))
+    monkeypatch.setattr(
+        f3, "_poll_fill", AsyncMock(return_value={"fill_price": 10400, "fill_qty": 91})
+    )
     monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=10400))
     monkeypatch.setattr(f3.notifier, "send", AsyncMock())
     monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
@@ -2027,7 +2046,9 @@ async def test_entry_retries_next_candidate_when_buyable_quantity_is_zero(monkey
         ]),
     )
     monkeypatch.setattr(f3, "_send_buy", send_buy)
-    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 10400, "fill_qty": 91}))
+    monkeypatch.setattr(
+        f3, "_poll_fill", AsyncMock(return_value={"fill_price": 10400, "fill_qty": 91})
+    )
     monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=10400))
     monkeypatch.setattr(f3.notifier, "send", AsyncMock())
     monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
@@ -2081,7 +2102,9 @@ async def test_candidate_retry_reuses_ranked_candidates_and_refreshes_only_next(
     monkeypatch.setattr(f3, "_fetch_expected_price", fetch_expected)
     monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
     monkeypatch.setattr(f3, "_send_buy", send_buy)
-    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 10400, "fill_qty": 91}))
+    monkeypatch.setattr(
+        f3, "_poll_fill", AsyncMock(return_value={"fill_price": 10400, "fill_qty": 91})
+    )
     monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=10400))
     monkeypatch.setattr(f3.notifier, "send", AsyncMock())
     monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
@@ -2138,7 +2161,9 @@ async def test_candidate_retry_skips_next_candidate_when_freshness_gap_changes(m
     monkeypatch.setattr(f3, "_fetch_expected_price", fetch_expected)
     monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
     monkeypatch.setattr(f3, "_send_buy", send_buy)
-    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 10400, "fill_qty": 91}))
+    monkeypatch.setattr(
+        f3, "_poll_fill", AsyncMock(return_value={"fill_price": 10400, "fill_qty": 91})
+    )
     monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=10400))
     monkeypatch.setattr(f3.notifier, "send", AsyncMock())
     monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
@@ -2168,7 +2193,10 @@ async def test_entry_recheck_uses_candidate_prev_close_when_quote_prev_close_mis
     _reset_state()
     state.get().target_ticker = "GOOD02"
     state.get().target_candidates = [
-        {"ticker": "GOOD02", "prev_close": 10000.0, "gap_pct": 0.031, "expected_amount": 1_000_000.0},
+        {
+            "ticker": "GOOD02", "prev_close": 10000.0, "gap_pct": 0.031,
+            "expected_amount": 1_000_000.0,
+        },
     ]
     send_buy = AsyncMock(return_value={
         "rt_cd": "0",
@@ -2181,7 +2209,9 @@ async def test_entry_recheck_uses_candidate_prev_close_when_quote_prev_close_mis
     monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10310.0, 0.0)))
     monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
     monkeypatch.setattr(f3, "_send_buy", send_buy)
-    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 10310, "fill_qty": 92}))
+    monkeypatch.setattr(
+        f3, "_poll_fill", AsyncMock(return_value={"fill_price": 10310, "fill_qty": 92})
+    )
     monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=10300))
     monkeypatch.setattr(f3.notifier, "send", AsyncMock())
     monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
@@ -2306,7 +2336,10 @@ async def test_candidate_retry_stops_at_deadline(monkeypatch):
     monkeypatch.setattr(f3, "_before_deadline", lambda deadline: next(deadline_checks, False))
     monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10310.0, 10000.0)))
     monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
-    monkeypatch.setattr(f3, "_fetch_buyable_qty", AsyncMock(return_value=_buyable(qty=92, amt=999_999_999.0)))
+    monkeypatch.setattr(
+        f3, "_fetch_buyable_qty",
+        AsyncMock(return_value=_buyable(qty=92, amt=999_999_999.0)),
+    )
     notify = AsyncMock()
     monkeypatch.setattr(f3, "_send_buy", send_buy)
     monkeypatch.setattr(f3.notifier, "send", notify)
@@ -2816,7 +2849,10 @@ async def test_recheck_candidate_exception_blocks_only_that_candidate(monkeypatc
     assert "F3_RECHECK_QUOTE_ERROR" in event_names
     assert "F3_RECHECK_BATCH_TIMING" in event_names
     blocked = [kwargs for event, kwargs in events if event == "F3_ENTRY_BLOCKED"]
-    assert any(item["ticker"] == "BAD001" and item["reason"] == "GAP_RECHECK_UNAVAILABLE" for item in blocked)
+    assert any(
+        item["ticker"] == "BAD001" and item["reason"] == "GAP_RECHECK_UNAVAILABLE"
+        for item in blocked
+    )
 
 
 @pytest.mark.asyncio
@@ -2830,7 +2866,10 @@ async def test_recheck_cash_exception_blocks_with_balance_query_failed(monkeypat
     ]
 
     monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10400.0, 10000.0)))
-    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(side_effect=RuntimeError("balance down")))
+    monkeypatch.setattr(
+        f3, "_fetch_available_cash",
+        AsyncMock(side_effect=RuntimeError("balance down")),
+    )
     monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
     monkeypatch.setattr(f3.notifier, "send", AsyncMock())
     monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
@@ -2891,7 +2930,9 @@ async def test_slippage_guard_allows_fill_when_gap_stays_below_max(monkeypatch):
         "msg1": "OK",
         "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
     }))
-    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1015, "fill_qty": 9}))
+    monkeypatch.setattr(
+        f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1015, "fill_qty": 9})
+    )
     monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=1015))
     monkeypatch.setattr(f3, "_send_sell", send_sell)
     monkeypatch.setattr(f3.notifier, "send", AsyncMock())
@@ -2934,7 +2975,9 @@ async def test_slippage_guard_exits_when_fill_gap_exceeds_max(monkeypatch):
         "msg1": "OK",
         "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
     }))
-    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1045, "fill_qty": 9}))
+    monkeypatch.setattr(
+        f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1045, "fill_qty": 9})
+    )
     monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=1045))
     monkeypatch.setattr(f4_tracking, "close_now", close_guard)
     monkeypatch.setattr(f3.notifier, "send", AsyncMock())
@@ -3009,7 +3052,9 @@ async def test_slippage_guard_allows_fill_in_order_fill_buffer_zone(monkeypatch)
         "msg1": "OK",
         "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
     }))
-    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1037, "fill_qty": 9}))
+    monkeypatch.setattr(
+        f3, "_poll_fill", AsyncMock(return_value={"fill_price": 1037, "fill_qty": 9})
+    )
     monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=1037))
     monkeypatch.setattr(f3, "_send_sell", send_sell)
     monkeypatch.setattr(f3.notifier, "send", AsyncMock())

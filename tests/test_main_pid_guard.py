@@ -20,7 +20,10 @@ def test_write_pid_refuses_when_pid_file_is_locked(tmp_path, monkeypatch):
         handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
         try:
-            monkeypatch.setattr(main.logger, "log", lambda event, **kwargs: events.append((event, kwargs)))
+            monkeypatch.setattr(
+                main.logger, "log",
+                lambda event, **kwargs: events.append((event, kwargs)),
+            )
 
             assert main._write_pid() is False
             handle.seek(0)

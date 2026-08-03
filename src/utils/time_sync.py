@@ -23,10 +23,16 @@ def check_ntp(servers: list[str]) -> float:
             live.ntp_offset_ms = round(offset_ms, 1)
             if offset_ms > NTP_CRIT_MS:
                 live.ntp_level = "CRIT"
-                log("TIME_SYNC_WARN", level="CRIT", ntp_server=server, offset_ms=round(offset_ms, 1))
+                log(
+                    "TIME_SYNC_WARN", level="CRIT", ntp_server=server,
+                    offset_ms=round(offset_ms, 1),
+                )
             elif offset_ms > NTP_WARN_MS:
                 live.ntp_level = "WARN"
-                log("TIME_SYNC_WARN", level="WARN", ntp_server=server, offset_ms=round(offset_ms, 1))
+                log(
+                    "TIME_SYNC_WARN", level="WARN", ntp_server=server,
+                    offset_ms=round(offset_ms, 1),
+                )
             else:
                 live.ntp_level = "OK"
                 log("TIME_SYNC_OK", level="INFO", ntp_server=server, offset_ms=round(offset_ms, 1))

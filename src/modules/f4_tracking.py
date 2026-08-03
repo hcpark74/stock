@@ -551,7 +551,10 @@ async def _trigger_close(price: float, reason: str) -> None:
     global _close_in_progress, _close_in_progress_warned, _closing_task
     if _close_in_progress:
         if not _close_in_progress_warned:
-            log("F4_CLOSE_ALREADY_IN_PROGRESS", level="WARN", ticker=state.get().target_ticker, reason=reason)
+            log(
+                "F4_CLOSE_ALREADY_IN_PROGRESS", level="WARN",
+                ticker=state.get().target_ticker, reason=reason,
+            )
             _close_in_progress_warned = True
         return
 
@@ -565,12 +568,18 @@ async def _trigger_close(price: float, reason: str) -> None:
     try:
         await asyncio.shield(close_task)
     except asyncio.CancelledError:
-        log("F4_CLOSE_CANCEL_REQUESTED", level="CRIT", ticker=state.get().target_ticker, reason=reason)
+        log(
+            "F4_CLOSE_CANCEL_REQUESTED", level="CRIT",
+            ticker=state.get().target_ticker, reason=reason,
+        )
         try:
             await notifier.send(
                 "F4_CLOSE_CANCEL_REQUESTED",
                 level="CRIT",
-                message=f"F4 청산 태스크 취소 요청 감지: {state.get().target_ticker} {reason}. 청산 완료까지 대기합니다.",
+                message=(
+                    f"F4 청산 태스크 취소 요청 감지: {state.get().target_ticker} "
+                    f"{reason}. 청산 완료까지 대기합니다."
+                ),
                 ticker=state.get().target_ticker,
             )
         finally:
@@ -660,7 +669,10 @@ async def _execute_close(price: float, reason: str) -> bool:
             await asyncio.shield(notifier.send(
                 "F4_CLOSE_TASK_CANCELLED",
                 level="CRIT",
-                message=f"F4 청산 태스크 직접 취소 감지: {s.target_ticker} {reason}. KIS 체결/잔고 확인 필요",
+                message=(
+                    f"F4 청산 태스크 직접 취소 감지: {s.target_ticker} "
+                    f"{reason}. KIS 체결/잔고 확인 필요"
+                ),
                 ticker=s.target_ticker,
             ))
         except Exception:

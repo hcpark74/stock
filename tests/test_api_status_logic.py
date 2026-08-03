@@ -124,11 +124,21 @@ def test_pipeline_exiting_is_visible_as_unresolved_close():
 
 
 def test_f3_detail_from_event_labels_internal_reasons():
-    assert status_logic.f3_detail_from_event({"event": "GAP_CHANGED", "reason": "BELOW_MIN"}) == "갭 하한 미달"
-    assert status_logic.f3_detail_from_event({"event": "GAP_CHANGED", "reason": "ABOVE_MAX"}) == "갭 상한 초과"
-    assert status_logic.f3_detail_from_event({"event": "F3_ENTRY_BLOCKED", "reason": "GAP_RECHECK_UNAVAILABLE"}) == "진입 전 갭 재검증 불가"
-    assert status_logic.f3_detail_from_event({"event": "F3_ENTRY_BLOCKED", "reason": "BUYABLE_QTY_ZERO"}) == "매수가능수량 0"
-    assert status_logic.f3_detail_from_event({"event": "F3_ENTRY_BLOCKED", "reason": "BUYABLE_QTY_QUERY_FAILED"}) == "매수가능수량 조회 실패"
+    assert status_logic.f3_detail_from_event(
+        {"event": "GAP_CHANGED", "reason": "BELOW_MIN"}
+    ) == "갭 하한 미달"
+    assert status_logic.f3_detail_from_event(
+        {"event": "GAP_CHANGED", "reason": "ABOVE_MAX"}
+    ) == "갭 상한 초과"
+    assert status_logic.f3_detail_from_event(
+        {"event": "F3_ENTRY_BLOCKED", "reason": "GAP_RECHECK_UNAVAILABLE"}
+    ) == "진입 전 갭 재검증 불가"
+    assert status_logic.f3_detail_from_event(
+        {"event": "F3_ENTRY_BLOCKED", "reason": "BUYABLE_QTY_ZERO"}
+    ) == "매수가능수량 0"
+    assert status_logic.f3_detail_from_event(
+        {"event": "F3_ENTRY_BLOCKED", "reason": "BUYABLE_QTY_QUERY_FAILED"}
+    ) == "매수가능수량 조회 실패"
 
 
 def test_f3_detail_from_event_summarizes_final_pick():
