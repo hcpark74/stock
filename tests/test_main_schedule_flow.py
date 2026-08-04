@@ -46,7 +46,7 @@ async def test_restore_market_closed_from_db_sets_flag_and_day_skip(tmp_path):
         today = main._today()
         await db.record_skip(today, "MARKET_CLOSED", "msg_cd=40100000")
 
-        await main._restore_market_closed_from_db()
+        await main._restore_daily_skip_from_db()
 
         assert main._is_market_closed_today() is True
         assert state_mod.get().day_skip is True
@@ -64,7 +64,7 @@ async def test_restore_vi_active_day_skip_without_market_closed_flag(tmp_path):
     try:
         await db.record_skip(main._today(), "VI_ACTIVE", "cntg_vi_hour=090032,vi_kind=2")
 
-        await main._restore_market_closed_from_db()
+        await main._restore_daily_skip_from_db()
 
         assert state_mod.get().day_skip is True
         assert state_mod.get().close_reason == "VI_ACTIVE"
@@ -73,14 +73,39 @@ async def test_restore_vi_active_day_skip_without_market_closed_flag(tmp_path):
         await db.close()
 
 
-async def test_restore_market_closed_ignores_other_skip_reasons(tmp_path):
+@pytest.mark.parametrize("reason", ["ENTRY_FAIL", "GAP_CHANGED", "SLIPPAGE_GUARD", "MANUAL"])
+async def test_restore_terminal_skip_sets_day_skip_without_market_flag(tmp_path, reason):
+    """당일 종료 스킵(ENTRY_FAIL/GAP_CHANGED/SLIPPAGE_GUARD/MANUAL)은 재시작 시
+    day_skip을 복원해 재진입을 막는다. 휴장 플래그는 세우지 않는다.
+
+    이전에는 디스크의 잔여 ENTERING이 우연히 재진입을 막았으나, 종료 상태를
+    IDLE로 durable하게 정정하면서 그 우연한 방어가 사라져 명시적 복원이 필요하다.
+    """
     from src import db
 
-    await db.init(str(tmp_path / "restore2.db"))
+    await db.init(str(tmp_path / f"restore_{reason}.db"))
     try:
-        await db.record_skip(main._today(), "ENTRY_FAIL", "reason=NO_REMAINING_CANDIDATE")
+        await db.record_skip(main._today(), reason, "detail")
 
-        await main._restore_market_closed_from_db()
+        await main._restore_daily_skip_from_db()
+
+        assert state_mod.get().day_skip is True
+        assert state_mod.get().close_reason == reason
+        assert main._is_market_closed_today() is False
+    finally:
+        await db.close()
+
+
+async def test_restore_no_target_does_not_block_reentry(tmp_path):
+    """NO_TARGET은 주문·포지션이 없었던 경우 — catch-up이 F1을 다시 돌려
+    후보를 찾을 수 있어야 하므로 day_skip을 복원하지 않는다 (기존 동작 보존)."""
+    from src import db
+
+    await db.init(str(tmp_path / "restore_no_target.db"))
+    try:
+        await db.record_skip(main._today(), "NO_TARGET", "gap_filtered=0")
+
+        await main._restore_daily_skip_from_db()
 
         assert main._is_market_closed_today() is False
         assert state_mod.get().day_skip is False
@@ -401,6 +426,95 @@ async def test_paper_fast_balance_prefetch_is_cancelled_before_open_guard(monkey
 
 
 async def test_job_f1_uses_fast_candidates_when_hybrid_enabled(monkeypatch):
+    fast = [
+        {"ticker": "005930", "gap_pct": 0.034, "gap_allowed": True},
+        {"ticker": "000660", "gap_pct": 0.041, "gap_allowed": True},
+    ]
+    monkeypatch.setattr(
+        main,
+        "_skip_entry_pipeline_if_trade_exists",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        main.paper_fast_probe,
+        "observe_open_boundary",
+        AsyncMock(return_value=fast),
+    )
+    monkeypatch.setattr(main.paper_fast_probe, "hybrid_enabled", lambda: True)
+    monkeypatch.setattr(main.paper_fast_probe, "open_quality_ok", lambda: True)
+    save_snapshot = MagicMock()
+    monkeypatch.setattr(main.f1_filter, "save_candidate_snapshot", save_snapshot)
+    legacy = AsyncMock(return_value=[{"ticker": "000001"}])
+    monkeypatch.setattr(main.f1_filter, "run", legacy)
+    chained = AsyncMock()
+    monkeypatch.setattr(main, "_run_f2_f3_after_f1", chained)
+
+    await main.job_f1()
+
+    legacy.assert_not_awaited()
+    assert main._f1_result == fast
+    save_snapshot.assert_called_once_with(fast)
+    chained.assert_awaited_once()
+
+
+async def test_job_f1_falls_back_on_incomplete_probe_and_merges_fast_candidates(monkeypatch):
+    fast = [
+        {"ticker": "005930", "gap_pct": 0.034, "gap_allowed": True},
+        {"ticker": "000660", "gap_pct": 0.041, "gap_allowed": True},
+    ]
+    legacy_result = [{"ticker": "035420", "gap_pct": 0.052, "gap_allowed": True}]
+    events = []
+    monkeypatch.setattr(
+        main,
+        "_skip_entry_pipeline_if_trade_exists",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        main.paper_fast_probe,
+        "observe_open_boundary",
+        AsyncMock(return_value=fast),
+    )
+    monkeypatch.setattr(main.paper_fast_probe, "hybrid_enabled", lambda: True)
+    monkeypatch.setattr(main.paper_fast_probe, "open_quality_ok", lambda: False)
+    monkeypatch.setattr(
+        main.paper_fast_probe,
+        "get_last_open_quality",
+        lambda: {"ok": False, "reason": "MISSING_TICKERS"},
+    )
+    merged = fast + legacy_result
+    monkeypatch.setattr(
+        main.paper_fast_probe,
+        "merge_candidates",
+        lambda fast_rows, legacy_rows: merged,
+    )
+    save_snapshot = MagicMock()
+    monkeypatch.setattr(main.f1_filter, "save_candidate_snapshot", save_snapshot)
+    legacy = AsyncMock(return_value=legacy_result)
+    monkeypatch.setattr(main.f1_filter, "run", legacy)
+    monkeypatch.setattr(main.paper_fast_probe, "compare_with_legacy", MagicMock())
+    monkeypatch.setattr(
+        main.logger,
+        "log",
+        lambda event, **fields: events.append((event, fields)),
+    )
+    chained = AsyncMock()
+    monkeypatch.setattr(main, "_run_f2_f3_after_f1", chained)
+
+    await main.job_f1()
+
+    legacy.assert_awaited_once_with(terminal_on_empty=False)
+    assert main._f1_result == merged
+    save_snapshot.assert_called_once_with(merged)
+    assert any(
+        event == "PAPER_FAST_PATH_FALLBACK"
+        and fields.get("candidate_count") == 2
+        and fields.get("reason") == "MISSING_TICKERS"
+        for event, fields in events
+    )
+    chained.assert_awaited_once()
+
+
+async def test_job_f1_preserves_fast_candidates_when_legacy_fallback_is_empty(monkeypatch):
     fast = [{"ticker": "005930", "gap_pct": 0.034, "gap_allowed": True}]
     monkeypatch.setattr(
         main,
@@ -413,16 +527,29 @@ async def test_job_f1_uses_fast_candidates_when_hybrid_enabled(monkeypatch):
         AsyncMock(return_value=fast),
     )
     monkeypatch.setattr(main.paper_fast_probe, "hybrid_enabled", lambda: True)
+    monkeypatch.setattr(main.paper_fast_probe, "open_quality_ok", lambda: False)
+    monkeypatch.setattr(
+        main.paper_fast_probe,
+        "get_last_open_quality",
+        lambda: {"ok": False, "reason": "INVALID_ASK"},
+    )
+    monkeypatch.setattr(
+        main.paper_fast_probe,
+        "merge_candidates",
+        lambda fast_rows, legacy_rows: fast,
+    )
+    legacy = AsyncMock(return_value=[])
+    monkeypatch.setattr(main.f1_filter, "run", legacy)
     save_snapshot = MagicMock()
     monkeypatch.setattr(main.f1_filter, "save_candidate_snapshot", save_snapshot)
-    legacy = AsyncMock(return_value=[{"ticker": "000001"}])
-    monkeypatch.setattr(main.f1_filter, "run", legacy)
+    monkeypatch.setattr(main.paper_fast_probe, "compare_with_legacy", MagicMock())
+    monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
     chained = AsyncMock()
     monkeypatch.setattr(main, "_run_f2_f3_after_f1", chained)
 
     await main.job_f1()
 
-    legacy.assert_not_awaited()
+    legacy.assert_awaited_once_with(terminal_on_empty=False)
     assert main._f1_result == fast
     save_snapshot.assert_called_once_with(fast)
     chained.assert_awaited_once()

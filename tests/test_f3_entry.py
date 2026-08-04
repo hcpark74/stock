@@ -1,3 +1,5 @@
+import os as _os
+from datetime import timedelta as _timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -250,8 +252,9 @@ def test_entry_fill_deadline_is_relative_to_now(monkeypatch):
     monkeypatch.setattr(f3, "F3_ENTRY_FIRST_FILL_SEC", 12.0)
 
     now = f3.datetime.now(f3.KST)
-    deadline = f3._deadline_datetime(f3._entry_fill_deadline(attempt=1, force=False))
+    deadline = f3._entry_fill_deadline(attempt=1, force=False)
 
+    assert isinstance(deadline, f3.datetime)
     assert deadline > now
     assert (deadline - now).total_seconds() <= 13
 
@@ -260,8 +263,9 @@ def test_entry_first_fill_deadline_uses_wider_initial_window(monkeypatch):
     monkeypatch.setattr(f3, "F3_ENTRY_FIRST_FILL_SEC", 12.0)
 
     now = f3.datetime.now(f3.KST)
-    first_deadline = f3._deadline_datetime(f3._entry_fill_deadline(attempt=1, force=False))
+    first_deadline = f3._entry_fill_deadline(attempt=1, force=False)
 
+    assert isinstance(first_deadline, f3.datetime)
     assert 10 <= (first_deadline - now).total_seconds() <= 13
 
 @pytest.mark.asyncio
@@ -2546,8 +2550,7 @@ async def test_entry_fail_uses_last_run_attempt_when_retry_skipped(monkeypatch):
 @pytest.mark.asyncio
 async def test_poll_fill_updates_summary_from_kis_response(monkeypatch):
     events = []
-    future = f3.datetime.now(f3.KST) + f3.timedelta(seconds=30)
-    deadline = (future.hour, future.minute, future.second)
+    deadline = f3.datetime.now(f3.KST) + f3.timedelta(seconds=30)
 
     monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
     monkeypatch.setattr(
@@ -3214,7 +3217,7 @@ async def test_entry_proceeds_when_vi_check_fails(monkeypatch):
 async def test_all_candidates_vi_active_records_vi_active(monkeypatch):
     """모든 후보가 VI로만 소진되면 최종 사유도 VI_ACTIVE로 기록한다.
 
-    시작 복원(main._restore_market_closed_from_db)은 VI_ACTIVE만 복원하므로
+    시작 복원(main._restore_daily_skip_from_db)은 VI/ENTRY_FAIL을 구분 복원하므로
     ENTRY_FAIL로 남기면 재시작 catch-up이 VI 해제가에 추격 진입할 수 있다."""
     events = []
     _reset_state()
@@ -3251,7 +3254,7 @@ async def test_all_candidates_vi_active_records_vi_active(monkeypatch):
     send_buy.assert_not_awaited()
     assert state.get().day_skip is True
     assert state.get().close_reason == "VI_ACTIVE"
-    skipped = [kwargs for event, kwargs in events if event == "ENTRY_CANDIDATE_RETRY_SKIPPED"]
+    skipped = [kwargs for event, kwargs in events if event == "ENTRY_CANDIDATE_EXHAUSTED"]
     assert skipped and skipped[-1]["reason"] == "NO_REMAINING_CANDIDATE"
     f3.db.record_skip.assert_awaited_once()
     assert f3.db.record_skip.await_args.args[1] == "VI_ACTIVE"
@@ -4089,3 +4092,433 @@ async def test_fetch_expected_price_accepts_legit_post_open_zero_gap(monkeypatch
 
     assert result == (3865.0, 3865.0)
     assert get.await_count == 1
+
+
+# ── 회귀: 종료 상태 영속화 (2026-08-04 인시던트) ────────────────────────
+@pytest.mark.asyncio
+async def test_reset_to_idle_persisted_writes_idle_to_disk(monkeypatch):
+    """안전한 종료 경로는 인메모리 IDLE을 디스크에도 durable하게 반영해야 한다."""
+    _reset_state()
+    s = state.get()
+    s.position_status = "ENTERING"
+    s.pending_entry = {"order_id": "X", "ticker": "006340", "requested_qty": 10}
+    monkeypatch.setattr(f3, "log", lambda *a, **k: None)
+    # 먼저 ENTERING을 디스크에 기록 (인시던트의 취소 후 persist 상황 재현)
+    await f3.state.persist(_os.environ["STATE_DIR"], f3._today())
+
+    ok = await f3._reset_to_idle_persisted("ENTRY_FAIL")
+
+    assert ok is True
+    assert state.get().position_status == "IDLE"
+    loaded = f3.state.load(_os.environ["STATE_DIR"])
+    assert loaded is not None
+    assert loaded["position_status"] == "IDLE"
+    assert loaded["pending_entry"] is None
+
+
+@pytest.mark.asyncio
+async def test_reset_to_idle_persisted_failure_is_fail_closed(monkeypatch):
+    """종료 상태 영속화가 실패하면 성공을 가장하지 않고 fail-closed 처리한다."""
+    _reset_state()
+    state.get().position_status = "ENTERING"
+    events = []
+    notes = []
+    monkeypatch.setattr(f3, "log", lambda event, **k: events.append((event, k)))
+
+    async def _capture_send(*a, **k):
+        notes.append((a, k))
+
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock(side_effect=_capture_send))
+    monkeypatch.setattr(
+        f3.state, "persist", AsyncMock(side_effect=RuntimeError("disk full"))
+    )
+
+    ok = await f3._reset_to_idle_persisted("ENTRY_FAIL")
+
+    assert ok is False
+    # 인메모리는 IDLE 유지, 신규 진입은 차단, CRIT 기록/통지 — 디스크 ENTERING은
+    # 재시작 시 fail-closed로 걸린다.
+    assert state.get().position_status == "IDLE"
+    assert state.get().day_skip is True
+    crit = [k for e, k in events if e == "ENTRY_TERMINAL_PERSIST_ERROR"]
+    assert crit and crit[0]["level"] == "CRIT"
+    # 기존 pending/취소 미확인 이벤트를 재사용하지 않는다
+    assert "ENTRY_PENDING_PERSIST_ERROR" not in [e for e, _ in events]
+    assert any(a and a[0] == "ENTRY_TERMINAL_PERSIST_ERROR" for a, _ in notes)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_then_gap_change_persists_idle_to_disk(monkeypatch):
+    """인시던트 경로: 주문 접수→미체결 취소→다음 시도 갭변동 거절 시
+    디스크 상태가 ENTERING으로 남지 않고 IDLE로 durable하게 정정돼야 한다."""
+    _reset_state()
+    monkeypatch.setattr(f3, "F3_LIMIT_BUY_ENABLED", True)
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(f3, "F3_ENTRY_RETRY_DELAY_SEC", 0)
+    monkeypatch.setattr(f3, "F3_ENTRY_CANCEL_RELEASE_WAIT_SEC", 0)
+    monkeypatch.setattr(f3, "log", lambda *a, **k: None)
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(
+        f3, "_fetch_expected_price", AsyncMock(return_value=(10_300.0, 10_000.0))
+    )
+    monkeypatch.setattr(
+        f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0)
+    )
+
+    def _quote(ask):
+        return f3.EntryQuote(
+            ask_price=ask, ask_qty=100, antc_price=0,
+            fetched_monotonic=f3.time.monotonic(),
+            rt_cd="0", msg_cd="MCA00000", msg1="OK",
+        )
+
+    monkeypatch.setattr(
+        f3, "_fetch_final_entry_quote",
+        AsyncMock(side_effect=[_quote(10_300), _quote(10_700)]),
+    )
+    monkeypatch.setattr(
+        f3, "_send_buy",
+        AsyncMock(return_value={
+            "rt_cd": "0", "msg_cd": "MCA00000", "msg1": "OK",
+            "output": {"ODNO": "0000000796", "KRX_FWDG_ORD_ORGNO": "001"},
+        }),
+    )
+    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        f3, "_cancel_entry_order_confirmed",
+        AsyncMock(return_value=("CANCELLED", None)),
+    )
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    # state.persist는 실제 구현을 사용 (디스크 검증 목적)
+
+    await f3.run()
+
+    assert state.get().position_status == "IDLE"
+    assert state.get().close_reason == "GAP_CHANGED"
+    assert state.get().day_skip is True
+    loaded = f3.state.load(_os.environ["STATE_DIR"])
+    assert loaded is not None
+    assert loaded["position_status"] == "IDLE"
+    assert loaded["pending_entry"] is None
+
+
+# ── 회귀: 체결 폴링의 정밀 마감·적응형 대기 ──────────────────────────────
+def _install_fake_clock(monkeypatch, start, query_cost_sec):
+    clock = {"now": start}
+    query_starts = []
+
+    fake_dt = MagicMock()
+    fake_dt.now.side_effect = lambda tz=None: clock["now"]
+    monkeypatch.setattr(f3, "datetime", fake_dt)
+
+    async def fake_snapshot(order_id, **kwargs):
+        query_starts.append(clock["now"])
+        clock["now"] = clock["now"] + _timedelta(seconds=query_cost_sec)
+        return None
+
+    monkeypatch.setattr(f3, "_fetch_order_fill_snapshot", fake_snapshot)
+
+    async def fake_sleep(secs):
+        clock["now"] = clock["now"] + _timedelta(seconds=secs)
+
+    monkeypatch.setattr(f3.asyncio, "sleep", AsyncMock(side_effect=fake_sleep))
+    monkeypatch.setattr(f3, "log", lambda *a, **k: None)
+    return clock, query_starts
+
+
+@pytest.mark.asyncio
+async def test_poll_fill_precise_deadline_allows_second_poll(monkeypatch):
+    """2초 마감이 절삭/무조건 1초 대기 때문에 1회 폴링으로 굳어지면 안 된다."""
+    start = f3.datetime.now(f3.KST)
+    deadline = start + _timedelta(seconds=2.0)
+    _clock, query_starts = _install_fake_clock(monkeypatch, start, query_cost_sec=0.3)
+
+    fill = await f3._poll_fill("O1", deadline=deadline, ticker="006340", expected_qty=10)
+
+    assert fill is None
+    assert len(query_starts) >= 2
+    assert all(t < deadline for t in query_starts)
+
+
+@pytest.mark.asyncio
+async def test_poll_fill_never_starts_query_at_or_after_deadline(monkeypatch):
+    """마감에 도달/초과한 뒤에는 신규 체결조회를 시작하지 않는다 (노출창 미연장)."""
+    start = f3.datetime.now(f3.KST)
+    deadline = start + _timedelta(seconds=2.0)
+    # 느린 조회(1.5초) — 두 번째 대기 후 마감을 넘어서므로 재조회 금지
+    _clock, query_starts = _install_fake_clock(monkeypatch, start, query_cost_sec=1.5)
+
+    fill = await f3._poll_fill("O1", deadline=deadline, ticker="006340", expected_qty=10)
+
+    assert fill is None
+    assert len(query_starts) == 1
+    assert all(t < deadline for t in query_starts)
+    assert f3._last_fill_poll_summary["poll_attempts"] == 1
+    assert f3._last_fill_poll_summary["poll_deadline"] == deadline.strftime("%H:%M:%S")
+
+
+@pytest.mark.asyncio
+async def test_poll_fill_returns_partial_on_timeout(monkeypatch):
+    """마감 시 확인된 부분체결 요약/반환 시맨틱을 보존한다."""
+    start = f3.datetime.now(f3.KST)
+    deadline = start + _timedelta(seconds=2.0)
+    clock = {"now": start}
+
+    fake_dt = MagicMock()
+    fake_dt.now.side_effect = lambda tz=None: clock["now"]
+    monkeypatch.setattr(f3, "datetime", fake_dt)
+    monkeypatch.setattr(f3, "log", lambda *a, **k: None)
+
+    partial = {"status": "PARTIAL", "order_qty": 10, "fill_qty": 4,
+               "remaining_qty": 6, "fill_price": 10_500}
+
+    async def fake_snapshot(order_id, **kwargs):
+        clock["now"] = clock["now"] + _timedelta(seconds=0.3)
+        return partial
+
+    monkeypatch.setattr(f3, "_fetch_order_fill_snapshot", fake_snapshot)
+
+    async def fake_sleep(secs):
+        clock["now"] = clock["now"] + _timedelta(seconds=secs)
+
+    monkeypatch.setattr(f3.asyncio, "sleep", AsyncMock(side_effect=fake_sleep))
+
+    fill = await f3._poll_fill("O1", deadline=deadline, ticker="006340", expected_qty=10)
+
+    assert fill == partial
+
+
+# ── 회귀: 후보 소진 이벤트 분리 ──────────────────────────────────────────
+def test_entry_candidate_exhausted_has_accurate_label():
+    from src.utils.logger import event_label
+    label = event_label("ENTRY_CANDIDATE_EXHAUSTED")
+    assert label != "ENTRY_CANDIDATE_EXHAUSTED(ENTRY_CANDIDATE_EXHAUSTED)"
+    assert "마감" not in label  # 소진은 마감초과와 구분돼야 한다
+
+
+# ── 회귀 (correction round 1): 종료 close_reason 디스크/메모리 일치 ──────
+def _limit_quote(ask, *, age_sec=0.0):
+    return f3.EntryQuote(
+        ask_price=ask, ask_qty=100, antc_price=0,
+        fetched_monotonic=f3.time.monotonic() - age_sec,
+        rt_cd="0", msg_cd="MCA00000", msg1="OK",
+    )
+
+
+@pytest.mark.asyncio
+async def test_buyable_qty_zero_persists_final_close_reason(monkeypatch):
+    """BUYABLE_QTY_ZERO 비-후보재시도 종료: 디스크 close_reason이 최종 메모리
+    값(INSUFFICIENT_BALANCE)과 일치해야 한다 (ENTRY_FAIL로 굳으면 안 된다)."""
+    _reset_state()
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(f3, "log", lambda *a, **k: None)
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(
+        f3, "_fetch_expected_price", AsyncMock(return_value=(10_300.0, 10_000.0))
+    )
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(
+        f3, "_fetch_buyable_qty",
+        AsyncMock(return_value={
+            "nrcvb_buy_qty": 0, "nrcvb_buy_amt": 0.0,
+            "max_buy_qty": 0, "max_buy_amt": 0.0, "ord_psbl_cash": 0.0,
+        }),
+    )
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3.run()
+
+    assert state.get().position_status == "IDLE"
+    assert state.get().close_reason == "INSUFFICIENT_BALANCE"
+    loaded = f3.state.load(_os.environ["STATE_DIR"])
+    assert loaded is not None
+    assert loaded["position_status"] == "IDLE"
+    assert loaded["close_reason"] == state.get().close_reason
+
+
+@pytest.mark.asyncio
+async def test_qty_zero_at_limit_persists_final_close_reason(monkeypatch):
+    """지정가 예산 기준 수량 0 비-후보재시도 종료도 디스크 close_reason이
+    최종 메모리 값(INSUFFICIENT_BALANCE)과 일치해야 한다."""
+    _reset_state()
+    monkeypatch.setattr(f3, "F3_LIMIT_BUY_ENABLED", True)
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(f3, "log", lambda *a, **k: None)
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(
+        f3, "_fetch_expected_price", AsyncMock(return_value=(10_300.0, 10_000.0))
+    )
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(
+        f3, "_fetch_buyable_qty",
+        AsyncMock(return_value={
+            "nrcvb_buy_qty": 999_999, "nrcvb_buy_amt": 9.9e8,
+            "max_buy_qty": 999_999, "max_buy_amt": 9.9e8,
+            "ord_psbl_cash": 100.0,  # 지정가 기준 예산 부족 → limit_buyable_qty=0
+        }),
+    )
+    monkeypatch.setattr(
+        f3, "_fetch_final_entry_quote", AsyncMock(return_value=_limit_quote(10_300))
+    )
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3.run()
+
+    assert state.get().position_status == "IDLE"
+    assert state.get().close_reason == "INSUFFICIENT_BALANCE"
+    loaded = f3.state.load(_os.environ["STATE_DIR"])
+    assert loaded is not None
+    assert loaded["close_reason"] == state.get().close_reason
+
+
+@pytest.mark.asyncio
+async def test_final_quote_stale_persists_entry_fail_close_reason(monkeypatch):
+    """FINAL_QUOTE_STALE 비-후보재시도 종료: 최종 메모리 close_reason은
+    ENTRY_FAIL이며 디스크도 동일해야 한다 (FINAL_QUOTE_STALE로 굳으면 안 된다)."""
+    _reset_state()
+    monkeypatch.setattr(f3, "F3_LIMIT_BUY_ENABLED", True)
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(f3, "F3_FINAL_QUOTE_MAX_AGE_MS", 1_500)
+    monkeypatch.setattr(f3, "log", lambda *a, **k: None)
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(
+        f3, "_fetch_expected_price", AsyncMock(return_value=(10_300.0, 10_000.0))
+    )
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(
+        f3, "_fetch_final_entry_quote",
+        AsyncMock(return_value=_limit_quote(10_300, age_sec=100.0)),
+    )
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3.run()
+
+    assert state.get().position_status == "IDLE"
+    assert state.get().close_reason == "ENTRY_FAIL"
+    loaded = f3.state.load(_os.environ["STATE_DIR"])
+    assert loaded is not None
+    assert loaded["close_reason"] == state.get().close_reason
+
+
+@pytest.mark.asyncio
+async def test_final_quote_gap_changed_persists_matching_close_reason(monkeypatch):
+    """최종 호가 갭변동 비-후보재시도 종료: 디스크 close_reason이 메모리와 일치."""
+    _reset_state()
+    monkeypatch.setattr(f3, "F3_LIMIT_BUY_ENABLED", True)
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(f3, "log", lambda *a, **k: None)
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(
+        f3, "_fetch_expected_price", AsyncMock(return_value=(10_300.0, 10_000.0))
+    )
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    # 최종 호가 갭 7% → 주문 전 GAP_CHANGED
+    monkeypatch.setattr(
+        f3, "_fetch_final_entry_quote", AsyncMock(return_value=_limit_quote(10_700))
+    )
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3.run()
+
+    assert state.get().position_status == "IDLE"
+    assert state.get().close_reason == "GAP_CHANGED"
+    loaded = f3.state.load(_os.environ["STATE_DIR"])
+    assert loaded is not None
+    assert loaded["close_reason"] == state.get().close_reason
+
+
+# ── 회귀 (correction round 1): 취소 미확인 시 디스크 ENTERING+pending 유지 ──
+@pytest.mark.asyncio
+async def test_cancel_unconfirmed_keeps_entering_pending_on_disk(monkeypatch):
+    """취소 미확인(UNCERTAIN)일 때 주문 접수 후 디스크에 기록된 ENTERING+pending
+    식별자가 그대로 남아야 한다 — IDLE로 되돌리면 중복 포지션 위험."""
+    _reset_state()
+    monkeypatch.setattr(f3, "F3_LIMIT_BUY_ENABLED", True)
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(f3, "log", lambda *a, **k: None)
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(
+        f3, "_fetch_expected_price", AsyncMock(return_value=(10_300.0, 10_000.0))
+    )
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(
+        f3, "_fetch_final_entry_quote", AsyncMock(return_value=_limit_quote(10_300))
+    )
+    monkeypatch.setattr(
+        f3, "_send_buy",
+        AsyncMock(return_value={
+            "rt_cd": "0", "msg_cd": "MCA00000", "msg1": "OK",
+            "output": {"ODNO": "0000000796", "KRX_FWDG_ORD_ORGNO": "001"},
+        }),
+    )
+    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        f3, "_cancel_entry_order_confirmed",
+        AsyncMock(return_value=("UNCERTAIN", None)),
+    )
+    # 취소 미확인 → pending 복구 경로. 복구를 no-op로 두어 접수 시 디스크 상태를 검증.
+    recover = AsyncMock(return_value=False)
+    monkeypatch.setattr(f3, "recover_pending_entry", recover)
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3.run()
+
+    recover.assert_awaited_once()
+    assert state.get().position_status == "ENTERING"
+    assert state.get().day_skip is True
+    loaded = f3.state.load(_os.environ["STATE_DIR"])
+    assert loaded is not None
+    assert loaded["position_status"] == "ENTERING"
+    assert loaded["pending_entry"] is not None
+    assert loaded["pending_entry"]["order_id"] == "0000000796"
+
+
+# ── 회귀 (correction round 1): 정밀 datetime 마감 헬퍼 ───────────────────
+def test_fill_deadline_helpers_return_precise_datetime(monkeypatch):
+    monkeypatch.setattr(f3, "F3_ENTRY_FIRST_FILL_SEC", 12.0)
+    monkeypatch.setattr(f3, "F3_ENTRY_RETRY_FILL_SEC", 8.0)
+    monkeypatch.setattr(f3, "F3_PYRAMID_FILL_SEC", 10.0)
+    now = f3.datetime.now(f3.KST)
+
+    first = f3._entry_fill_deadline(attempt=1, force=False)
+    retry = f3._entry_fill_deadline(attempt=2, force=False)
+    forced = f3._entry_fill_deadline(attempt=1, force=True)
+    pyramid = f3._pyramid_fill_deadline()
+
+    for d in (first, retry, forced, pyramid):
+        assert isinstance(d, f3.datetime)
+    # 초 단위 절삭이 없어야 한다: now+duration과 오차 0.5초 이내
+    assert abs((first - (now + f3.timedelta(seconds=12.0))).total_seconds()) < 0.5
+    assert abs((pyramid - (now + f3.timedelta(seconds=10.0))).total_seconds()) < 0.5
+    # 재시도 마감은 min(now+duration, 스케줄 마감)
+    assert retry <= f3._deadline_datetime(f3._entry_retry_deadline())
+
+
+# ── 회귀 (correction round 1): 종료 재영속화 실패도 통지 ──────────────────
+@pytest.mark.asyncio
+async def test_persist_terminal_or_log_failure_notifies(monkeypatch):
+    _reset_state()
+    events = []
+    notes = []
+    monkeypatch.setattr(f3, "log", lambda event, **k: events.append((event, k)))
+
+    async def _capture_send(*a, **k):
+        notes.append((a, k))
+
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock(side_effect=_capture_send))
+    monkeypatch.setattr(
+        f3.state, "persist", AsyncMock(side_effect=RuntimeError("disk full"))
+    )
+
+    ok = await f3._persist_terminal_or_log("ENTRY_FAIL")
+
+    assert ok is False
+    crit = [k for e, k in events if e == "ENTRY_TERMINAL_PERSIST_ERROR"]
+    assert crit and crit[0]["level"] == "CRIT"
+    assert any(a and a[0] == "ENTRY_TERMINAL_PERSIST_ERROR" for a, _ in notes)

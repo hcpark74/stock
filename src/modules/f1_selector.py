@@ -154,23 +154,41 @@ def f1_score(candidate: dict) -> float:
     return round(score, 4)
 
 
-def _passes_selection_floor(candidate: dict) -> bool:
+def selection_rejection_reason(candidate: dict) -> str | None:
+    """Return the first selector-floor rejection reason, or ``None`` when accepted."""
     gap = float(candidate.get("gap_pct") or 0.0)
     amount = expected_amount(candidate)
     surge = volume_surge(candidate)
     vi_gap = candidate.get("vi_gap")
 
     if not gap_allowed(candidate):
-        return False
+        return "GAP"
     if amount < MIN_EXPECTED_AMOUNT:
-        return False
+        return "EXPECTED_AMOUNT"
     if surge < MIN_VOLUME_SURGE:
-        return False
+        return "VOLUME_SURGE"
     if vi_gap is not None and vi_gap < MIN_VI_GAP:
-        return False
-    if gap >= GAP_CORE_MAX:
-        return high_gap_allowed(candidate)
-    return True
+        return "VI_GAP"
+    if gap >= GAP_CORE_MAX and not high_gap_allowed(candidate):
+        return "HIGH_GAP"
+    return None
+
+
+def selection_stats(candidates: list[dict]) -> dict[str, int]:
+    reasons = [selection_rejection_reason(candidate) for candidate in candidates]
+    return {
+        "filter_total_count": len(candidates),
+        "filter_pass_count": sum(reason is None for reason in reasons),
+        "filter_gap_rejected_count": reasons.count("GAP"),
+        "filter_amount_rejected_count": reasons.count("EXPECTED_AMOUNT"),
+        "filter_volume_rejected_count": reasons.count("VOLUME_SURGE"),
+        "filter_vi_rejected_count": reasons.count("VI_GAP"),
+        "filter_high_gap_rejected_count": reasons.count("HIGH_GAP"),
+    }
+
+
+def _passes_selection_floor(candidate: dict) -> bool:
+    return selection_rejection_reason(candidate) is None
 
 
 def high_gap_allowed(candidate: dict) -> bool:

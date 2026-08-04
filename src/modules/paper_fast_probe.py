@@ -34,6 +34,7 @@ PREOPEN_MARKETS = (
 _prepared_tickers: list[str] = []
 _prepared_candidates: list[dict] = []
 _open_candidates: list[dict] = []
+_last_open_quality: dict[str, Any] = {"ok": False, "reason": "NOT_RUN"}
 
 
 def enabled() -> bool:
@@ -57,9 +58,9 @@ def hybrid_enabled() -> bool:
 
 def _shadow_top_n() -> int:
     try:
-        return max(1, min(30, int(os.getenv("PAPER_FAST_SHADOW_TOP_N", "10"))))
+        return max(1, min(30, int(os.getenv("PAPER_FAST_SHADOW_TOP_N", "30"))))
     except ValueError:
-        return 10
+        return 30
 
 
 def _probe_dir() -> Path:
@@ -606,6 +607,34 @@ def get_open_candidates() -> list[dict]:
     return [dict(candidate) for candidate in _open_candidates]
 
 
+def get_last_open_quality() -> dict[str, Any]:
+    return dict(_last_open_quality)
+
+
+def open_quality_ok() -> bool:
+    return _last_open_quality.get("ok") is True
+
+
+def merge_candidates(fast_candidates: list[dict], legacy_candidates: list[dict]) -> list[dict]:
+    """Merge fallback results without losing fresher Fast candidates.
+
+    Legacy rows establish the wider-universe baseline; duplicate Fast rows override them
+    because their quote was observed at the open boundary. The common selector is applied
+    once more so the merged result preserves the normal F1 ordering and safety floors.
+    """
+    by_ticker = {
+        str(candidate.get("ticker")): dict(candidate)
+        for candidate in legacy_candidates
+        if candidate.get("ticker")
+    }
+    by_ticker.update({
+        str(candidate.get("ticker")): dict(candidate)
+        for candidate in fast_candidates
+        if candidate.get("ticker")
+    })
+    return f1_selector.rank_candidates(list(by_ticker.values()))
+
+
 def compare_with_legacy(legacy_candidates: list[dict]) -> dict:
     """Record fast/legacy selection parity without changing live candidates."""
     fast = get_open_candidates()
@@ -644,9 +673,11 @@ def compare_with_legacy(legacy_candidates: list[dict]) -> dict:
 
 async def observe_open_boundary() -> list[dict]:
     """Observe and rank the prepared shortlist near 09:00."""
-    global _prepared_tickers, _open_candidates
+    global _prepared_tickers, _open_candidates, _last_open_quality
     _open_candidates = []
+    _last_open_quality = {"ok": False, "reason": "NOT_RUN"}
     if not enabled():
+        _last_open_quality = {"ok": False, "reason": "DISABLED"}
         return []
 
     now = datetime.now(KST)
@@ -663,6 +694,11 @@ async def observe_open_boundary() -> list[dict]:
         int(os.getenv("PAPER_FAST_PROBE_OPEN_MAX_LATENESS_MS", "2500")),
     )
     if lateness_ms > max_lateness_ms:
+        _last_open_quality = {
+            "ok": False,
+            "reason": "TOO_LATE",
+            "lateness_ms": lateness_ms,
+        }
         _append_record(
             "PAPER_FAST_PROBE_OPEN_SKIPPED",
             phase="OPEN",
@@ -683,6 +719,7 @@ async def observe_open_boundary() -> list[dict]:
 
     tickers = list(_prepared_tickers) or _load_prepared_tickers()
     if not tickers:
+        _last_open_quality = {"ok": False, "reason": "NO_PREOPEN_TICKERS"}
         _append_record(
             "PAPER_FAST_PROBE_OPEN_SKIPPED",
             phase="OPEN",
@@ -708,6 +745,47 @@ async def observe_open_boundary() -> list[dict]:
         params=_multi_params(tickers),
     )
     rows = _rows(resp)
+    requested_tickers = list(dict.fromkeys(tickers[:30]))
+    returned_tickers = [
+        str(row.get("inter_shrn_iscd") or "")
+        for row in rows
+        if row.get("inter_shrn_iscd")
+    ]
+    returned_set = set(returned_tickers)
+    requested_set = set(requested_tickers)
+    missing_tickers = [ticker for ticker in requested_tickers if ticker not in returned_set]
+    unexpected_tickers = [ticker for ticker in returned_tickers if ticker not in requested_set]
+    valid_ask_tickers = {
+        str(row.get("inter_shrn_iscd") or "")
+        for row in rows
+        if _to_float(row.get("inter2_askp")) > 0
+    } & requested_set
+    invalid_ask_tickers = [
+        ticker for ticker in requested_tickers if ticker not in valid_ask_tickers
+    ]
+    response_ok = str(resp.get("rt_cd") or "") == "0"
+    if not response_ok:
+        quality_reason = "API_ERROR"
+    elif missing_tickers:
+        quality_reason = "MISSING_TICKERS"
+    elif invalid_ask_tickers:
+        quality_reason = "INVALID_ASK"
+    elif unexpected_tickers or len(returned_tickers) != len(requested_tickers):
+        quality_reason = "RESPONSE_MISMATCH"
+    else:
+        quality_reason = "COMPLETE"
+    _last_open_quality = {
+        "ok": quality_reason == "COMPLETE",
+        "reason": quality_reason,
+        "requested_count": len(requested_tickers),
+        "returned_count": len(returned_tickers),
+        "valid_ask_count": len(valid_ask_tickers),
+        "missing_tickers": missing_tickers,
+        "invalid_ask_tickers": invalid_ask_tickers,
+        "unexpected_tickers": unexpected_tickers,
+        "rt_cd": resp.get("rt_cd"),
+        "msg_cd": resp.get("msg_cd"),
+    }
     prepared_by_ticker = {
         str(candidate.get("ticker") or ""): candidate
         for candidate in _prepared_candidates
@@ -716,6 +794,10 @@ async def observe_open_boundary() -> list[dict]:
     observed_monotonic = time.monotonic()
     for row in rows:
         ticker = str(row.get("inter_shrn_iscd") or "")
+        # 불완전 응답에서도 정상 코드 아래 유효 매도호가가 확인된 행만 fallback
+        # 병합 후보로 보존한다. API 오류/호가 결손 행은 거래 후보로 승격하지 않는다.
+        if not response_ok or ticker not in valid_ask_tickers:
+            continue
         prepared = prepared_by_ticker.get(ticker, {})
         candidate = _candidate_from_multi(
             row,
@@ -731,31 +813,31 @@ async def observe_open_boundary() -> list[dict]:
         candidate["gap_source"] = f"fast.{candidate.get('gap_source', 'multi')}"
         parsed.append(candidate)
     _open_candidates = f1_selector.rank_candidates(parsed)
-    valid_ask_count = sum(1 for row in rows if _to_float(row.get("inter2_askp")) > 0)
+    filter_stats = f1_selector.selection_stats(parsed)
     _append_record(
         "PAPER_FAST_PROBE_OPEN_DONE",
         phase="OPEN",
         target_ts=target.isoformat(),
         actual_ts=now.isoformat(),
         lateness_ms=lateness_ms,
-        requested_tickers=tickers,
-        returned_tickers=[
-            str(row.get("inter_shrn_iscd") or "")
-            for row in rows
-            if row.get("inter_shrn_iscd")
-        ],
-        valid_ask_count=valid_ask_count,
+        requested_tickers=requested_tickers,
+        returned_tickers=returned_tickers,
+        valid_ask_count=len(valid_ask_tickers),
         output_count=len(rows),
         shadow_candidate_count=len(_open_candidates),
         shadow_tickers=[candidate.get("ticker") for candidate in _open_candidates],
+        quality=_last_open_quality,
+        **filter_stats,
     )
     log(
         "PAPER_FAST_PROBE_OPEN_DONE",
         level="INFO" if rows else "WARN",
         lateness_ms=lateness_ms,
-        requested_count=len(tickers),
+        requested_count=len(requested_tickers),
         output_count=len(rows),
-        valid_ask_count=valid_ask_count,
+        valid_ask_count=len(valid_ask_tickers),
         shadow_candidate_count=len(_open_candidates),
+        quality_reason=quality_reason,
+        **filter_stats,
     )
     return get_open_candidates()

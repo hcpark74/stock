@@ -463,6 +463,26 @@ async def test_selector_empty_result_records_no_target(monkeypatch):
     assert "SELECTION_FILTER_EMPTY" in record_skip.await_args.args[2]
 
 
+async def test_non_terminal_fallback_empty_does_not_set_no_target(monkeypatch):
+    candidate = _classified_candidate(0.0)
+    fetch = AsyncMock(return_value=[candidate])
+    notify = AsyncMock()
+    record_skip = AsyncMock()
+    monkeypatch.setattr(f1_mod, "_should_retry", lambda: False)
+
+    with (
+        patch("src.modules.f1_filter._fetch_all_premarket", fetch),
+        patch("src.notifier.send", notify),
+        patch("src.db.record_skip", record_skip),
+    ):
+        result = await run(terminal_on_empty=False)
+
+    assert result == []
+    assert _state_mod.get().day_skip is False
+    notify.assert_not_awaited()
+    record_skip.assert_not_awaited()
+
+
 # ── 유동성 필터 ───────────────────────────────────────────────────────
 
 async def test_liquidity_top_10_pct_single_result():

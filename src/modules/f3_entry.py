@@ -109,6 +109,13 @@ F3_LIMIT_FILL_TIMEOUT_SEC = max(
     0.1,
     float(os.getenv("F3_LIMIT_FILL_TIMEOUT_SEC", "2.0")),
 )
+# 체결 폴링 간격 상한. 실제 대기는 min(interval, 남은 예산)로 적응 — 마감을
+# 넘겨 새 조회를 시작하지 않으면서, 절삭/무조건 1초 대기로 폴링이 1회로 굳는
+# 것을 막는다. 기본 1.0초로 기존 폴링 부하(조회 빈도)를 유지한다.
+F3_FILL_POLL_INTERVAL_SEC = max(
+    0.05,
+    _env_float("F3_FILL_POLL_INTERVAL_SEC", 1.0),
+)
 F3_RECHECK_MAX_ATTEMPTS = max(1, int(os.getenv("F3_RECHECK_MAX_ATTEMPTS", "3")))
 F3_RECHECK_RETRY_DELAY_SEC = max(0.0, _env_float("F3_RECHECK_RETRY_DELAY_SEC", 0.5))
 # Hard wall-clock cap on the whole opening-transition recheck (all gets + sleeps).
@@ -482,6 +489,7 @@ async def run(force: bool = False) -> None:
             s = state.get()
             s.day_skip = True
             s.close_reason = "ENTRY_FAIL"
+            await _persist_terminal_or_log("ENTRY_FAIL")
             log(
                 "ENTRY_CANDIDATE_RETRY_SKIPPED",
                 level="WARN",
@@ -515,8 +523,9 @@ async def run(force: bool = False) -> None:
     s.close_reason = final_reason
     s.target_ticker = None
     s.target_name = None
+    await _persist_terminal_or_log(final_reason)
     log(
-        "ENTRY_CANDIDATE_RETRY_SKIPPED",
+        "ENTRY_CANDIDATE_EXHAUSTED",
         level="WARN",
         rejected_count=len(rejected_tickers),
         reason="NO_REMAINING_CANDIDATE",
@@ -1097,7 +1106,7 @@ async def _run_single(
                 warn_threshold_pct=F3_QTY_CLAMP_WARN_PCT,
             )
         if order_qty <= 0:
-            await state.reset_to_idle("ENTRY_FAIL")
+            await _reset_to_idle_persisted("ENTRY_FAIL")
             _log_entry_blocked(
                 ticker,
                 "BUYABLE_QTY_ZERO",
@@ -1129,6 +1138,8 @@ async def _run_single(
                 return "BUYABLE_QTY_ZERO"
             state.get().day_skip = True
             state.get().close_reason = "INSUFFICIENT_BALANCE"
+            # 종료 close_reason을 확정한 뒤 디스크를 최종 값으로 재동기화한다.
+            await _persist_terminal_or_log("INSUFFICIENT_BALANCE")
             await notifier.send(
                 "ENTRY_FAIL",
                 level="WARN",
@@ -1153,7 +1164,7 @@ async def _run_single(
             if vi_info:
                 # 여기 도달했다는 것은 직전 취소가 확인됐다는 뜻 —
                 # 살아 있는 주문 없이 IDLE 전환·후보 이동이 안전하다.
-                await state.reset_to_idle("VI_ACTIVE")
+                await _reset_to_idle_persisted("VI_ACTIVE")
                 candidate_block_level = "INFO" if allow_candidate_retry else "WARN"
                 log(
                     "VI_ENTRY_BLOCKED", level=candidate_block_level, ticker=ticker,
@@ -1195,7 +1206,7 @@ async def _run_single(
         # 앞선 검사 이후에도 시간이 흘렀다. 아직 살아 있는 주문이 없으므로
         # ENTERING을 IDLE로 되돌리고 차단하는 것이 안전하다.
         if not force and not _before_deadline(_entry_retry_deadline()):
-            await state.reset_to_idle("ENTRY_FAIL")
+            await _reset_to_idle_persisted("ENTRY_FAIL")
             await _block_entry_deadline_passed(ticker, "AT_ORDER")
             return
 
@@ -1287,7 +1298,7 @@ async def _run_single(
                     reason="LIMIT_PRICE_BUDGET",
                 )
                 if order_qty <= 0:
-                    await state.reset_to_idle("ENTRY_FAIL")
+                    await _reset_to_idle_persisted("ENTRY_FAIL")
                     _log_entry_blocked(
                         ticker,
                         "QTY_ZERO",
@@ -1316,6 +1327,8 @@ async def _run_single(
                         return "QTY_ZERO"
                     state.get().day_skip = True
                     state.get().close_reason = "INSUFFICIENT_BALANCE"
+                    # 종료 close_reason 확정 후 디스크를 최종 값으로 재동기화한다.
+                    await _persist_terminal_or_log("INSUFFICIENT_BALANCE")
                     await notifier.send(
                         "ENTRY_FAIL",
                         level="WARN",
@@ -1390,7 +1403,7 @@ async def _run_single(
                     limit_price=submitted_order_price,
                     quote_age_ms=_quote_age_ms(entry_quote),
                 )
-            await state.reset_to_idle("ENTRY_FAIL")
+            await _reset_to_idle_persisted("ENTRY_FAIL")
             await _block_entry_deadline_passed(ticker, "AT_HTTP_SEND")
             return
         order_id = order_resp.get("output", {}).get("ODNO", "UNKNOWN")
@@ -1416,7 +1429,7 @@ async def _run_single(
         )
         if order_id == "UNKNOWN" or str(order_resp.get("rt_cd", "0")) != "0":
             if _is_market_closed_rejection(order_resp):
-                await state.reset_to_idle("MARKET_CLOSED")
+                await _reset_to_idle_persisted("MARKET_CLOSED")
                 state.get().day_skip = True
                 log(
                     "MARKET_CLOSED",
@@ -1437,7 +1450,7 @@ async def _run_single(
                     f"msg_cd={order_resp.get('msg_cd')},source=ORDER_REJECTION",
                 )
                 return "MARKET_CLOSED"
-            await state.reset_to_idle("ENTRY_FAIL")
+            await _reset_to_idle_persisted("ENTRY_FAIL")
             if not allow_candidate_retry:
                 state.get().day_skip = True
             log(
@@ -1505,7 +1518,7 @@ async def _run_single(
                 )
 
         fill_deadline = (
-            _deadline_after_seconds(F3_LIMIT_FILL_TIMEOUT_SEC)
+            _deadline_dt_after_seconds(F3_LIMIT_FILL_TIMEOUT_SEC)
             if F3_LIMIT_BUY_ENABLED
             else _entry_fill_deadline(attempt, force)
         )
@@ -1597,7 +1610,7 @@ async def _run_single(
             )
             await asyncio.sleep(F3_ENTRY_CANCEL_RELEASE_WAIT_SEC)
     if not fill:
-        await state.reset_to_idle("ENTRY_FAIL")
+        await _reset_to_idle_persisted("ENTRY_FAIL")
         log("ENTRY_FAIL", level="WARN", ticker=ticker,
             order_id=order_id, order_price=expected_price,
             order_qty=first_qty, entry_attempt=last_run_attempt,
@@ -1818,7 +1831,7 @@ async def _run_single(
         py_fill = await _poll_fill(
             py_id,
             deadline=(
-                _deadline_after_seconds(F3_LIMIT_FILL_TIMEOUT_SEC)
+                _deadline_dt_after_seconds(F3_LIMIT_FILL_TIMEOUT_SEC)
                 if F3_LIMIT_BUY_ENABLED
                 else _pyramid_fill_deadline()
             ),
@@ -1956,7 +1969,7 @@ async def _cancel_entry_order_confirmed(
 
     fill = await _poll_fill(
         order_id,
-        deadline=_deadline_after_seconds(F3_ENTRY_CANCEL_CONFIRM_FILL_SEC),
+        deadline=_deadline_dt_after_seconds(F3_ENTRY_CANCEL_CONFIRM_FILL_SEC),
         ticker=ticker,
         expected_qty=expected_qty,
     )
@@ -2121,6 +2134,70 @@ async def _block_entry_deadline_passed(ticker: str | None, stage: str) -> None:
     )
 
 
+async def _persist_terminal_or_log(reason: str) -> bool:
+    """이미 안전한 종료 상태로 정리된 인메모리 상태를 디스크에 durable하게 반영.
+
+    예외를 전파하지 않고 실패 시 CRIT로만 남긴다 — 재진입 차단은 인메모리
+    day_skip과 DB daily_skips 복원이, 디스크에 남은 상태는 재시작 fail-closed가
+    담당한다. 성공을 가장하지 않도록 성공 여부를 반환한다.
+    """
+    try:
+        await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
+        return True
+    except Exception as exc:
+        log("ENTRY_TERMINAL_PERSIST_ERROR", level="CRIT", reason=reason, error=repr(exc))
+        try:
+            await notifier.send(
+                "ENTRY_TERMINAL_PERSIST_ERROR",
+                level="CRIT",
+                message=(
+                    f"종료 상태({reason}) 저장 실패. 재시작 시 디스크 상태를 확인하세요."
+                ),
+                ticker=state.get().target_ticker,
+            )
+        except Exception:
+            pass
+        return False
+
+
+async def _reset_to_idle_persisted(reason: str) -> bool:
+    """안전한 종료(ENTERING→IDLE)를 디스크까지 durable하게 반영한다.
+
+    살아 있는 주문이 없다고 확인된 종료 경로에서만 호출한다 — 취소/포지션 대조가
+    불확실하면 ENTERING을 유지해야 한다. 예외를 전파하지 않는다(F3/F4 async
+    오케스트레이션을 중단시키지 않기 위해). 영속화 실패 시 성공을 가장하지 않고
+    fail-closed 처리한다: 인메모리는 IDLE로 두되 당일 신규 진입을 차단하고 CRIT로
+    기록·통지한다. 디스크에 남은 ENTERING은 재시작 시 fail-closed로 걸린다.
+    """
+    ticker = state.get().target_ticker
+    await state.reset_to_idle(reason)
+    try:
+        await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
+        return True
+    except Exception as exc:
+        state.get().day_skip = True
+        log(
+            "ENTRY_TERMINAL_PERSIST_ERROR",
+            level="CRIT",
+            ticker=ticker,
+            reason=reason,
+            error=repr(exc),
+        )
+        try:
+            await notifier.send(
+                "ENTRY_TERMINAL_PERSIST_ERROR",
+                level="CRIT",
+                message=(
+                    f"종료 상태({reason}) 저장 실패로 신규 진입을 차단했습니다. "
+                    "재시작 시 디스크 상태를 확인하세요."
+                ),
+                ticker=ticker,
+            )
+        except Exception:
+            pass
+        return False
+
+
 async def _reject_final_entry_price(
     ticker: str,
     reason: str,
@@ -2134,7 +2211,7 @@ async def _reject_final_entry_price(
     fresh_gap: float | None = None,
 ) -> str:
     """살아 있는 주문이 없을 때 최종 가격검사를 fail-closed로 종료한다."""
-    await state.reset_to_idle(reason)
+    await _reset_to_idle_persisted(reason)
     level = "INFO" if allow_candidate_retry else "WARN"
     log(
         "ENTRY_PRICE_BLOCKED",
@@ -2165,6 +2242,8 @@ async def _reject_final_entry_price(
 
     state.get().day_skip = True
     state.get().close_reason = "GAP_CHANGED" if reason == "GAP_CHANGED" else "ENTRY_FAIL"
+    # reset 시 원시 거절 사유로 persist된 disk를 최종 close_reason으로 재동기화한다.
+    await _persist_terminal_or_log(state.get().close_reason)
     await notifier.send(
         "ENTRY_FAIL",
         level="WARN",
@@ -2705,28 +2784,29 @@ def _pyramid_at() -> tuple[int, int, int]:
     return _parse_deadline(F3_PYRAMID_AT, (9, 10, 40))
 
 
-def _pyramid_fill_deadline() -> tuple[int, int, int]:
-    return _deadline_after_seconds(F3_PYRAMID_FILL_SEC)
+def _pyramid_fill_deadline() -> datetime:
+    return _deadline_dt_after_seconds(F3_PYRAMID_FILL_SEC)
 
 
 def _before_deadline(deadline: tuple[int, int, int]) -> bool:
     return datetime.now(KST) < _deadline_datetime(deadline)
 
 
-def _deadline_after_seconds(seconds: float) -> tuple[int, int, int]:
-    target = datetime.now(KST) + timedelta(seconds=seconds)
-    return target.hour, target.minute, target.second
+def _deadline_dt_after_seconds(seconds: float) -> datetime:
+    """정밀 절대 마감(datetime). 초 단위 절삭 없이 체결 폴링 예산을 보존한다."""
+    return datetime.now(KST) + timedelta(seconds=seconds)
 
 
-def _entry_fill_deadline(attempt: int, force: bool) -> tuple[int, int, int]:
+def _entry_fill_deadline(attempt: int, force: bool) -> datetime:
+    """체결 폴링 절대 마감(정밀 datetime). 재시도는 정밀 now+duration과 초 단위
+    스케줄 마감(_entry_retry_deadline) 중 이른 쪽을 쓴다."""
     if force:
-        return _deadline_after_seconds(30)
+        return _deadline_dt_after_seconds(30)
     if attempt == 1:
-        return _deadline_after_seconds(F3_ENTRY_FIRST_FILL_SEC)
+        return _deadline_dt_after_seconds(F3_ENTRY_FIRST_FILL_SEC)
 
     retry_deadline = _deadline_datetime(_entry_retry_deadline())
-    target = min(datetime.now(KST) + timedelta(seconds=F3_ENTRY_RETRY_FILL_SEC), retry_deadline)
-    return target.hour, target.minute, target.second
+    return min(_deadline_dt_after_seconds(F3_ENTRY_RETRY_FILL_SEC), retry_deadline)
 
 
 async def _run_dry_entry(ticker: str) -> None:
@@ -3143,18 +3223,21 @@ async def _cancel_order(order_id: str, org_no: str, mode: str) -> dict:
 
 async def _poll_fill(
     order_id: str,
-    deadline: tuple[int, int, int],
+    deadline: datetime,
     ticker: str | None = None,
     expected_qty: int | None = None,
 ) -> dict | None:
-    """전량체결까지 폴링하고, 마감 시 확인된 부분체결을 반환한다."""
+    """전량체결까지 폴링하고, 마감 시 확인된 부분체결을 반환한다.
+
+    정밀 절대 마감(datetime)을 쓰고, 대기는 min(간격, 남은 예산)로 적응한다.
+    마감에 도달/초과한 뒤에는 새 체결조회를 시작하지 않는다(주문 노출창 미연장).
+    """
     global _last_fill_poll_summary
-    h, m, s = deadline
     attempts = 0
     latest_fill: dict | None = None
     _last_fill_poll_summary = {
         "poll_attempts": 0,
-        "poll_deadline": f"{h:02d}:{m:02d}:{s:02d}",
+        "poll_deadline": deadline.strftime("%H:%M:%S"),
         "poll_last_rt_cd": None,
         "poll_last_msg_cd": None,
         "poll_last_msg1": None,
@@ -3165,8 +3248,7 @@ async def _poll_fill(
         "poll_last_error": None,
     }
     while True:
-        now = datetime.now(KST)
-        if now >= now.replace(hour=h, minute=m, second=s, microsecond=0):
+        if datetime.now(KST) >= deadline:
             log("ENTRY_FILL_POLL_TIMEOUT", level="WARN", ticker=ticker,
                 order_id=order_id, **_last_fill_poll_summary)
             if latest_fill and expected_qty is None:
@@ -3209,7 +3291,12 @@ async def _poll_fill(
                 "poll_attempts": attempts,
                 "poll_last_error": str(exc)[:160],
             })
-        await asyncio.sleep(1)
+        # 남은 예산만큼만 적응형으로 대기한다. 예산이 없으면 즉시 루프 상단으로
+        # 돌아가 마감 처리 — 마감 이후 새 조회를 시작하지 않는다.
+        remaining = (deadline - datetime.now(KST)).total_seconds()
+        if remaining <= 0:
+            continue
+        await asyncio.sleep(min(F3_FILL_POLL_INTERVAL_SEC, remaining))
 
 
 async def _fetch_order_fill_snapshot(

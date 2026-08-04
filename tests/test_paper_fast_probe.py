@@ -76,6 +76,12 @@ def test_multi_params_supports_at_most_thirty_tickers():
     assert "FID_INPUT_ISCD_31" not in params
 
 
+def test_shadow_top_n_defaults_to_full_multi_quote_capacity(monkeypatch):
+    monkeypatch.delenv("PAPER_FAST_SHADOW_TOP_N", raising=False)
+
+    assert probe._shadow_top_n() == 30
+
+
 @pytest.mark.asyncio
 async def test_prepare_records_four_public_calls_and_selects_shadow_shortlist(
     monkeypatch,
@@ -237,6 +243,94 @@ async def test_open_boundary_observes_prepared_tickers_without_trading(
     assert records[-1]["valid_ask_count"] == 3
     assert records[-1]["requested_tickers"] == ["006340", "477850", "439960"]
     assert records[-1]["shadow_candidate_count"] == 2
+    assert probe.open_quality_ok() is True
+    assert probe.get_last_open_quality()["reason"] == "COMPLETE"
+    assert records[-1]["filter_total_count"] == 3
+    assert records[-1]["filter_pass_count"] == 2
+    assert records[-1]["filter_high_gap_rejected_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_open_boundary_marks_missing_response_as_incomplete(monkeypatch, tmp_path):
+    class FixedDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 7, 28, 9, 0, 0, 300000, tzinfo=probe.KST)
+
+    monkeypatch.setenv("KIS_MODE", "PAPER")
+    monkeypatch.setenv("PAPER_FAST_PROBE", "1")
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    monkeypatch.setattr(probe, "datetime", FixedDateTime)
+    probe._prepared_tickers = ["005930", "000660"]
+    monkeypatch.setattr(
+        probe.kis_rest,
+        "get",
+        AsyncMock(return_value={
+            "rt_cd": "0",
+            "output": [_multi_row("005930", "삼성전자", 10300, 10000)],
+        }),
+    )
+
+    candidates = await probe.observe_open_boundary()
+
+    assert [c["ticker"] for c in candidates] == ["005930"]
+    assert probe.open_quality_ok() is False
+    quality = probe.get_last_open_quality()
+    assert quality["reason"] == "MISSING_TICKERS"
+    assert quality["missing_tickers"] == ["000660"]
+
+
+@pytest.mark.asyncio
+async def test_open_boundary_does_not_preserve_invalid_ask_candidate(monkeypatch, tmp_path):
+    class FixedDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 7, 28, 9, 0, 0, 300000, tzinfo=probe.KST)
+
+    monkeypatch.setenv("KIS_MODE", "PAPER")
+    monkeypatch.setenv("PAPER_FAST_PROBE", "1")
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    monkeypatch.setattr(probe, "datetime", FixedDateTime)
+    probe._prepared_tickers = ["005930"]
+    monkeypatch.setattr(
+        probe.kis_rest,
+        "get",
+        AsyncMock(return_value={
+            "rt_cd": "0",
+            "output": [_multi_row("005930", "삼성전자", 10300, 10000, ask=0)],
+        }),
+    )
+
+    candidates = await probe.observe_open_boundary()
+
+    assert candidates == []
+    assert probe.open_quality_ok() is False
+    quality = probe.get_last_open_quality()
+    assert quality["reason"] == "INVALID_ASK"
+    assert quality["invalid_ask_tickers"] == ["005930"]
+
+
+def test_merge_candidates_preserves_fast_and_prefers_fresh_fast_duplicate():
+    fast = [
+        {"ticker": "005930", "gap_pct": 0.04, "gap_allowed": True,
+         "expected_amount": 2e9, "avg_amount_5d": 1e9, "vi_gap": 0.03},
+        {"ticker": "000660", "gap_pct": 0.05, "gap_allowed": True,
+         "expected_amount": 3e9, "avg_amount_5d": 1e9, "vi_gap": 0.03},
+    ]
+    legacy = [
+        {"ticker": "005930", "gap_pct": 0.031, "gap_allowed": True,
+         "expected_amount": 1e9, "avg_amount_5d": 1e9, "vi_gap": 0.03},
+        {"ticker": "035420", "gap_pct": 0.045, "gap_allowed": True,
+         "expected_amount": 4e9, "avg_amount_5d": 1e9, "vi_gap": 0.03},
+    ]
+
+    merged = probe.merge_candidates(fast, legacy)
+
+    assert {c["ticker"] for c in merged} == {"005930", "000660", "035420"}
+    samsung = next(c for c in merged if c["ticker"] == "005930")
+    assert samsung["gap_pct"] == 0.04
 
 
 def test_multi_candidate_derives_expected_price_when_current_is_previous_close():

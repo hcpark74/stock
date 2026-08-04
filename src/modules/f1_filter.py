@@ -43,7 +43,7 @@ _PREMARKET_MARKETS = (
     {"label": "Q", "ranking_market": "J", "ranking_input": "1001", "quote_market": "J"},
 )
 
-async def run() -> list[dict]:
+async def run(*, terminal_on_empty: bool = True) -> list[dict]:
     """
     Fetch premarket candidates, apply the gap/liquidity filters, and retry until
     the F2 deadline if the KIS premarket fields are not ready yet.
@@ -86,6 +86,17 @@ async def run() -> list[dict]:
         )
 
         if not _should_retry():
+            if not terminal_on_empty:
+                log(
+                    "F1_FALLBACK_EMPTY",
+                    level="WARN",
+                    attempt=attempt,
+                    raw_count=len(raw_candidates),
+                    filter_count=len(gap_filtered),
+                    reason=empty_reason,
+                    **_gap_stats(raw_candidates),
+                )
+                return []
             log(
                 "NO_TARGET",
                 level="INFO",

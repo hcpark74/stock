@@ -74,3 +74,14 @@ def test_f3_operational_events_have_human_readable_labels():
     assert event_label("F4_ENTRY_AT_INVALID") != (
         "F4_ENTRY_AT_INVALID(F4_ENTRY_AT_INVALID)"
     )
+
+
+def test_terminal_persist_and_candidate_events_have_distinct_labels():
+    # 후보 소진은 마감초과(ENTRY_CANDIDATE_RETRY_SKIPPED)와 별개 이벤트/라벨이다
+    exhausted = event_label("ENTRY_CANDIDATE_EXHAUSTED")
+    assert exhausted != "ENTRY_CANDIDATE_EXHAUSTED(ENTRY_CANDIDATE_EXHAUSTED)"
+    assert "마감" not in exhausted
+    assert event_label("ENTRY_CANDIDATE_RETRY_SKIPPED") != exhausted
+    # 종료 상태 영속화 실패는 전용 라벨을 가진다
+    terminal = event_label("ENTRY_TERMINAL_PERSIST_ERROR")
+    assert terminal != "ENTRY_TERMINAL_PERSIST_ERROR(ENTRY_TERMINAL_PERSIST_ERROR)"

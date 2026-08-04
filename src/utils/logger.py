@@ -100,6 +100,9 @@ EVENT_LABELS = {
         "PAPER Fast Path 후보 비교 오류(Paper Fast Shadow Compare Error)"
     ),
     "PAPER_FAST_PATH_SELECTED": "PAPER Fast Path 진입 선택(Paper Fast Path Selected)",
+    "PAPER_FAST_PATH_FALLBACK": "PAPER Fast Path 후보 부족 대체(Paper Fast Path Fallback)",
+    "PAPER_FAST_PATH_MERGED": "PAPER Fast/Legacy 후보 병합(Paper Fast Path Merged)",
+    "F1_FALLBACK_EMPTY": "F1 대체 조회 결과 없음(F1 Fallback Empty)",
     "ENTRY_PIPELINE_TIMING": "진입 파이프라인 소요시간(Entry Pipeline Timing)",
     "BALANCE_SNAPSHOT_READY": "개장 전 잔고 스냅샷 준비(Balance Snapshot Ready)",
     "BALANCE_SNAPSHOT_HIT": "잔고 스냅샷 사용(Balance Snapshot Hit)",
@@ -145,6 +148,8 @@ EVENT_LABELS = {
     "TRADE_ALREADY_EXISTS": "당일 거래 이미 존재(Trade Already Exists)",
     "ENTRY_CANDIDATE_RETRY": "다음 후보로 진입 재시도(Entry Candidate Retry)",
     "ENTRY_CANDIDATE_RETRY_SKIPPED": "후보 재시도 마감 초과(Entry Candidate Retry Skipped)",
+    "ENTRY_CANDIDATE_EXHAUSTED": "진입 후보 소진(Entry Candidate Exhausted)",
+    "ENTRY_TERMINAL_PERSIST_ERROR": "종료 상태 저장 실패(Entry Terminal Persist Error)",
     "F3_RECHECK_QUOTE_RETRY": "F3 재검증 시세 재시도(F3 Recheck Quote Retry)",
     "F3_RECHECK_QUOTE_RECOVERED": "F3 재검증 시세 복구(F3 Recheck Quote Recovered)",
     "ENTRY_FAIL": "진입 실패(Entry Failed)",

@@ -18,7 +18,7 @@ PAPER의 1.1초 REST 호출 제한에서 F1의 약 60회 단건 예상체결 조
 
 - 08:59:45: KOSPI/KOSDAQ 등락률 순위 API를 각각 호출한다.
 - 각 순위 응답의 최대 30종목을 시장별 멀티시세 API로 조회한다.
-- 장전 응답에서 `PAPER_FAST_SHADOW_TOP_N`개(기본 10개)의 shortlist를
+- 장전 응답에서 `PAPER_FAST_SHADOW_TOP_N`개(기본 30개)의 shortlist를
   선정해 기록한다.
 - 09:00:00.300: 기존 F1이 시작되기 직전에 shortlist의 멀티시세를 한 번
   더 조회한다.
@@ -39,7 +39,7 @@ PAPER의 1.1초 REST 호출 제한에서 F1의 약 60회 단건 예상체결 조
 PAPER_FAST_PROBE=1
 PAPER_FAST_SHADOW=1
 PAPER_FAST_HYBRID=0
-PAPER_FAST_SHADOW_TOP_N=10
+PAPER_FAST_SHADOW_TOP_N=30
 PAPER_FAST_PROBE_DIR=data/paper_fast_probe
 PAPER_FAST_PROBE_OPEN_OFFSET_MS=300
 PAPER_FAST_PROBE_OPEN_MAX_LATENESS_MS=2500
@@ -49,6 +49,16 @@ PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC=2.5
 `PAPER_FAST_HYBRID=0`이면 Shadow 비교만 수행하고 레거시 F1 결과를
 사용한다. `1`이면 PAPER에서만 fast 후보를 F2/F3에 전달한다. REAL 또는
 DRY_RUN에서는 값이 `1`이어도 코드 레벨에서 실행되지 않는다.
+
+Hybrid는 후보 개수가 아니라 개장 응답의 완전성으로 Fast Path 채택 여부를 판단한다.
+요청/응답 종목 일치, 전 종목 유효 매도호가, 정상 응답 코드를 모두 만족하면 후보가
+1~2개여도 Fast 결과를 사용한다. 응답이 불완전하면 레거시 F1으로 fallback하고,
+이미 확인된 Fast 후보와 레거시 결과를 병합한다. 레거시 결과가 비어도 유효 Fast
+후보를 `NO_TARGET`으로 덮어쓰지 않는다.
+
+`PAPER_FAST_PROBE_OPEN_DONE`에는 갭·예상체결대금·거래량 급증·VI·고갭 필터별
+탈락 건수와 응답 품질 사유가 기록된다. `TOP_N=30`은 최소 5~10거래일 동안 PAPER로
+관측한 뒤 후보 재현율과 지연을 평가하고, 59종목 2배치 확대는 그 결과 이후 판단한다.
 
 ## 산출물
 

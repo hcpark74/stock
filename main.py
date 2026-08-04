@@ -272,14 +272,25 @@ async def _check_market_holiday() -> None:
     )
 
 
-async def _restore_market_closed_from_db() -> None:
-    """
-    재시작 복구: 당일 daily_skips에 MARKET_CLOSED/VI_ACTIVE가 있으면 스킵 상태 복원.
+# 당일 재시작 시 day_skip을 복원해 재진입을 막아야 하는 종료 스킵 사유.
+# NO_TARGET은 주문·포지션이 없었던 경우라 catch-up이 F1을 다시 돌려 후보를
+# 찾을 수 있어야 하므로 제외한다(기존 동작 보존). 오직 MARKET_CLOSED만
+# 휴장 플래그를 세운다.
+_REENTRY_BLOCKING_SKIP_REASONS = frozenset(
+    {"MARKET_CLOSED", "VI_ACTIVE", "ENTRY_FAIL", "GAP_CHANGED", "SLIPPAGE_GUARD", "MANUAL"}
+)
 
-    F3의 휴장·VI 감지는 인메모리(day_skip)만 세우고 상태 파일에도
-    남지 않으므로, 같은 날 재시작하면 catchup이 F1~F3를 다시 돌려 주문·알림이
-    반복된다(VI_ACTIVE는 해제가 추격 진입까지). DB 기록이 유일한 재시작
-    생존 흔적이라 시작 시 1회 복원한다.
+
+async def _restore_daily_skip_from_db() -> None:
+    """
+    재시작 복구: 당일 daily_skips에 재진입 차단 사유가 있으면 스킵 상태 복원.
+
+    F3의 종료 결정(휴장·VI·진입실패·갭변동·슬리피지·수동)은 인메모리(day_skip)만
+    세우고 상태 파일의 day_skip은 영속화되지 않는다. 예전에는 디스크의 잔여
+    ENTERING이 우연히 재진입을 막았으나, 종료 상태를 IDLE로 durable하게 정정하면서
+    그 우연한 방어가 사라졌다. 같은 날 재시작하면 catch-up이 F1~F3를 다시 돌려
+    주문·알림이 반복(VI_ACTIVE는 해제가 추격 진입, ENTRY_FAIL은 중복 주문)될 수
+    있으므로 DB 기록(유일한 재시작 생존 흔적)에서 시작 시 1회 복원한다.
     """
     global _market_closed_date
     today = _today()
@@ -289,20 +300,17 @@ async def _restore_market_closed_from_db() -> None:
         logger.log("MARKET_CLOSED_RESTORE_FAILED", level="WARN", error=repr(exc))
         return
     reason = (skip or {}).get("reason")
-    if reason == "VI_ACTIVE":
-        s = state.get()
-        s.day_skip = True
-        s.close_reason = s.close_reason or "VI_ACTIVE"
-        logger.log("DAY_SKIP_RESTORED", level="INFO", date=today,
-                   reason="VI_ACTIVE", source="DAILY_SKIPS")
+    if reason not in _REENTRY_BLOCKING_SKIP_REASONS:
         return
-    if reason != "MARKET_CLOSED":
-        return
-    _market_closed_date = today
     s = state.get()
     s.day_skip = True
-    s.close_reason = s.close_reason or "MARKET_CLOSED"
-    logger.log("MARKET_CLOSED_RESTORED", level="INFO", date=today, source="DAILY_SKIPS")
+    s.close_reason = s.close_reason or reason
+    if reason == "MARKET_CLOSED":
+        _market_closed_date = today
+        logger.log("MARKET_CLOSED_RESTORED", level="INFO", date=today, source="DAILY_SKIPS")
+    else:
+        logger.log("DAY_SKIP_RESTORED", level="INFO", date=today,
+                   reason=reason, source="DAILY_SKIPS")
 
 
 # ── 스케줄 작업 래퍼 ─────────────────────────────────────────────────
@@ -348,6 +356,7 @@ async def job_f1() -> None:
     if await _skip_entry_pipeline_if_trade_exists("JOB_F1"):
         return
     fast_candidates: list[dict] = []
+    probe_error_reason: str | None = None
     probe_started = time.perf_counter()
     try:
         fast_candidates = await asyncio.wait_for(
@@ -355,6 +364,7 @@ async def job_f1() -> None:
             timeout=PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC,
         )
     except asyncio.TimeoutError:
+        probe_error_reason = "TIMEOUT"
         logger.log(
             "PAPER_FAST_PROBE_ERROR",
             level="WARN",
@@ -363,6 +373,7 @@ async def job_f1() -> None:
             timeout_sec=PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC,
         )
     except Exception as exc:
+        probe_error_reason = "UNHANDLED"
         logger.log(
             "PAPER_FAST_PROBE_ERROR",
             level="WARN",
@@ -372,7 +383,23 @@ async def job_f1() -> None:
         )
     probe_ms = round((time.perf_counter() - probe_started) * 1000)
     selection_started = time.perf_counter()
-    if paper_fast_probe.hybrid_enabled() and fast_candidates:
+    fast_hybrid_enabled = paper_fast_probe.hybrid_enabled()
+    fast_quality_ok = paper_fast_probe.open_quality_ok()
+    if fast_hybrid_enabled and (not fast_quality_ok or not fast_candidates):
+        quality = paper_fast_probe.get_last_open_quality()
+        logger.log(
+            "PAPER_FAST_PATH_FALLBACK",
+            level="WARN",
+            reason=(
+                probe_error_reason
+                or (quality.get("reason") if not fast_quality_ok else "NO_FAST_CANDIDATES")
+                or "INCOMPLETE_PROBE"
+            ),
+            candidate_count=len(fast_candidates),
+            tickers=[candidate.get("ticker") for candidate in fast_candidates],
+            quality=quality,
+        )
+    if fast_hybrid_enabled and fast_candidates and fast_quality_ok:
         _f1_result = fast_candidates
         selection_source = "FAST_MULTI"
         f1_filter.save_candidate_snapshot(fast_candidates)
@@ -383,8 +410,26 @@ async def job_f1() -> None:
             tickers=[candidate.get("ticker") for candidate in fast_candidates],
         )
     else:
-        _f1_result = await f1_filter.run()
-        selection_source = "LEGACY_SINGLE_QUOTE"
+        preserve_fast = fast_hybrid_enabled and bool(fast_candidates)
+        legacy_candidates = await f1_filter.run(terminal_on_empty=not preserve_fast)
+        if preserve_fast:
+            _f1_result = paper_fast_probe.merge_candidates(
+                fast_candidates,
+                legacy_candidates,
+            )
+            selection_source = "FAST_LEGACY_MERGED"
+            f1_filter.save_candidate_snapshot(_f1_result)
+            logger.log(
+                "PAPER_FAST_PATH_MERGED",
+                level="WARN",
+                fast_count=len(fast_candidates),
+                legacy_count=len(legacy_candidates),
+                merged_count=len(_f1_result),
+                tickers=[candidate.get("ticker") for candidate in _f1_result],
+            )
+        else:
+            _f1_result = legacy_candidates
+            selection_source = "LEGACY_SINGLE_QUOTE"
         try:
             paper_fast_probe.compare_with_legacy(_f1_result)
         except Exception as exc:
@@ -1215,8 +1260,8 @@ async def main() -> None:
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     await db.init(DB_PATH)
     await _ensure_trading_day()
-    # 휴장일 감지(F3 주문 거부)는 인메모리라 같은 날 재시작 시 DB에서 복원
-    await _restore_market_closed_from_db()
+    # 휴장·종료 스킵(F3)은 인메모리라 같은 날 재시작 시 DB에서 복원해 재진입을 막는다
+    await _restore_daily_skip_from_db()
 
     if dry_run:
         logger.log("DRY_RUN_START", level="WARN",
