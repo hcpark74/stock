@@ -545,6 +545,37 @@ async def test_ws_health_monitor_detects_stale_and_recovery_independent_of_rest(
 
 
 @pytest.mark.asyncio
+async def test_ws_health_monitor_suppresses_tick_idle_warnings_after_close(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    events = []
+    s = _state_mod.get()
+    s.position_status = "CLOSED"
+    s.entry_at = _kst(9, 1).isoformat()
+
+    async def stop_after_sleep(_seconds):
+        s.position_status = "IDLE"
+
+    monkeypatch.setattr(f4, "_OBSERVE_UNTIL", (9, 10))
+    monkeypatch.setattr(f4.asyncio, "sleep", AsyncMock(side_effect=stop_after_sleep))
+    monkeypatch.setattr(
+        f4,
+        "log",
+        lambda event, **fields: events.append((event, fields)),
+    )
+
+    with patch.object(f4, "datetime") as mock_dt:
+        mock_dt.now.return_value = _kst(9, 9)
+        await f4._run_ws_health_monitor(
+            "005930",
+            lambda: True,
+            lambda: {"last_ws_tick_age_ms": 2_500},
+        )
+
+    assert "WS_STALE" not in [event for event, _ in events]
+
+
+@pytest.mark.asyncio
 async def test_run_starts_ws_health_monitor_when_rest_backup_is_disabled(monkeypatch):
     import src.modules.f4_tracking as f4
 
@@ -567,6 +598,55 @@ async def test_run_starts_ws_health_monitor_when_rest_backup_is_disabled(monkeyp
     await asyncio.wait_for(f4.run(), 1)
 
     assert health_started.is_set()
+
+
+@pytest.mark.asyncio
+async def test_run_waits_for_close_before_cancelling_triggering_monitor(monkeypatch):
+    """EXITING으로 다른 모니터가 끝나도 정상 청산 부모를 먼저 취소하지 않는다."""
+    import src.modules.f4_tracking as f4
+
+    events = []
+    exiting = asyncio.Event()
+    s = _state_mod.get()
+
+    async def fake_execute_close(_price, reason):
+        assert await f4.state.set_exiting(reason) is True
+        exiting.set()
+        # subscribe 태스크가 먼저 반환해 run()의 정리 경로가 시작되게 한다.
+        await asyncio.sleep(0.02)
+        assert await f4.state.set_closed(reason) is True
+        return True
+
+    async def fake_subscribe(_ticker, _on_tick, *, stop_if=None):
+        await exiting.wait()
+
+    async def fake_rest_backup(*_args, **_kwargs):
+        await f4._trigger_close(9_800.0, "TRAILING")
+
+    async def wait_forever(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setattr(f4, "F4_REST_BACKUP_ENABLED", True)
+    monkeypatch.setattr(f4, "F4_HEARTBEAT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(f4, "_close_in_progress", False)
+    monkeypatch.setattr(f4, "_close_in_progress_warned", False)
+    monkeypatch.setattr(f4, "_closing_task", None)
+    monkeypatch.setattr(f4, "_active_monitor_tasks", set())
+    monkeypatch.setattr(f4, "_execute_close", fake_execute_close)
+    monkeypatch.setattr(f4, "_run_rest_price_backup", fake_rest_backup)
+    monkeypatch.setattr(f4, "_run_ws_health_monitor", wait_forever)
+    monkeypatch.setattr(f4.kis_ws, "subscribe", fake_subscribe)
+    monkeypatch.setattr(
+        f4,
+        "log",
+        lambda event, **fields: events.append((event, fields)),
+    )
+
+    await asyncio.wait_for(f4.run(), 1)
+
+    assert s.position_status == "CLOSED"
+    assert "F4_CLOSE_CANCEL_REQUESTED" not in [event for event, _ in events]
 
 
 @pytest.mark.asyncio
@@ -806,6 +886,8 @@ async def test_rest_backup_collects_after_close_without_running_stop_logic(monke
 
     monkeypatch.setattr(f4, "datetime", FixedDateTime)
     monkeypatch.setattr(f4, "_OBSERVE_UNTIL", (9, 10))
+    monkeypatch.setattr(f4, "F4_POST_CLOSE_REST_BACKUP_ENABLED", True)
+    monkeypatch.setattr(f4, "F4_POST_CLOSE_REST_POLL_INTERVAL_SEC", 30.0)
     monkeypatch.setattr(f4, "_fetch_current_price", fetch)
     monkeypatch.setattr(f4, "_process_tick", process_tick)
     monkeypatch.setattr(f4.live, "push_tick", push_tick)
@@ -814,9 +896,46 @@ async def test_rest_backup_collects_after_close_without_running_stop_logic(monke
 
     await _run_rest_price_backup("005930", _spike_always_pass(), lambda: True)
 
-    fetch.assert_awaited_once_with("005930")
+    fetch.assert_awaited_once_with(
+        "005930",
+        latency_context="F4_POST_CLOSE",
+        aggregate_latency=True,
+    )
     push_tick.assert_called_once_with(ENTRY + 100, ticker="005930")
     process_tick.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rest_backup_is_disabled_by_default_after_close(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    fixed_now = _kst(9, 9)
+
+    class FixedDateTime(_dt):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now
+
+    s = _state_mod.get()
+    s.position_status = "CLOSED"
+    s.entry_at = _kst(9, 1).isoformat()
+    fetch = AsyncMock(return_value=ENTRY + 100)
+
+    async def stop_after_sleep(seconds):
+        assert seconds == 30.0
+        s.position_status = "IDLE"
+
+    monkeypatch.setattr(f4, "datetime", FixedDateTime)
+    monkeypatch.setattr(f4, "_OBSERVE_UNTIL", (9, 10))
+    monkeypatch.setattr(f4, "F4_POST_CLOSE_REST_BACKUP_ENABLED", False)
+    monkeypatch.setattr(f4, "F4_POST_CLOSE_REST_POLL_INTERVAL_SEC", 30.0)
+    monkeypatch.setattr(f4, "_fetch_current_price", fetch)
+    monkeypatch.setattr(f4.asyncio, "sleep", AsyncMock(side_effect=stop_after_sleep))
+    monkeypatch.setattr(f4, "log", lambda *args, **kwargs: None)
+
+    await _run_rest_price_backup("005930", _spike_always_pass(), lambda: True)
+
+    fetch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -867,6 +986,65 @@ async def test_run_waits_for_close_task_when_sibling_monitor_finishes(monkeypatc
     await real_asyncio.wait_for(task, 1)
 
     assert _state_mod.get().position_status == "CLOSED"
+
+
+@pytest.mark.asyncio
+async def test_run_cancellation_still_cleans_up_monitor_tasks(monkeypatch):
+    import asyncio as real_asyncio
+
+    import src.modules.f4_tracking as f4
+
+    monitor_started = real_asyncio.Event()
+    monitor_cleaned = real_asyncio.Event()
+    release_close = real_asyncio.Event()
+    shield_started = real_asyncio.Event()
+    real_shield = real_asyncio.shield
+
+    async def finishing_monitor(*_args, **_kwargs):
+        monitor_started.set()
+
+    async def pending_monitor(*_args, **_kwargs):
+        try:
+            await real_asyncio.Event().wait()
+        finally:
+            monitor_cleaned.set()
+
+    async def pending_close():
+        await release_close.wait()
+
+    def observed_shield(awaitable):
+        shield_started.set()
+        return real_shield(awaitable)
+
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setattr(f4, "F4_REST_BACKUP_ENABLED", False)
+    monkeypatch.setattr(f4, "F4_HEARTBEAT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(f4, "_active_monitor_tasks", set())
+    monkeypatch.setattr(f4.kis_ws, "subscribe", finishing_monitor)
+    monkeypatch.setattr(f4, "_run_ws_health_monitor", pending_monitor)
+    monkeypatch.setattr(f4.asyncio, "shield", observed_shield)
+
+    close_task = real_asyncio.create_task(pending_close())
+    monkeypatch.setattr(f4, "_closing_task", close_task)
+    f4.live.ws_connected = True
+    task = real_asyncio.create_task(f4.run())
+    await real_asyncio.wait_for(monitor_started.wait(), 1)
+    # 한 모니터가 끝나 run()이 pending close를 shield로 기다리는 시점에 취소한다.
+    await real_asyncio.wait_for(shield_started.wait(), 1)
+    task.cancel()
+
+    with pytest.raises(real_asyncio.CancelledError):
+        await task
+
+    assert monitor_cleaned.is_set()
+    assert f4._active_monitor_tasks == set()
+    assert f4.live.ws_connected is False
+
+    # shield된 청산 자체는 취소되지 않아야 한다.
+    assert not close_task.done()
+    release_close.set()
+    await real_asyncio.wait_for(close_task, 1)
+
 
 @pytest.mark.asyncio
 async def test_run_keeps_monitoring_and_alerts_when_backup_crashes(monkeypatch):

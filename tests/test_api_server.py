@@ -10,6 +10,7 @@ pytest.importorskip("fastapi")
 import src.api.server as server  # noqa: E402 — fastapi 미설치 시 모듈 스킵 이후 임포트
 import src.api.status_logic as status_logic  # noqa: E402
 import src.modules.f1_filter as f1_filter  # noqa: E402
+import src.modules.f3_entry as f3_entry  # noqa: E402
 import src.modules.f4_tracking as f4_tracking  # noqa: E402
 from src import db  # noqa: E402
 from src.schedule_times import (  # noqa: E402
@@ -436,11 +437,17 @@ async def test_api_settings_exposes_f4_timing_vi_and_rest_backup():
     assert payload["f4"]["force_trailing_time"] == (
         f"{f4_tracking.FORCE_TRAILING_HOUR:02d}:{f4_tracking.FORCE_TRAILING_MINUTE:02d}"
     )
+    assert payload["f3"]["total_budget_sec"] == f3_entry.F3_ENTRY_TOTAL_BUDGET_SEC
+    assert payload["f3"]["total_budget_enforcement"] is False
     assert payload["f4"]["rest_backup"] == {
         "enabled": f4_tracking.F4_REST_BACKUP_ENABLED,
         "only_when_ws_stale": f4_tracking.F4_REST_ONLY_WHEN_WS_STALE,
         "ws_stale_sec": f4_tracking.F4_WS_STALE_SEC,
         "poll_interval_sec": f4_tracking.F4_REST_POLL_INTERVAL_SEC,
+        "post_close_enabled": f4_tracking.F4_POST_CLOSE_REST_BACKUP_ENABLED,
+        "post_close_poll_interval_sec": (
+            f4_tracking.F4_POST_CLOSE_REST_POLL_INTERVAL_SEC
+        ),
     }
     assert payload["f5"] == {
         "timeout_time": f"{F5_EXEC_H:02d}:{F5_EXEC_M:02d}",

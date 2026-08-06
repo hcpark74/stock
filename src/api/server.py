@@ -52,6 +52,7 @@ from src.modules.f3_entry import (
     F3_ENTRY_RETRY_DEADLINE,
     F3_ENTRY_RETRY_DELAY_SEC,
     F3_ENTRY_RETRY_FILL_SEC,
+    F3_ENTRY_TOTAL_BUDGET_SEC,
     F3_FIRST_ORDER_AT,
     F3_PRE_ORDER_QUIET_SEC,
     F3_PYRAMID_AT,
@@ -63,6 +64,8 @@ from src.modules.f3_entry import (
     PYRAMID_MIN_UP,
 )
 from src.modules.f4_tracking import (
+    F4_POST_CLOSE_REST_BACKUP_ENABLED,
+    F4_POST_CLOSE_REST_POLL_INTERVAL_SEC,
     F4_REST_BACKUP_ENABLED,
     F4_REST_ONLY_WHEN_WS_STALE,
     F4_REST_POLL_INTERVAL_SEC,
@@ -696,6 +699,8 @@ async def api_settings() -> JSONResponse:
                 "first_fill_sec": F3_ENTRY_FIRST_FILL_SEC,
                 "retry_fill_sec": F3_ENTRY_RETRY_FILL_SEC,
                 "retry_deadline": F3_ENTRY_RETRY_DEADLINE,
+                "total_budget_sec": F3_ENTRY_TOTAL_BUDGET_SEC,
+                "total_budget_enforcement": False,
                 "pre_order_quiet_sec": F3_PRE_ORDER_QUIET_SEC,
                 "pyramid_fill_sec": F3_PYRAMID_FILL_SEC,
                 "vi_check_enabled": F3_VI_CHECK_ENABLED,
@@ -712,6 +717,10 @@ async def api_settings() -> JSONResponse:
                     "only_when_ws_stale": F4_REST_ONLY_WHEN_WS_STALE,
                     "ws_stale_sec": F4_WS_STALE_SEC,
                     "poll_interval_sec": F4_REST_POLL_INTERVAL_SEC,
+                    "post_close_enabled": F4_POST_CLOSE_REST_BACKUP_ENABLED,
+                    "post_close_poll_interval_sec": (
+                        F4_POST_CLOSE_REST_POLL_INTERVAL_SEC
+                    ),
                 },
             },
             "f5": {

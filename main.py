@@ -1292,32 +1292,36 @@ async def main() -> None:
     uvi.install_signal_handlers = lambda: None  # uvicorn의 시그널 핸들러 비활성화
     ui_task = asyncio.create_task(uvi.serve(), name="ui_server")
 
-    # Catchup은 F3 진입(실주문)까지 인라인 수행할 수 있으므로 F4 손절 추적·알림·UI가
-    # 살아있는 상태에서 실행한다. 스케줄러보다는 먼저 완료해 예약 잡과의 중복 실행을 막는다.
-    await _run_catchup()
-
     scheduler = None
-    if not dry_run:
-        scheduler = build(
-            token_refresh=job_token_refresh,
-            ntp_check=job_ntp_check,
-            paper_fast_probe=job_paper_fast_probe,
-            f1=job_f1,
-            f2=job_f2,
-            f3=job_f3,
-            f5_precheck=job_f5_precheck,
-            f5_exec=job_f5_exec,
-        )
-        scheduler.start()
-
     try:
-        await asyncio.Event().wait()
+        # Catchup은 F3 진입(실주문)까지 인라인 수행할 수 있으므로 F4 손절 추적·알림·UI가
+        # 살아있는 상태에서 실행한다. 스케줄러보다는 먼저 완료해 예약 잡과의 중복 실행을 막는다.
+        await _run_catchup()
+
+        if not dry_run:
+            scheduler = build(
+                token_refresh=job_token_refresh,
+                ntp_check=job_ntp_check,
+                paper_fast_probe=job_paper_fast_probe,
+                f1=job_f1,
+                f2=job_f2,
+                f3=job_f3,
+                f5_precheck=job_f5_precheck,
+                f5_exec=job_f5_exec,
+            )
+            scheduler.start()
+
+        # UI 태스크가 바인딩 실패 등으로 끝나면 프로세스도 실패 처리해야 PID 잠금만
+        # 남은 반쪽짜리 프로세스가 다음 재시작을 막지 않는다.
+        await ui_task
+        raise RuntimeError(f"UI server stopped unexpectedly: {ui_host}:{ui_port}")
     finally:
         if scheduler is not None:
             scheduler.shutdown(wait=False)
         uvi.should_exit = True          # uvicorn graceful 종료 신호
-        with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
-            await asyncio.wait_for(ui_task, timeout=2.0)
+        if not ui_task.done():
+            with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+                await asyncio.wait_for(ui_task, timeout=2.0)
         tasks = [task for task in (f4_task, notifier_task) if task is not None]
         for task in tasks:
             task.cancel()

@@ -234,6 +234,8 @@ F3_QUOTE_MOVE_WARN_PCT=1.5
 F3_FINAL_QUOTE_MAX_AGE_MS=1500
 # 상한 지정가 체결 대기 시간(초). 이후 잔량은 취소하고 체결분만 보유
 F3_LIMIT_FILL_TIMEOUT_SEC=2.0
+# 후보 선정 이후 총 진입시간 shadow 예산(초); 현재는 초과 로그만 기록
+F3_ENTRY_TOTAL_BUDGET_SEC=45.0
 # 추가 매수(피라미딩) 실행 시각과 체결 대기 시간(초)
 F3_PYRAMID_AT=09:10:40
 F3_PYRAMID_FILL_SEC=10.0
@@ -241,7 +243,12 @@ F4_REST_BACKUP_ENABLED=1
 F4_REST_ONLY_WHEN_WS_STALE=1
 F4_WS_STALE_SEC=2.0
 F4_REST_POLL_INTERVAL_SEC=1.0
+# 청산 후 차트 관측은 기본 WS-only
+F4_POST_CLOSE_REST_BACKUP_ENABLED=0
+F4_POST_CLOSE_REST_POLL_INTERVAL_SEC=30.0
 F4_HEARTBEAT_INTERVAL_SEC=30.0
+# 반복 백그라운드 API 지연 집계 주기
+KIS_LATENCY_SUMMARY_INTERVAL_SEC=60.0
 ```
 
 PAPER Fast Path 관측 범위와 다음 거래일 판정 기준은
@@ -283,10 +290,27 @@ Get-Content data\logs\(Get-Date -Format 'yyyyMMdd').jsonl -Wait
 
 ```powershell
 # 권장: 실행 터미널에서 Ctrl+C
-
-# 필요 시 PID 파일 기반 종료
-Stop-Process -Id (Get-Content main.pid) -Force
 ```
+
+`main.pid`는 중복 실행 방지용 잠금 파일이므로 외부 제어 인터페이스로 사용하지
+않습니다. 숨김 창으로 실행된 프로세스의 교체는 아래 안전 재시작 스크립트를
+사용하세요.
+
+안전 재시작:
+
+```powershell
+# IDLE/CLOSED 상태이고 DB에 미종료 거래가 없을 때만 재시작
+.\scripts\restart_main.ps1
+
+# 대상과 안전점검 결과만 확인하고 실제 종료/시작은 하지 않음
+.\scripts\restart_main.ps1 -WhatIf
+```
+
+스크립트는 이 저장소의 `.venv\Scripts\python.exe main.py` 프로세스만 대상으로
+하며, `HOLDING`·`ENTERING`·`EXITING`, pending 매수 주문, DB 미종료 거래가 있으면
+재시작을 차단합니다. `-AllowUnsafeState`는 손절 감시 중단과 주문 상태 유실 위험을
+직접 확인한 비상 상황에서만 사용하세요. 새 프로세스는 숨김 창으로 실행되고
+`/api/status`가 응답할 때까지 확인합니다.
 
 ## 5. 안전 테스트 모드 (DRY_RUN)
 

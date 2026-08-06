@@ -194,6 +194,45 @@ async def test_latency_warning_reports_network_wait_and_total_times(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_background_latency_is_aggregated_by_endpoint_and_context(monkeypatch):
+    clock = _ControlledClock()
+    events = []
+
+    monkeypatch.setattr(kis_rest.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(kis_rest.asyncio, "sleep", clock.sleep)
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 0)
+    monkeypatch.setattr(kis_rest, "_last_call_at", clock.now)
+    monkeypatch.setattr(kis_rest, "_LATENCY_SUMMARY_INTERVAL_SEC", 1.0)
+    monkeypatch.setattr(kis_rest, "_latency_windows", {})
+    monkeypatch.setattr(kis_rest.httpx, "AsyncClient", _timed_client(clock, 0.6))
+    monkeypatch.setattr(kis_rest, "log", lambda event, **fields: events.append((event, fields)))
+
+    for _ in range(3):
+        await kis_rest.get(
+            "/background-price",
+            latency_context="F4_POST_CLOSE",
+            aggregate_latency=True,
+        )
+
+    individual = [fields for event, fields in events if event == "LATENCY_HIGH"]
+    summaries = [fields for event, fields in events if event == "LATENCY_SUMMARY"]
+    assert len(individual) == 1
+    assert individual[0]["context"] == "F4_POST_CLOSE"
+    assert summaries == [{
+        "level": "WARN",
+        "api_endpoint": "/background-price",
+        "context": "F4_POST_CLOSE",
+        "count": 3,
+        "warn_count": 3,
+        "p50_ms": 600,
+        "p95_ms": 600,
+        "max_ms": 600,
+        "suppressed_count": 2,
+        "window_sec": 1.2,
+    }]
+
+
+@pytest.mark.asyncio
 async def test_kis_rest_reuses_client_and_closes_it(monkeypatch):
     class ReusableClient:
         instances = 0

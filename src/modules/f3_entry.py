@@ -45,6 +45,12 @@ F3_ENTRY_CANCEL_CONFIRM_FILL_SEC = float(os.getenv("F3_ENTRY_CANCEL_CONFIRM_FILL
 F3_ENTRY_FIRST_FILL_SEC = float(os.getenv("F3_ENTRY_FIRST_FILL_SEC", "12.0"))
 F3_ENTRY_RETRY_FILL_SEC = float(os.getenv("F3_ENTRY_RETRY_FILL_SEC", "8.0"))
 F3_ENTRY_RETRY_DEADLINE = os.getenv("F3_ENTRY_RETRY_DEADLINE", "09:11:00")
+# 우선 계측(shadow)만 수행한다. 초과해도 신규 주문을 차단하지 않으며 실제
+# 분포를 확인한 뒤 별도 변경으로 enforcement를 활성화한다.
+F3_ENTRY_TOTAL_BUDGET_SEC = max(
+    0.0,
+    _env_float("F3_ENTRY_TOTAL_BUDGET_SEC", 45.0),
+)
 F3_PRE_ORDER_QUIET_SEC = float(os.getenv("F3_PRE_ORDER_QUIET_SEC", "1.5"))
 F3_LIMIT_BUY_ENABLED = os.getenv("F3_LIMIT_BUY_ENABLED", "1") == "1"
 F3_ASK_SLIPPAGE_RATIO = max(
@@ -393,6 +399,33 @@ def _picked_is_funded(picked: dict | None, ticker: str) -> bool:
 
 
 async def run(force: bool = False) -> None:
+    """진입 파이프라인 실행과 총예산 shadow 계측을 감싼다."""
+    if force:
+        await _run_pipeline(force=True)
+        return
+    started_at = time.perf_counter()
+    try:
+        await _run_pipeline(force=False)
+    finally:
+        elapsed_sec = max(0.0, time.perf_counter() - started_at)
+        if (
+            F3_ENTRY_TOTAL_BUDGET_SEC > 0
+            and elapsed_sec > F3_ENTRY_TOTAL_BUDGET_SEC
+        ):
+            s = state.get()
+            log(
+                "ENTRY_BUDGET_EXCEEDED_SHADOW",
+                level="INFO",
+                ticker=s.target_ticker,
+                elapsed_ms=round(elapsed_sec * 1000),
+                budget_ms=round(F3_ENTRY_TOTAL_BUDGET_SEC * 1000),
+                position_status=s.position_status,
+                close_reason=s.close_reason,
+                enforcement=False,
+            )
+
+
+async def _run_pipeline(force: bool = False) -> None:
     s = state.get()
     candidates = _entry_candidate_tickers(s)
     if s.day_skip or not candidates or os.getenv("DRY_RUN", "0") == "1":
@@ -1054,6 +1087,16 @@ async def _run_single(
 
         await _pre_order_quiet_wait(ticker, attempt, max_attempts, expected_price, first_qty)
         last_run_attempt = attempt
+        if attempt > 1 and F3_LIMIT_BUY_ENABLED:
+            early_reject_reason = await _early_retry_gap_guard(
+                ticker,
+                expected_price=expected_price,
+                prev_close=prev_close,
+                allow_candidate_retry=allow_candidate_retry,
+                entry_attempt=attempt,
+            )
+            if early_reject_reason is not None:
+                return early_reject_reason
         buyable = await _fetch_buyable_qty(ticker, mode)
         if buyable.get("query_failed"):
             _log_entry_blocked(
@@ -2264,6 +2307,53 @@ async def _reject_final_entry_price(
     return reason
 
 
+async def _early_retry_gap_guard(
+    ticker: str,
+    *,
+    expected_price: float,
+    prev_close: float,
+    allow_candidate_retry: bool,
+    entry_attempt: int,
+) -> str | None:
+    """느린 수량·VI 조회 전에 재시도 후보의 명백한 갭 이탈만 조기 차단한다.
+
+    조기 호가가 없거나 이미 오래됐으면 기존 주문 직전 검사를 그대로 수행한다.
+    유효한 경우에도 실제 주문 직전 호가 검사는 생략하지 않는다.
+    """
+    entry_quote = await _fetch_final_entry_quote(ticker)
+    if entry_quote is None:
+        return None
+    quote_age_ms = _quote_age_ms(entry_quote)
+    if F3_FINAL_QUOTE_MAX_AGE_MS > 0 and quote_age_ms > F3_FINAL_QUOTE_MAX_AGE_MS:
+        return None
+
+    fresh_gap = (entry_quote.ask_price / prev_close) - 1 if prev_close > 0 else -1.0
+    log(
+        "ENTRY_RETRY_EARLY_GAP_CHECK",
+        level="INFO",
+        ticker=ticker,
+        entry_attempt=entry_attempt,
+        ask_price=entry_quote.ask_price,
+        prev_close=prev_close,
+        fresh_gap_pct=round(fresh_gap * 100, 3),
+        gap_allowed=_gap_in_order_range(fresh_gap),
+        quote_age_ms=quote_age_ms,
+    )
+    if _gap_in_order_range(fresh_gap):
+        return None
+    return await _reject_final_entry_price(
+        ticker,
+        "GAP_CHANGED",
+        allow_candidate_retry=allow_candidate_retry,
+        anchor_price=expected_price,
+        prev_close=prev_close,
+        ask_price=entry_quote.ask_price,
+        limit_price=_strict_gap_cap(prev_close),
+        quote_age_ms=quote_age_ms,
+        fresh_gap=fresh_gap,
+    )
+
+
 async def _alert_balance_query_failed(ticker: str | None, candidates: list[str]) -> None:
     """잔고 조회 실패 확정 — 실제 잔고 부족(INSUFFICIENT_BALANCE)과 구분해 기록·통지한다."""
     log(
@@ -3259,11 +3349,15 @@ async def _poll_fill(
             return latest_fill
         try:
             attempts += 1
-            latest = await _fetch_order_fill_snapshot(
-                order_id,
-                ticker=ticker,
-                expected_qty=expected_qty,
-                update_poll_summary=True,
+            remaining = (deadline - datetime.now(KST)).total_seconds()
+            latest = await asyncio.wait_for(
+                _fetch_order_fill_snapshot(
+                    order_id,
+                    ticker=ticker,
+                    expected_qty=expected_qty,
+                    update_poll_summary=True,
+                ),
+                timeout=max(0.001, remaining),
             )
             _last_fill_poll_summary["poll_attempts"] = attempts
             latest_fill = _more_complete_fill(latest_fill, latest)
@@ -3286,6 +3380,14 @@ async def _poll_fill(
                     remaining_qty=max(0, expected_qty - fill_qty),
                     fill_price=latest_fill.get("fill_price"),
                 )
+        except asyncio.TimeoutError:
+            _last_fill_poll_summary.update({
+                "poll_attempts": attempts,
+                "poll_last_error": "DEADLINE_TIMEOUT",
+            })
+            log("ENTRY_FILL_POLL_TIMEOUT", level="WARN", ticker=ticker,
+                order_id=order_id, **_last_fill_poll_summary)
+            return latest_fill
         except Exception as exc:
             _last_fill_poll_summary.update({
                 "poll_attempts": attempts,

@@ -39,6 +39,15 @@ F4_REST_POLL_INTERVAL_SEC = max(
     0.0,
     _env_float("F4_REST_POLL_INTERVAL_SEC", 1.0),
 )
+# CLOSED 상태의 관측은 차트 보강용일 뿐 주문 안전과 무관하다. 기본값은
+# WS-only로 두어 장시간 REST 폴링과 stale 경고 폭주를 만들지 않는다.
+F4_POST_CLOSE_REST_BACKUP_ENABLED = (
+    os.getenv("F4_POST_CLOSE_REST_BACKUP_ENABLED", "0") == "1"
+)
+F4_POST_CLOSE_REST_POLL_INTERVAL_SEC = max(
+    0.1,
+    _env_float("F4_POST_CLOSE_REST_POLL_INTERVAL_SEC", 30.0),
+)
 F4_FILL_POLL_INTERVAL_SEC = max(
     0.0,
     _env_float("F4_FILL_POLL_INTERVAL_SEC", 0.5),
@@ -276,6 +285,10 @@ async def run() -> None:
         return (now_mono - last_ws_tick_at) >= F4_WS_STALE_SEC
 
     def should_poll_rest() -> bool:
+        if state.get().position_status == "CLOSED":
+            return F4_POST_CLOSE_REST_BACKUP_ENABLED and (
+                not F4_REST_ONLY_WHEN_WS_STALE or is_ws_stale()
+            )
         return not F4_REST_ONLY_WHEN_WS_STALE or is_ws_stale()
 
     def ws_tick_age_ms() -> int | None:
@@ -364,16 +377,25 @@ async def run() -> None:
                 )
     finally:
         closing = _closing_task
-        for task in tasks:
-            if task is closing:
-                continue
-            if not task.done():
-                task.cancel()
-        if closing is not None and not closing.done():
-            await asyncio.shield(closing)
-        await asyncio.gather(*tasks, return_exceptions=True)
-        _active_monitor_tasks.difference_update(tasks)
-        live.ws_connected = False
+        # EXITING 전환으로 WS/health 태스크가 먼저 끝나더라도, 청산을 호출한
+        # 모니터 태스크를 취소하기 전에 보호된 청산 태스크부터 완료한다.
+        # 순서가 반대면 _trigger_close()의 부모가 정상 청산 중 취소되어
+        # F4_CLOSE_CANCEL_REQUESTED가 거짓 CRIT로 기록된다.
+        try:
+            if closing is not None and not closing.done():
+                await asyncio.shield(closing)
+        finally:
+            # shield()는 내부 청산을 보호하지만 run() 자체가 취소되면 여기서
+            # CancelledError를 던진다. 정리는 별도 finally에 두어 모든 모니터를
+            # 회수하고 연결 상태를 반드시 초기화한다.
+            for task in tasks:
+                if task is closing:
+                    continue
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            _active_monitor_tasks.difference_update(tasks)
+            live.ws_connected = False
 
 
 async def _run_monitor_heartbeat(
@@ -413,6 +435,13 @@ async def _run_ws_health_monitor(
         max(0.1, F4_WS_STALE_SEC / 2),
     )
     while _price_observation_active():
+        # 청산 후에는 주문 안전과 무관한 차트 관측만 수행한다. 실제 소켓
+        # 단절은 kis_ws.subscribe()가 WS_DISCONNECTED로 계속 기록하므로,
+        # 2초 체결 공백을 WARN/복구 쌍으로 반복 기록하지 않는다.
+        if state.get().position_status == "CLOSED":
+            stale_reported = False
+            await asyncio.sleep(interval_sec)
+            continue
         stale = bool(is_ws_stale())
         fields = {**ws_status_fields(), "ws_stale": stale}
         if stale and not stale_reported:
@@ -438,18 +467,35 @@ async def _run_rest_price_backup(
         interval_sec=F4_REST_POLL_INTERVAL_SEC,
         only_when_ws_stale=F4_REST_ONLY_WHEN_WS_STALE,
         ws_stale_sec=F4_WS_STALE_SEC,
+        post_close_enabled=F4_POST_CLOSE_REST_BACKUP_ENABLED,
+        post_close_interval_sec=F4_POST_CLOSE_REST_POLL_INTERVAL_SEC,
     )
     while _price_observation_active():
+        is_post_close = state.get().position_status == "CLOSED"
         should_poll = (
             bool(should_poll_rest())
             if should_poll_rest is not None
             else True
         )
+        if is_post_close and not F4_POST_CLOSE_REST_BACKUP_ENABLED:
+            should_poll = False
+        interval_sec = (
+            F4_POST_CLOSE_REST_POLL_INTERVAL_SEC
+            if is_post_close
+            else F4_REST_POLL_INTERVAL_SEC
+        )
         if not should_poll:
-            await asyncio.sleep(F4_REST_POLL_INTERVAL_SEC)
+            await asyncio.sleep(interval_sec)
             continue
         try:
-            price = await _fetch_current_price(ticker)
+            if is_post_close:
+                price = await _fetch_current_price(
+                    ticker,
+                    latency_context="F4_POST_CLOSE",
+                    aggregate_latency=True,
+                )
+            else:
+                price = await _fetch_current_price(ticker)
             if price > 0:
                 await _handle_price_tick(
                     price,
@@ -463,7 +509,7 @@ async def _run_rest_price_backup(
         except Exception as e:
             # 백업 폴러가 죽으면 WS까지 함께 취소되므로 절대 전파하지 않는다
             log("F4_REST_BACKUP_ERROR", level="WARN", ticker=ticker, error=repr(e))
-        await asyncio.sleep(F4_REST_POLL_INTERVAL_SEC)
+        await asyncio.sleep(interval_sec)
 
 
 async def _handle_price_tick(
@@ -972,11 +1018,18 @@ async def _run_dry_ticks(ticker: str, spike_filter: SpikeFilter) -> None:
     )
 
 
-async def _fetch_current_price(ticker: str) -> float:
+async def _fetch_current_price(
+    ticker: str,
+    *,
+    latency_context: str | None = None,
+    aggregate_latency: bool = False,
+) -> float:
     resp = await kis_rest.get(
         "/uapi/domestic-stock/v1/quotations/inquire-price",
         tr_id="FHKST01010100",
         params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker},
+        latency_context=latency_context,
+        aggregate_latency=aggregate_latency,
     )
     out = resp.get("output", {}) if isinstance(resp.get("output"), dict) else {}
     return float(out.get("stck_prpr") or out.get("antc_cnpr") or 0)

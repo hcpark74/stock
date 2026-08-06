@@ -1992,3 +1992,39 @@ async def test_main_spawns_resident_f4_loop(monkeypatch):
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
             await asyncio.wait_for(task, 5)
+
+
+async def test_main_exits_and_releases_pid_when_ui_server_fails(monkeypatch):
+    """UI 바인딩 실패가 PID 잠금만 보유한 반쪽 프로세스를 남기면 안 된다."""
+
+    async def fake_run_forever():
+        await asyncio.Event().wait()
+
+    class FailingUviServer:
+        def __init__(self, _config):
+            self.should_exit = False
+
+        async def serve(self):
+            raise OSError("bind failed")
+
+    clear_pid = MagicMock()
+    monkeypatch.setenv("DRY_RUN", "1")
+    monkeypatch.setattr(main.logger, "setup", lambda *a, **k: None)
+    monkeypatch.setattr(main.logger, "log", lambda *a, **k: None)
+    monkeypatch.setattr(main, "_write_pid", lambda: True)
+    monkeypatch.setattr(main, "_clear_pid", clear_pid)
+    monkeypatch.setattr(main.db, "init", AsyncMock())
+    monkeypatch.setattr(main.db, "close", AsyncMock())
+    monkeypatch.setattr(main, "_recover_state", AsyncMock())
+    monkeypatch.setattr(main, "_run_catchup", AsyncMock())
+    monkeypatch.setattr(main.f4_tracking, "run_forever", fake_run_forever)
+    monkeypatch.setattr(main.uvicorn, "Config", lambda *a, **k: None)
+    monkeypatch.setattr(main.uvicorn, "Server", FailingUviServer)
+    monkeypatch.setattr(main.kis_rest, "close_client", AsyncMock())
+
+    with pytest.raises(OSError, match="bind failed"):
+        await asyncio.wait_for(main.main(), 1)
+
+    clear_pid.assert_called_once_with()
+    main.db.close.assert_awaited_once_with()
+    main.kis_rest.close_client.assert_awaited_once_with()

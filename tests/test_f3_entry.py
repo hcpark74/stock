@@ -1,4 +1,6 @@
+import asyncio
 import os as _os
+import time
 from datetime import timedelta as _timedelta
 from unittest.mock import AsyncMock, MagicMock
 
@@ -4259,6 +4261,28 @@ async def test_poll_fill_never_starts_query_at_or_after_deadline(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_poll_fill_cancels_inflight_get_at_deadline(monkeypatch):
+    """느린 GET 하나가 체결 폴링의 전체 마감을 연장하지 않는다."""
+    deadline = f3.datetime.now(f3.KST) + _timedelta(seconds=0.02)
+    events = []
+
+    async def slow_snapshot(*_args, **_kwargs):
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(f3, "_fetch_order_fill_snapshot", slow_snapshot)
+    monkeypatch.setattr(f3, "log", lambda event, **fields: events.append((event, fields)))
+
+    started = time.perf_counter()
+    fill = await f3._poll_fill("O-SLOW", deadline=deadline, ticker="006340")
+    elapsed = time.perf_counter() - started
+
+    assert fill is None
+    assert elapsed < 0.2
+    assert f3._last_fill_poll_summary["poll_last_error"] == "DEADLINE_TIMEOUT"
+    assert [event for event, _ in events].count("ENTRY_FILL_POLL_TIMEOUT") == 1
+
+
+@pytest.mark.asyncio
 async def test_poll_fill_returns_partial_on_timeout(monkeypatch):
     """마감 시 확인된 부분체결 요약/반환 시맨틱을 보존한다."""
     start = f3.datetime.now(f3.KST)
@@ -4304,6 +4328,51 @@ def _limit_quote(ask, *, age_sec=0.0):
         fetched_monotonic=f3.time.monotonic() - age_sec,
         rt_cd="0", msg_cd="MCA00000", msg1="OK",
     )
+
+
+@pytest.mark.asyncio
+async def test_retry_early_gap_guard_blocks_before_slow_checks(monkeypatch):
+    _reset_state()
+    state.get().position_status = "ENTERING"
+    reject = AsyncMock(return_value="GAP_CHANGED")
+    monkeypatch.setattr(
+        f3,
+        "_fetch_final_entry_quote",
+        AsyncMock(return_value=_limit_quote(10_050)),
+    )
+    monkeypatch.setattr(f3, "_reject_final_entry_price", reject)
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+
+    reason = await f3._early_retry_gap_guard(
+        "005930",
+        expected_price=10_300,
+        prev_close=10_000,
+        allow_candidate_retry=True,
+        entry_attempt=2,
+    )
+
+    assert reason == "GAP_CHANGED"
+    reject.assert_awaited_once()
+    assert reject.await_args.args[:2] == ("005930", "GAP_CHANGED")
+
+
+@pytest.mark.asyncio
+async def test_entry_total_budget_is_shadow_only(monkeypatch):
+    events = []
+    clock = iter([100.0, 146.0])
+    pipeline = AsyncMock()
+    monkeypatch.setattr(f3.time, "perf_counter", lambda: next(clock))
+    monkeypatch.setattr(f3, "F3_ENTRY_TOTAL_BUDGET_SEC", 45.0)
+    monkeypatch.setattr(f3, "_run_pipeline", pipeline)
+    monkeypatch.setattr(f3, "log", lambda event, **fields: events.append((event, fields)))
+
+    await f3.run(force=False)
+
+    pipeline.assert_awaited_once_with(force=False)
+    shadow = [fields for event, fields in events if event == "ENTRY_BUDGET_EXCEEDED_SHADOW"]
+    assert len(shadow) == 1
+    assert shadow[0]["enforcement"] is False
+    assert shadow[0]["elapsed_ms"] == 46_000
 
 
 @pytest.mark.asyncio

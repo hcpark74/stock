@@ -21,10 +21,15 @@ _MAX_TRANSIENT_RETRIES = int(os.getenv("KIS_MAX_TRANSIENT_RETRIES", "2"))
 _TRANSIENT_RETRY_BASE_SEC = float(os.getenv("KIS_TRANSIENT_RETRY_BASE_SEC", "1.0"))
 _TRANSIENT_RETRY_MAX_SEC = float(os.getenv("KIS_TRANSIENT_RETRY_MAX_SEC", "8.0"))
 _TIMEOUT = 15.0        # 잔고조회 등 느린 API 대응 (문서: "조회속도가 느린 API")
+_LATENCY_SUMMARY_INTERVAL_SEC = max(
+    0.0,
+    float(os.getenv("KIS_LATENCY_SUMMARY_INTERVAL_SEC", "60.0")),
+)
 _rate_lock = asyncio.Lock()
 _client_lock = asyncio.Lock()
 _client: httpx.AsyncClient | None = None
 _client_factory: object | None = None
+_latency_windows: dict[tuple[str, str], dict] = {}
 SEND_GUARD_BLOCKED_MSG_CD = "LOCAL_SEND_GUARD_BLOCKED"
 RATE_LIMIT_CODES = frozenset({"EGW00201"})
 
@@ -64,6 +69,64 @@ def _transient_sleep_seconds(retry: int) -> float:
 def _rate_limit_sleep_seconds(retry: int, path: str) -> float:
     """Use the established one-second delay for each confirmed rate-limit retry."""
     return 1.0
+
+
+def _percentile(values: list[int], ratio: float) -> int:
+    ordered = sorted(values)
+    index = int((len(ordered) - 1) * ratio)
+    return ordered[index]
+
+
+def _log_latency(
+    path: str,
+    level: str,
+    fields: dict,
+    *,
+    context: str | None,
+    aggregate: bool,
+) -> None:
+    """반복 백그라운드 지연은 창 단위로 집계하고 주문 경로는 건별 유지한다."""
+    enriched = dict(fields)
+    if context:
+        enriched["context"] = context
+    if not aggregate or _LATENCY_SUMMARY_INTERVAL_SEC <= 0:
+        log("LATENCY_HIGH", level=level, api_endpoint=path, **enriched)
+        return
+
+    now = time.monotonic()
+    key = (path, context or "")
+    window = _latency_windows.get(key)
+    if window is None:
+        _latency_windows[key] = {
+            "started_at": now,
+            "values": [int(fields["network_ms"])],
+            "warn_count": 1 if level == "WARN" else 0,
+        }
+        log("LATENCY_HIGH", level=level, api_endpoint=path, **enriched)
+        return
+
+    values = window["values"]
+    values.append(int(fields["network_ms"]))
+    if level == "WARN":
+        window["warn_count"] += 1
+    if now - window["started_at"] < _LATENCY_SUMMARY_INTERVAL_SEC:
+        return
+
+    count = len(values)
+    log(
+        "LATENCY_SUMMARY",
+        level="WARN" if window["warn_count"] else "INFO",
+        api_endpoint=path,
+        context=context,
+        count=count,
+        warn_count=window["warn_count"],
+        p50_ms=_percentile(values, 0.50),
+        p95_ms=_percentile(values, 0.95),
+        max_ms=max(values),
+        suppressed_count=max(0, count - 1),
+        window_sec=round(now - window["started_at"], 3),
+    )
+    _latency_windows.pop(key, None)
 
 
 def _headers(tr_id: str = "", tr_cont: str = "") -> dict:
@@ -123,6 +186,8 @@ async def _request(
     stop_on_rate_limit: bool = False,
     tr_cont: str = "",
     include_response_meta: bool = False,
+    latency_context: str | None = None,
+    aggregate_latency: bool = False,
     **kwargs,
 ) -> dict:
     """Rate-limited KIS REST 요청.
@@ -200,6 +265,8 @@ async def _request(
                 stop_on_rate_limit=stop_on_rate_limit,
                 tr_cont=tr_cont,
                 include_response_meta=include_response_meta,
+                latency_context=latency_context,
+                aggregate_latency=aggregate_latency,
                 **kwargs,
             )
         log(
@@ -233,9 +300,21 @@ async def _request(
     }
 
     if network_ms > 500:
-        log("LATENCY_HIGH", level="WARN", api_endpoint=path, **latency_fields)
+        _log_latency(
+            path,
+            "WARN",
+            latency_fields,
+            context=latency_context,
+            aggregate=aggregate_latency,
+        )
     elif network_ms > 200:
-        log("LATENCY_HIGH", level="INFO", api_endpoint=path, **latency_fields)
+        _log_latency(
+            path,
+            "INFO",
+            latency_fields,
+            context=latency_context,
+            aggregate=aggregate_latency,
+        )
 
     # 429 — Rate limit 초과
     if resp.status_code == 429:
@@ -258,6 +337,8 @@ async def _request(
             stop_on_rate_limit=stop_on_rate_limit,
             tr_cont=tr_cont,
             include_response_meta=include_response_meta,
+            latency_context=latency_context,
+            aggregate_latency=aggregate_latency,
             **kwargs,
         )
         if _app_retry == 0 and str(result.get("rt_cd", "1")) == "0":
@@ -285,6 +366,8 @@ async def _request(
                 stop_on_rate_limit=stop_on_rate_limit,
                 tr_cont=tr_cont,
                 include_response_meta=include_response_meta,
+                latency_context=latency_context,
+                aggregate_latency=aggregate_latency,
                 **kwargs,
             )
 
@@ -310,6 +393,8 @@ async def _request(
                 stop_on_rate_limit=stop_on_rate_limit,
                 tr_cont=tr_cont,
                 include_response_meta=include_response_meta,
+                latency_context=latency_context,
+                aggregate_latency=aggregate_latency,
                 **kwargs,
             )
 
@@ -345,6 +430,8 @@ async def _request(
             stop_on_rate_limit=stop_on_rate_limit,
             tr_cont=tr_cont,
             include_response_meta=include_response_meta,
+            latency_context=latency_context,
+            aggregate_latency=aggregate_latency,
             **kwargs,
         )
         if _app_retry == 0 and str(result.get("rt_cd", "1")) == "0":
@@ -372,6 +459,8 @@ async def get(
     stop_on_rate_limit: bool = False,
     tr_cont: str = "",
     include_response_meta: bool = False,
+    latency_context: str | None = None,
+    aggregate_latency: bool = False,
 ) -> dict:
     return await _request(
         "GET",
@@ -382,6 +471,8 @@ async def get(
         stop_on_rate_limit=stop_on_rate_limit,
         tr_cont=tr_cont,
         include_response_meta=include_response_meta,
+        latency_context=latency_context,
+        aggregate_latency=aggregate_latency,
     )
 
 
@@ -391,6 +482,8 @@ async def post(
     tr_id: str = "",
     timeout: float = _TIMEOUT,
     send_guard: Callable[[], bool] | None = None,
+    latency_context: str | None = None,
+    aggregate_latency: bool = False,
 ) -> dict:
     return await _request(
         "POST",
@@ -398,5 +491,7 @@ async def post(
         tr_id=tr_id,
         timeout=timeout,
         send_guard=send_guard,
+        latency_context=latency_context,
+        aggregate_latency=aggregate_latency,
         json=body,
     )
