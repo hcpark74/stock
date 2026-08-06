@@ -22,6 +22,7 @@ def holding_state(monkeypatch):
     s.high_price = 10_400.0
     s.trade_id = 7
     s.highest_step = 0.0
+    s.pending_exit = None
     monkeypatch.setattr(f5_timeout, "_RETRY_INTERVAL", 0)
     monkeypatch.setattr(f5_timeout, "_prefetch_qty", 10)
     monkeypatch.setattr(
@@ -36,6 +37,7 @@ def holding_state(monkeypatch):
     s.position_status = "IDLE"
     s.close_reason = None
     s.trade_id = 0
+    s.pending_exit = None
 
 
 def _wire_db(monkeypatch):
@@ -46,6 +48,7 @@ def _wire_db(monkeypatch):
     monkeypatch.setattr(f5_timeout.db, "update_order_fill", update_fill)
     monkeypatch.setattr(f5_timeout.db, "close_trade", close_trade)
     monkeypatch.setattr(f5_timeout.db, "update_order_status", AsyncMock())
+    monkeypatch.setattr(f5_timeout.db, "update_order_submission", AsyncMock())
     return record_order, update_fill, close_trade
 
 
@@ -442,8 +445,8 @@ async def test_confirmed_fill_closes_trade_once(monkeypatch):
     assert state.get().remaining_qty == 0
 
 
-async def test_exception_then_confirmed_fill_recovers(monkeypatch):
-    """1차 주문 예외 후 2차에서 잔고 재검증을 거쳐 체결 확인되면 정상 종료."""
+async def test_exception_without_matching_order_blocks_reorder(monkeypatch):
+    """주문 예외 후 기존 주문을 찾지 못하면 중복 위험 때문에 재주문하지 않는다."""
     send_sell = AsyncMock(side_effect=[RuntimeError("boom"), {"output": {"ODNO": "S2"}}])
     monkeypatch.setattr(f5_timeout, "_send_sell", send_sell)
     monkeypatch.setattr(f5_timeout, "_poll_fill", AsyncMock(
@@ -453,14 +456,20 @@ async def test_exception_then_confirmed_fill_recovers(monkeypatch):
     record_order, update_fill, close_trade = _wire_db(monkeypatch)
     send = AsyncMock()
     monkeypatch.setattr(f5_timeout.notifier, "send", send)
+    monkeypatch.setattr(
+        f5_timeout.exit_recovery,
+        "find_matching_order",
+        AsyncMock(return_value=("NOT_FOUND", None)),
+    )
 
     await f5_timeout.execute()
 
-    assert send_sell.await_count == 2
-    fetch_qty.assert_awaited()
-    close_trade.assert_awaited_once()
+    assert send_sell.await_count == 1
+    fetch_qty.assert_not_awaited()
+    close_trade.assert_not_awaited()
     codes = [c.args[0] for c in send.await_args_list]
-    assert "TIMEOUT_ORDER_FAILED" not in codes
+    assert "EXIT_ORDER_SUBMISSION_UNKNOWN" in codes
+    assert state.get().position_status == "EXITING"
 
 
 async def test_db_record_failure_does_not_trigger_reorder(monkeypatch):
@@ -481,10 +490,9 @@ async def test_db_record_failure_does_not_trigger_reorder(monkeypatch):
     await f5_timeout.execute()
 
     assert send_sell.await_count == 1
-    update_fill.assert_not_awaited()             # order_db_id 없음 — 체결 기록 생략
+    update_fill.assert_not_awaited()
     close_trade.assert_awaited_once()
-    codes = [c.args[0] for c in send.await_args_list]
-    assert "TIMEOUT_ORDER_FAILED" not in codes
+    assert state.get().position_status == "CLOSED"
 
 
 async def test_poll_fill_waits_for_full_quantity(monkeypatch):

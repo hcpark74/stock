@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from src import db, live, notifier, state
 from src.api import kis_rest, kis_ws
+from src.modules import exit_recovery
 from src.modules import vi_watch as vi_watch_mod
 from src.modules.vi_watch import ViWatch
 from src.utils.logger import log
@@ -788,6 +789,102 @@ async def _execute_close(price: float, reason: str) -> bool:
         raise
 
 
+async def recover_pending_exit() -> bool:
+    """재시작 시 내구적으로 저장된 매도 의도를 KIS 주문과 대사한다."""
+    s = state.get()
+    pending = dict(s.pending_exit or {})
+    if s.position_status != "EXITING" or not pending:
+        return False
+    mode = os.getenv("KIS_MODE", "PAPER")
+    outcome, snapshot = await exit_recovery.reconcile_pending_intent(mode)
+    if outcome == "RECONCILED" and snapshot is not None:
+        if s.trade_id:
+            summary = await db.sell_fill_summary(s.trade_id)
+            total_qty = int(summary.get("fill_qty") or 0)
+            total_amt = float(summary.get("fill_amt") or 0)
+            close_target_qty = int(s.entry_qty or 0)
+            remaining_qty = max(0, close_target_qty - total_qty)
+        else:
+            # SQLite 강등 포지션은 누적 체결 원장이 없으므로 이 pending 주문의
+            # 요청량과 KIS 누적 체결/잔량만으로 판단한다.
+            total_qty = int(snapshot.get("fill_qty") or 0)
+            total_amt = float(snapshot.get("fill_amt") or 0)
+            close_target_qty = int(pending.get("requested_qty") or 0)
+            remaining_qty = int(
+                snapshot.get("remaining_qty")
+                if snapshot.get("remaining_qty") is not None
+                else max(0, close_target_qty - total_qty)
+            )
+        if (
+            close_target_qty > 0
+            and total_qty >= close_target_qty
+            and remaining_qty <= 0
+        ):
+            exit_price = round(total_amt / total_qty) if total_qty else 0
+            entry = float(s.entry_price or 0)
+            pnl_pct = round((exit_price / entry - 1) * 100, 2) if entry else 0.0
+            reason = str(pending.get("reason") or s.close_reason or "TIMEOUT")
+            if s.trade_id:
+                await db.close_trade(
+                    s.trade_id,
+                    exit_price,
+                    reason,
+                    pnl_pct,
+                    s.highest_step,
+                    exit_qty=total_qty,
+                    high_price=s.high_price,
+                )
+            await state.set_closed(reason)
+            await state.persist(
+                os.getenv("STATE_DIR", "data/state"),
+                datetime.now(KST).strftime("%Y%m%d"),
+            )
+            log(
+                "EXIT_ORDER_RECOVERY_CLOSED",
+                level="CRIT",
+                ticker=s.target_ticker,
+                order_id=snapshot.get("order_id"),
+                exit_qty=total_qty,
+                exit_price=exit_price,
+            )
+            await notifier.send(
+                "EXIT_ORDER_RESPONSE_RECOVERED",
+                level="CRIT",
+                message=(
+                    f"재시작 매도 주문 대사 완료: {s.target_ticker} "
+                    f"{total_qty}주 전량 체결 확인"
+                ),
+                ticker=s.target_ticker,
+            )
+            return True
+        await state.set_exit_remaining_qty(remaining_qty)
+
+    state.get().day_skip = True
+    await state.persist(
+        os.getenv("STATE_DIR", "data/state"),
+        datetime.now(KST).strftime("%Y%m%d"),
+    )
+    log(
+        "EXIT_ORDER_RECOVERY_PENDING",
+        level="CRIT",
+        ticker=s.target_ticker,
+        outcome=outcome,
+        order_id=(snapshot or {}).get("order_id"),
+        fill_qty=(snapshot or {}).get("fill_qty"),
+        remaining_qty=s.remaining_qty,
+    )
+    await notifier.send(
+        "EXIT_ORDER_RECOVERY_PENDING",
+        level="CRIT",
+        message=(
+            f"재시작 매도 주문 대사 미완료({outcome}): {s.target_ticker}. "
+            "자동 재주문을 차단했습니다. 주문/잔고를 확인하세요."
+        ),
+        ticker=s.target_ticker,
+    )
+    return False
+
+
 async def _execute_close_impl(price: float, reason: str) -> bool:
     """잔여 전량 시장가 매도 후 로그/알림/DB 기록."""
     s = state.get()
@@ -818,36 +915,59 @@ async def _execute_close_impl(price: float, reason: str) -> bool:
     fill: dict | None = None
     filled_qty = 0
     full_fill_confirmed = False
+    order_db_id = 0
     try:
         order_started_at = time.perf_counter()
-        sell_resp = await _send_sell(s.target_ticker, qty, mode)
-        output = sell_resp.get("output") if isinstance(sell_resp.get("output"), dict) else {}
-        sell_id = output.get("ODNO", "")
-        if sell_resp.get("rt_cd") not in ("0", 0, None) or not sell_id:
-            raise RuntimeError(
-                f"sell rejected rt_cd={sell_resp.get('rt_cd')} "
-                f"msg_cd={sell_resp.get('msg_cd')} msg1={sell_resp.get('msg1')} "
-                f"order_id={sell_id or '-'}"
+        submission = await exit_recovery.submit_sell(
+            qty=qty,
+            reason=reason,
+            phase="SLIPPAGE_SELL" if reason == "SLIPPAGE_GUARD" else "CLOSE_SELL",
+            trigger_price=price,
+            mode=mode,
+            send=lambda: _send_sell(s.target_ticker, qty, mode),
+        )
+        if not submission.acknowledged:
+            sell_resp = submission.response or {}
+            event = (
+                "F4_SELL_SUBMISSION_UNKNOWN"
+                if submission.uncertain
+                else "F4_SELL_ERROR"
             )
-        if not await state.set_exiting(reason):
-            raise RuntimeError(
-                f"failed to transition HOLDING to EXITING: "
-                f"status={state.get().position_status}"
+            action = (
+                "주문 응답 유실 대사 실패 — 재주문하지 말고 KIS 주문/잔고 확인 필요"
+                if submission.uncertain
+                else "매도 주문 거절 또는 로컬 의도 저장 실패 — 수동 청산 필요"
             )
-        try:
-            await state.persist(
-                os.getenv("STATE_DIR", "data/state"),
-                datetime.now(KST).strftime("%Y%m%d"),
-            )
-        except Exception as exc:
             log(
-                "F4_STATE_PERSIST_ERROR",
-                level="WARN",
+                event,
+                level="CRIT",
                 ticker=s.target_ticker,
-                phase="EXITING",
-                error=repr(exc),
+                msg_cd=sell_resp.get("msg_cd"),
+                msg1=sell_resp.get("msg1"),
             )
-        fill = await _poll_fill(sell_id, timeout_sec=30, expect_qty=qty)
+            await notifier.send(
+                event,
+                level="CRIT",
+                message=f"{s.target_ticker} {action}",
+                ticker=s.target_ticker,
+            )
+            return False
+        sell_id = submission.order_id
+        order_db_id = submission.order_db_id
+        if submission.matched_order:
+            matched = submission.matched_order
+            matched_qty = int(matched.get("fill_qty") or 0)
+            if matched_qty > 0:
+                fill = {
+                    "fill_price": float(matched.get("fill_price") or 0),
+                    "fill_qty": matched_qty,
+                }
+        if not sell_id:
+            raise RuntimeError(
+                "sell acknowledged without order id after reconciliation"
+            )
+        if fill is None or int(fill.get("fill_qty") or 0) < qty:
+            fill = await _poll_fill(sell_id, timeout_sec=30, expect_qty=qty)
         if fill:
             exit_price = fill["fill_price"]
             filled_qty = max(0, int(fill.get("fill_qty") or 0))
@@ -873,21 +993,9 @@ async def _execute_close_impl(price: float, reason: str) -> bool:
 
     pnl_pct = round((exit_price / entry - 1) * 100, 2) if entry else 0.0
 
-    if s.trade_id:
+    if s.trade_id or order_db_id:
         try:
-            # 시장가 제출 가격(0)과 매도 트리거 가격을 분리하고 체결가는 별도 갱신한다.
-            order_db_id = await db.record_order(
-                s.trade_id,
-                sell_id,
-                "SELL",
-                qty,
-                0.0,
-                "SLIPPAGE_SELL" if reason == "SLIPPAGE_GUARD" else "CLOSE_SELL",
-                s.target_ticker,
-                s.target_name,
-                trigger_price=price,
-            )
-            if fill:
+            if fill and order_db_id:
                 await db.update_order_fill(
                     order_db_id,
                     exit_price,
@@ -895,7 +1003,7 @@ async def _execute_close_impl(price: float, reason: str) -> bool:
                     fill_latency_ms,
                     status="FILLED" if full_fill_confirmed else "PARTIAL_FILL",
                 )
-            if full_fill_confirmed:
+            if full_fill_confirmed and s.trade_id:
                 await db.close_trade(
                     s.trade_id,
                     exit_price,
@@ -1047,6 +1155,7 @@ async def _send_sell(ticker: str, qty: int, mode: str) -> dict:
             "ORD_QTY": str(qty),
             "ORD_UNPR": "0",
         },
+        include_response_meta=True,
     )
 
 

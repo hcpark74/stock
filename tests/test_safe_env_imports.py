@@ -68,3 +68,29 @@ def test_negative_f4_intervals_are_clamped_at_zero():
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_pytest_import_mode_does_not_load_local_dotenv_values():
+    env = os.environ.copy()
+    env["STOCK_SKIP_DOTENV"] = "1"
+    env.pop("F4_POST_CLOSE_OBSERVE_UNTIL", None)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import api_tests._helper;"
+                "import main;"
+                "from src.modules import f4_tracking;"
+                "assert f4_tracking.F4_POST_CLOSE_OBSERVE_UNTIL == '09:10'"
+            ),
+        ],
+        cwd=os.getcwd(),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr

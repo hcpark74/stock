@@ -5,8 +5,30 @@ from collections.abc import Callable
 
 import httpx
 
+from src import live
 from src.api import auth
 from src.utils.logger import log
+
+REAL_CASH_BUY_TR = "TTTC0012U"
+
+
+def _with_response_meta(
+    data: dict,
+    *,
+    enabled: bool,
+    http_status: int | None,
+    request_sent: bool,
+    tr_cont: str = "",
+) -> dict:
+    if not enabled:
+        return data
+    result = dict(data)
+    result["_response_meta"] = {
+        "tr_cont": tr_cont,
+        "http_status": http_status,
+        "request_sent": request_sent,
+    }
+    return result
 
 
 def default_rate_interval() -> float:
@@ -188,6 +210,7 @@ async def _request(
     include_response_meta: bool = False,
     latency_context: str | None = None,
     aggregate_latency: bool = False,
+    allow_real_smoke_buy: bool = False,
     **kwargs,
 ) -> dict:
     """Rate-limited KIS REST 요청.
@@ -198,6 +221,32 @@ async def _request(
 
     base_url = os.getenv("KIS_BASE_URL", "")
     url = base_url + path
+
+    is_gated_real_buy = (
+        method == "POST"
+        and os.getenv("KIS_MODE", "PAPER") == "REAL"
+        and tr_id == REAL_CASH_BUY_TR
+        and not live.real_entry_enabled
+    )
+    if is_gated_real_buy and not allow_real_smoke_buy:
+        log(
+            "REAL_ENTRY_BLOCKED",
+            level="CRIT",
+            path=path,
+            reason="REAL_READINESS_BELOW_100",
+        )
+        return _with_response_meta({
+            "rt_cd": "1",
+            "msg_cd": "LOCAL_REAL_READINESS_BLOCKED",
+            "msg1": "REAL entry blocked until readiness reaches 100%",
+        }, enabled=include_response_meta, http_status=None, request_sent=False)
+    if is_gated_real_buy and allow_real_smoke_buy and _transient_retry == 0:
+        log(
+            "REAL_SMOKE_BUY_AUTHORIZED",
+            level="CRIT",
+            path=path,
+            reason="EXPLICIT_SMOKE_TEST_CONFIRMATION",
+        )
 
     total_start = time.monotonic()
     await _rate_lock.acquire()
@@ -213,21 +262,21 @@ async def _request(
 
     try:
         if send_guard is not None and not send_guard():
-            return {
+            return _with_response_meta({
                 "rt_cd": "1",
                 "msg_cd": SEND_GUARD_BLOCKED_MSG_CD,
                 "msg1": "request blocked by send guard",
-            }
+            }, enabled=include_response_meta, http_status=None, request_sent=False)
         client = await _get_client()
         client_ready_at = time.monotonic()
         client_setup_ms = int((client_ready_at - request_ready_at) * 1000)
         # 클라이언트 준비 중 주문 마감이 지날 수 있으므로 전송 직전에 다시 검사한다.
         if send_guard is not None and not send_guard():
-            return {
+            return _with_response_meta({
                 "rt_cd": "1",
                 "msg_cd": SEND_GUARD_BLOCKED_MSG_CD,
                 "msg1": "request blocked by send guard",
-            }
+            }, enabled=include_response_meta, http_status=None, request_sent=False)
         request_start = time.monotonic()
         resp = await client.request(
             method,
@@ -267,6 +316,7 @@ async def _request(
                 include_response_meta=include_response_meta,
                 latency_context=latency_context,
                 aggregate_latency=aggregate_latency,
+                allow_real_smoke_buy=allow_real_smoke_buy,
                 **kwargs,
             )
         log(
@@ -278,11 +328,12 @@ async def _request(
         )
         # output 키는 넣지 않는다 — 호출부가 resp.get("output", 기본값)으로
         # 각자 올바른 기본형(dict/list)을 쓰도록 위임.
-        return {
+        return _with_response_meta({
             "rt_cd": "1",
             "msg_cd": exc.__class__.__name__,
             "msg1": str(exc),
-        }
+        }, enabled=include_response_meta, http_status=None,
+            request_sent=not isinstance(exc, httpx.ConnectError))
     # Keep latency_ms for existing log consumers, but make it represent the
     # actual HTTP round trip. The old measurement also included the deliberate
     # local rate-limit wait, which made normal PAPER-mode throttling look like
@@ -316,15 +367,18 @@ async def _request(
             aggregate=aggregate_latency,
         )
 
-    # 429 — Rate limit 초과
+    # 429 — Rate limit 초과. GET만 재시도한다. POST는 서버 도달 후 반환된
+    # 응답이므로 자동 재전송하지 않고 request_sent=True 메타와 함께 돌려준다.
+    # 매도 호출부는 이를 확정 거절이 아닌 UNKNOWN으로 저장하고 주문 대사하며,
+    # 끝내 확인되지 않으면 EXITING을 유지한다(중복 매도 방지 우선 정책).
     if resp.status_code == 429:
         log("RATE_LIMIT_HIT", level="WARN", path=path)
         if stop_on_rate_limit or method != "GET" or _app_retry >= 3:
-            return {
+            return _with_response_meta({
                 "rt_cd": "1",
                 "msg_cd": "HTTP_429",
                 "msg1": "HTTP 429 rate limit",
-            }
+            }, enabled=include_response_meta, http_status=429, request_sent=True)
         await asyncio.sleep(_rate_limit_sleep_seconds(_app_retry, path))
         result = await _request(
             method,
@@ -339,6 +393,7 @@ async def _request(
             include_response_meta=include_response_meta,
             latency_context=latency_context,
             aggregate_latency=aggregate_latency,
+            allow_real_smoke_buy=allow_real_smoke_buy,
             **kwargs,
         )
         if _app_retry == 0 and str(result.get("rt_cd", "1")) == "0":
@@ -368,6 +423,7 @@ async def _request(
                 include_response_meta=include_response_meta,
                 latency_context=latency_context,
                 aggregate_latency=aggregate_latency,
+                allow_real_smoke_buy=allow_real_smoke_buy,
                 **kwargs,
             )
 
@@ -395,6 +451,7 @@ async def _request(
                 include_response_meta=include_response_meta,
                 latency_context=latency_context,
                 aggregate_latency=aggregate_latency,
+                allow_real_smoke_buy=allow_real_smoke_buy,
                 **kwargs,
             )
 
@@ -432,6 +489,7 @@ async def _request(
             include_response_meta=include_response_meta,
             latency_context=latency_context,
             aggregate_latency=aggregate_latency,
+            allow_real_smoke_buy=allow_real_smoke_buy,
             **kwargs,
         )
         if _app_retry == 0 and str(result.get("rt_cd", "1")) == "0":
@@ -443,12 +501,15 @@ async def _request(
             )
         return result
 
-    if include_response_meta and isinstance(data, dict):
-        data = dict(data)
-        data["_response_meta"] = {
-            "tr_cont": str(resp.headers.get("tr_cont") or ""),
-        }
-    return data
+    if not isinstance(data, dict):
+        return data
+    return _with_response_meta(
+        data,
+        enabled=include_response_meta,
+        http_status=int(resp.status_code),
+        request_sent=True,
+        tr_cont=str(getattr(resp, "headers", {}).get("tr_cont") or ""),
+    )
 
 
 async def get(
@@ -484,6 +545,8 @@ async def post(
     send_guard: Callable[[], bool] | None = None,
     latency_context: str | None = None,
     aggregate_latency: bool = False,
+    include_response_meta: bool = False,
+    allow_real_smoke_buy: bool = False,
 ) -> dict:
     return await _request(
         "POST",
@@ -493,5 +556,7 @@ async def post(
         send_guard=send_guard,
         latency_context=latency_context,
         aggregate_latency=aggregate_latency,
+        include_response_meta=include_response_meta,
+        allow_real_smoke_buy=allow_real_smoke_buy,
         json=body,
     )

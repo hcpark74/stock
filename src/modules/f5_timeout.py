@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 from src import db, notifier, state
 from src.api import kis_rest
+from src.modules import exit_recovery
 from src.utils.logger import log
 
 KST = ZoneInfo("Asia/Seoul")
@@ -211,6 +212,11 @@ async def execute() -> None:
                             except Exception as e:
                                 log("TIMEOUT_ORDER_DB_RECORD_FAILED", level="WARN",
                                     ticker=ticker, order_id=last_sell_id, error=repr(e))
+                    if status is not None and int(status.get("rmn_qty") or 0) <= 0:
+                        await state.clear_pending_exit()
+                        await state.persist(
+                            os.getenv("STATE_DIR", "data/state"), today_str
+                        )
             if remaining <= 0:
                 break
             # 2) 실제 잔고 재검증 — 검증된 수량만 재주문한다.
@@ -249,10 +255,38 @@ async def execute() -> None:
 
         try:
             send_started_at = time.perf_counter()
-            resp = await _send_sell(ticker, remaining, mode)
-            output = resp.get("output", {})
-            last_sell_id = output.get("ODNO", "")
-            last_org_no = output.get("KRX_FWDG_ORD_ORGNO", "")
+            submission = await exit_recovery.submit_sell(
+                qty=remaining,
+                reason="TIMEOUT",
+                phase="TIMEOUT_SELL",
+                trigger_price=ref_price,
+                mode=mode,
+                send=lambda: _send_sell(ticker, remaining, mode),
+            )
+            if not submission.acknowledged:
+                if submission.uncertain:
+                    log(
+                        "TIMEOUT_ORDER_SUBMISSION_UNKNOWN",
+                        level="CRIT",
+                        ticker=ticker,
+                        attempt=attempt,
+                    )
+                    await notifier.send(
+                        "EXIT_ORDER_SUBMISSION_UNKNOWN",
+                        level="CRIT",
+                        message=(
+                            f"마감 매도 응답 유실 대사 실패: {ticker}. "
+                            "자동 재주문을 차단했습니다. 주문/잔고를 확인하세요."
+                        ),
+                        ticker=ticker,
+                    )
+                    return
+                raise RuntimeError(
+                    str((submission.response or {}).get("msg1") or "sell rejected")
+                )
+            last_sell_id = submission.order_id
+            last_org_no = submission.org_no
+            order_db_id = submission.order_db_id
             order_started_at = send_started_at
             if liquidation_started_at is None:
                 liquidation_started_at = send_started_at
@@ -265,26 +299,6 @@ async def execute() -> None:
         order_sent_qty = remaining
         order_recorded_qty = 0
         order_recorded_amt = 0.0
-        order_db_id = 0
-        if s.trade_id:
-            # 주문 발송 직후 PENDING으로 기록. DB 기록 실패는 재주문 사유가 아니므로
-            # 주문 실패 경로와 분리해 로그만 남긴다.
-            try:
-                order_db_id = await db.record_order(
-                    s.trade_id,
-                    last_sell_id,
-                    "SELL",
-                    remaining,
-                    0.0,
-                    "TIMEOUT_SELL",
-                    ticker,
-                    s.target_name,
-                    trigger_price=ref_price,
-                )
-            except Exception as e:
-                log("TIMEOUT_ORDER_DB_RECORD_FAILED", level="WARN",
-                    ticker=ticker, order_id=last_sell_id, error=repr(e))
-
         fill = await _poll_fill(last_sell_id, timeout_sec=30, expect_qty=remaining)
         if fill:
             fill_qty = int(fill.get("fill_qty") or 0)
@@ -404,6 +418,7 @@ async def _send_sell(ticker: str, qty: int, mode: str) -> dict:
             "ORD_QTY": str(qty),
             "ORD_UNPR": "0",
         },
+        include_response_meta=True,
     )
 
 

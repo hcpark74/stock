@@ -60,7 +60,9 @@ async def _run_tick(
 # ── 픽스처 ────────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
-def holding_state():
+def holding_state(monkeypatch):
+    import src.modules.f4_tracking as f4
+
     s = _state_mod.get()
     s.position_status = "HOLDING"
     s.entry_price = ENTRY
@@ -70,8 +72,10 @@ def holding_state():
     s.trailing_active = False
     s.highest_step = 0.0
     s.trade_id = 0
+    s.pending_exit = None
     s.entry_at = None
     s.post_close_tracking_stopped = False
+    monkeypatch.setattr(f4.db, "update_order_submission", AsyncMock())
 
 
 # ── 스텝 갱신 정확성 ──────────────────────────────────────────────────
@@ -1224,26 +1228,26 @@ async def test_execute_close_sends_critical_alert_on_sell_error(monkeypatch):
     persist = AsyncMock()
 
     monkeypatch.setenv("DRY_RUN", "0")
+    _state_mod.get().trade_id = 123
     monkeypatch.setattr(
         "src.modules.f4_tracking._send_sell",
         AsyncMock(side_effect=RuntimeError("sell failed")),
     )
     monkeypatch.setattr("src.modules.f4_tracking.notifier.send", notify)
+    monkeypatch.setattr(
+        "src.modules.f4_tracking.exit_recovery.find_matching_order",
+        AsyncMock(return_value=("NOT_FOUND", None)),
+    )
     monkeypatch.setattr("src.modules.f4_tracking.db.record_order", record_order)
     monkeypatch.setattr("src.modules.f4_tracking.state.persist", persist)
 
     result = await _execute_close(ENTRY * 0.98, "HARD_STOP")
 
     assert result is False
-    assert _state_mod.get().position_status == "HOLDING"
-    notify.assert_awaited_once_with(
-        "F4_SELL_ERROR",
-        level="CRIT",
-        message="매도 주문 오류: 005930 RuntimeError('sell failed'). 수동 청산 필요",
-        ticker="005930",
-    )
-    record_order.assert_not_awaited()
-    persist.assert_not_awaited()
+    assert _state_mod.get().position_status == "EXITING"
+    assert notify.await_args.args[0] == "F4_SELL_SUBMISSION_UNKNOWN"
+    record_order.assert_awaited_once()
+    assert persist.await_count >= 2
 
 
 @pytest.mark.asyncio
@@ -1373,6 +1377,7 @@ async def test_execute_close_treats_rejected_sell_response_as_failure(monkeypatc
         "src.modules.f4_tracking._send_sell",
         AsyncMock(return_value={
             "rt_cd": "1", "msg_cd": "EGW00001", "msg1": "rejected", "output": {},
+            "_response_meta": {"http_status": 200, "request_sent": True},
         }),
     )
     monkeypatch.setattr("src.modules.f4_tracking.notifier.send", notify)
@@ -1387,7 +1392,7 @@ async def test_execute_close_treats_rejected_sell_response_as_failure(monkeypatc
     notify.assert_awaited_once()
     record_order.assert_not_awaited()
     close_trade.assert_not_awaited()
-    persist.assert_not_awaited()
+    assert persist.await_count >= 2
 
 @pytest.mark.asyncio
 async def test_execute_close_logs_and_alerts_when_directly_cancelled(monkeypatch):
@@ -1399,6 +1404,9 @@ async def test_execute_close_logs_and_alerts_when_directly_cancelled(monkeypatch
     async def cancelled_sell(*_args, **_kwargs):
         raise asyncio.CancelledError()
 
+    _state_mod.get().trade_id = 123
+    monkeypatch.setattr(f4.db, "record_order", AsyncMock(return_value=9))
+    monkeypatch.setattr(f4.state, "persist", AsyncMock())
     monkeypatch.setattr(f4, "_send_sell", cancelled_sell)
     monkeypatch.setattr(f4.notifier, "send", notify)
     monkeypatch.setattr(f4, "log", lambda event, **kwargs: events.append((event, kwargs)))
@@ -1411,7 +1419,7 @@ async def test_execute_close_logs_and_alerts_when_directly_cancelled(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_execute_close_closes_state_when_db_recording_fails_after_sell(monkeypatch):
+async def test_execute_close_still_sells_when_intent_db_recording_fails(monkeypatch):
     from src.modules import f4_tracking as f4
 
     notify = AsyncMock()
@@ -1439,12 +1447,11 @@ async def test_execute_close_closes_state_when_db_recording_fails_after_sell(mon
 
     assert result is True
     assert _state_mod.get().position_status == "CLOSED"
-    assert _state_mod.get().close_reason == "HARD_STOP"
     assert _state_mod.get().remaining_qty == 0
-    assert "F4_CLOSE_RECORD_ERROR" in [event for event, _ in events]
+    assert "HARD_STOP" in [event for event, _ in events]
     notify.assert_awaited_once()
-    assert persist.await_count == 2  # EXITING 접수 직후 + CLOSED 확정 후
-    close_trade.assert_not_awaited()
+    f4._send_sell.assert_awaited_once()
+    close_trade.assert_awaited_once()
 
 @pytest.mark.asyncio
 async def test_trigger_close_warns_only_once_while_close_is_in_progress(monkeypatch):

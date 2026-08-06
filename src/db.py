@@ -47,6 +47,8 @@ async def init(db_path: str) -> None:
             pyramided    INTEGER DEFAULT 0,
             status       TEXT NOT NULL DEFAULT 'OPEN'
                              CHECK (status IN ('OPEN','CLOSED','SKIPPED')),
+            execution_mode TEXT,
+            strategy_fingerprint TEXT,
             created_at   TEXT NOT NULL,
             updated_at   TEXT NOT NULL
         );
@@ -78,12 +80,14 @@ async def init(db_path: str) -> None:
             ordered_at      TEXT NOT NULL,
             filled_at       TEXT,
             error_code      TEXT,
-            error_msg       TEXT
+            error_msg       TEXT,
+            client_order_id TEXT,
+            submission_state TEXT NOT NULL DEFAULT 'ACKNOWLEDGED',
+            submitted_at    TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_orders_trade_id     ON orders(trade_id);
         CREATE INDEX IF NOT EXISTS idx_orders_kis_order_id ON orders(kis_order_id);
-
         CREATE TABLE IF NOT EXISTS partial_exits (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             trade_id      INTEGER NOT NULL REFERENCES trades(id),
@@ -143,6 +147,27 @@ async def init(db_path: str) -> None:
         await _conn.execute("ALTER TABLE orders ADD COLUMN trigger_price REAL")
     except Exception:
         pass  # already exists
+    for table, column, definition in (
+        ("trades", "execution_mode", "TEXT"),
+        ("trades", "strategy_fingerprint", "TEXT"),
+        ("orders", "client_order_id", "TEXT"),
+        (
+            "orders",
+            "submission_state",
+            "TEXT NOT NULL DEFAULT 'ACKNOWLEDGED'",
+        ),
+        ("orders", "submitted_at", "TEXT"),
+    ):
+        try:
+            await _conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+            )
+        except Exception:
+            pass
+    await _conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_client_order_id
+               ON orders(client_order_id) WHERE client_order_id IS NOT NULL"""
+    )
     # Older rows used order_price as the decision-time reference even for
     # market orders. Preserve that history while new rows separate the actual
     # submitted price from the trigger/reference price.
@@ -287,15 +312,33 @@ async def open_trade(
     name: str | None = None,
 ) -> int:
     """Insert a trade and return its id. Existing same-day trades are reused."""
+    import os
+
+    from src.release import strategy_fingerprint
+
     now = _now()
+    execution_mode = os.getenv("KIS_MODE", "PAPER")
+    fingerprint = strategy_fingerprint()
     conn = get()
     try:
         async with conn.execute(
             """INSERT INTO trades
                    (date, ticker, name, entry_price, entry_qty, entry_at,
-                    status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)""",
-            (date, ticker, name, entry_price, entry_qty, now, now, now),
+                    status, execution_mode, strategy_fingerprint,
+                    created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?)""",
+            (
+                date,
+                ticker,
+                name,
+                entry_price,
+                entry_qty,
+                now,
+                execution_mode,
+                fingerprint,
+                now,
+                now,
+            ),
         ) as cur:
             trade_id = cur.lastrowid
         await conn.commit()
@@ -323,7 +366,21 @@ async def open_trade(
 
 async def get_trade_by_date(date: str) -> dict | None:
     conn = get()
-    async with conn.execute("SELECT * FROM trades WHERE date=?", (date,)) as cur:
+    async with conn.execute(
+        """SELECT t.*,
+                  COALESCE(
+                      (SELECT SUM(o.fill_qty)
+                         FROM orders o
+                        WHERE o.trade_id=t.id
+                          AND o.order_type='BUY'
+                          AND o.fill_qty > 0),
+                      t.entry_qty,
+                      0
+                  ) AS confirmed_entry_qty
+             FROM trades t
+            WHERE t.date=?""",
+        (date,),
+    ) as cur:
         row = await cur.fetchone()
     return dict(row) if row else None
 
@@ -368,6 +425,8 @@ async def record_order(
     name: str | None = None,
     *,
     trigger_price: float | None = None,
+    client_order_id: str | None = None,
+    submission_state: str = "ACKNOWLEDGED",
 ) -> int:
     """Insert a pending order and return its local id.
 
@@ -380,8 +439,8 @@ async def record_order(
         """INSERT INTO orders
                (trade_id, kis_order_id, order_type, order_phase,
                 ticker, name, order_qty, order_price, trigger_price,
-                status, ordered_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)""",
+                status, ordered_at, client_order_id, submission_state)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?)""",
         (
             trade_id,
             kis_order_id,
@@ -393,11 +452,115 @@ async def record_order(
             price,
             trigger_price,
             now,
+            client_order_id,
+            submission_state,
         ),
     ) as cur:
         order_db_id = cur.lastrowid
     await conn.commit()
     return order_db_id
+
+
+async def update_order_submission(
+    order_db_id: int,
+    submission_state: str,
+    *,
+    kis_order_id: str | None = None,
+    error_code: str | None = None,
+    error_msg: str | None = None,
+    submitted: bool = False,
+) -> None:
+    """매도 주문의 전송 경계를 내구적으로 기록한다."""
+    conn = get()
+    assignments = [
+        "submission_state=?",
+        "error_code=?",
+        "error_msg=?",
+    ]
+    params: list[object] = [submission_state, error_code, error_msg]
+    if kis_order_id is not None:
+        assignments.append("kis_order_id=?")
+        params.append(kis_order_id)
+    if submitted:
+        assignments.append("submitted_at=?")
+        params.append(_now())
+    params.append(order_db_id)
+    await conn.execute(
+        f"UPDATE orders SET {', '.join(assignments)} WHERE id=?",
+        tuple(params),
+    )
+    await conn.commit()
+
+
+async def get_order_by_client_id(client_order_id: str) -> dict | None:
+    conn = get()
+    async with conn.execute(
+        "SELECT * FROM orders WHERE client_order_id=? LIMIT 1",
+        (client_order_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+async def get_known_sell_order_ids(trade_id: int) -> set[str]:
+    """같은 거래에서 이미 식별된 매도 주문번호를 반환한다.
+
+    응답 유실 대사 시 이전 재시도의 취소·체결 주문을 새 주문으로 오인하지
+    않도록, 현재 전송 전에 알고 있던 주문번호를 제외하는 데 사용한다.
+    """
+    if trade_id <= 0:
+        return set()
+    conn = get()
+    async with conn.execute(
+        """SELECT kis_order_id
+             FROM orders
+            WHERE trade_id=?
+              AND order_type='SELL'
+              AND kis_order_id IS NOT NULL
+              AND kis_order_id <> ''""",
+        (trade_id,),
+    ) as cur:
+        rows = await cur.fetchall()
+    return {str(row["kis_order_id"]) for row in rows}
+
+
+async def get_unresolved_exit_intent(date: str) -> dict | None:
+    """상태 파일 갱신 직전 장애를 DB 주문 의도에서 복구한다."""
+    conn = get()
+    async with conn.execute(
+        """SELECT o.*
+               FROM orders o
+               JOIN trades t ON t.id=o.trade_id
+              WHERE t.date=?
+                AND o.order_type='SELL'
+                AND o.client_order_id IS NOT NULL
+                AND o.status IN ('PENDING','PARTIAL_FILL')
+                AND o.submission_state IN (
+                    'PREPARED','SUBMITTING','UNKNOWN','ACKNOWLEDGED'
+                )
+              ORDER BY o.id DESC
+              LIMIT 1""",
+        (date,),
+    ) as cur:
+        row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+async def sell_fill_summary(trade_id: int) -> dict:
+    """확인된 모든 매도 체결의 수량·대금 합계."""
+    conn = get()
+    async with conn.execute(
+        """SELECT COALESCE(SUM(fill_qty), 0) AS fill_qty,
+                  COALESCE(SUM(fill_qty * fill_price), 0) AS fill_amt
+             FROM orders
+            WHERE trade_id=? AND order_type='SELL' AND fill_qty > 0""",
+        (trade_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    return {
+        "fill_qty": int(row["fill_qty"] or 0),
+        "fill_amt": float(row["fill_amt"] or 0),
+    }
 
 
 async def update_order_fill(

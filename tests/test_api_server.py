@@ -365,6 +365,7 @@ async def test_api_settings_returns_contract(monkeypatch):
     monkeypatch.setenv("KIS_MODE", "PAPER")
     monkeypatch.setenv("DRY_RUN", "0")
     monkeypatch.setenv("KIS_RATE_INTERVAL_SEC", "0.2")
+    monkeypatch.setattr(server.live, "real_entry_enabled", True)
 
     resp = await server.api_settings()
     payload = json.loads(resp.body.decode("utf-8"))
@@ -386,6 +387,8 @@ async def test_api_settings_returns_contract(monkeypatch):
     assert {"paths", "f1", "f2", "f3", "f4", "safety"} <= payload.keys()
     assert payload["f2"]["retry_f1_on_fail_supported"] is False
     assert payload["safety"]["kis_rate_interval_sec"] == 0.2
+    assert payload["safety"]["real_entry_enabled"] is True
+    assert payload["real_readiness"]["runtime_entry_latch_open"] is True
 
 
 @pytest.mark.asyncio

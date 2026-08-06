@@ -21,6 +21,16 @@ EVENT_LABELS = {
         "전일 활성 상태 일일 전환 차단(Stale Active Rollover Blocked)"
     ),
     "PROCESS_RESTART_DETECTED": "프로세스 재시작 감지(Process Restart Detected)",
+    "STARTUP_RECOVERY_FAILED": "시작 시 포지션 대사 실패(Startup Recovery Failed)",
+    "STARTUP_RECOVERY_FALLBACK_FAILED": (
+        "시작 대사 상태 복원 실패(Startup Recovery Fallback Failed)"
+    ),
+    "STARTUP_RECOVERY_ALERT_FAILED": (
+        "시작 대사 실패 알림 오류(Startup Recovery Alert Failed)"
+    ),
+    "STRATEGY_FINGERPRINT_LOCKED": (
+        "프로세스 전략 지문 고정(Strategy Fingerprint Locked)"
+    ),
     "TIME_SYNC_OK": "시각 동기화 정상(Time Sync OK)",
     "TIME_SYNC_WARN": "시각 오차 경고(Time Sync Warning)",
     "TIME_SYNC_FALLBACK": "시각 동기화 서버 재시도(Time Sync Fallback)",
@@ -133,6 +143,7 @@ EVENT_LABELS = {
     "ENTRY_CANCEL_REJECTED_FILLED": "취소 거부 후 체결 확인(Entry Cancel Rejected But Filled)",
     "ENTRY_CANCEL_UNCONFIRMED": "진입 주문 취소 확인 실패(Entry Cancel Unconfirmed)",
     "ENTRY_PENDING_PERSIST_ERROR": "진입 주문 복구정보 저장 실패(Entry Pending Persist Error)",
+    "ENTRY_DB_DEGRADED": "진입 후 DB 감사기록 장애(Entry DB Degraded)",
     "ENTRY_PARTIAL_FILL": "진입 부분체결(Entry Partial Fill)",
     "ENTRY_FILL_RECONCILED": "진입 최종체결 대조(Entry Fill Reconciled)",
     "F3_FINAL_QUOTE": "F3 주문 직전 호가(F3 Final Quote)",
@@ -194,6 +205,33 @@ EVENT_LABELS = {
     "F4_ENTRY_AT_INVALID": "F4 진입시각 오류(F4 Entry Time Invalid)",
     "TICK_SPIKE_DROPPED": "이상 틱 제외(Tick Spike Dropped)",
     "F4_SELL_ERROR": "F4 매도 오류(F4 Sell Error)",
+    "F4_SELL_SUBMISSION_UNKNOWN": (
+        "F4 매도 접수 여부 불명(F4 Sell Submission Unknown)"
+    ),
+    "EXIT_INTENT_PERSIST_FAILED": (
+        "청산 의도 영속화 실패(Exit Intent Persist Failed)"
+    ),
+    "EXIT_ORDER_DB_DEGRADED": (
+        "청산 주문 DB 감사기록 장애(Exit Order DB Degraded)"
+    ),
+    "EXIT_ORDER_EXCLUSION_QUERY_FAILED": (
+        "이전 매도 주문 제외목록 조회 실패(Exit Order Exclusion Query Failed)"
+    ),
+    "EXIT_ORDER_RESPONSE_RECOVERED": (
+        "유실된 매도 응답 대사 완료(Exit Order Response Recovered)"
+    ),
+    "EXIT_ORDER_SUBMISSION_UNKNOWN": (
+        "매도 주문 접수 여부 불명(Exit Order Submission Unknown)"
+    ),
+    "EXIT_ORDER_RECONCILE_QUERY_FAILED": (
+        "매도 주문 대사 조회 실패(Exit Order Reconcile Query Failed)"
+    ),
+    "EXIT_ORDER_RECOVERY_CLOSED": (
+        "재시작 청산 체결 복구 완료(Exit Order Recovery Closed)"
+    ),
+    "EXIT_ORDER_RECOVERY_PENDING": (
+        "재시작 청산 대기 유지(Exit Order Recovery Pending)"
+    ),
     "TRAILING_STOP": "트레일링 스탑 청산(Trailing Stop)",
     "HARD_STOP": "하드 스탑 청산(Hard Stop)",
     "F5_PRECHECK": "F5 청산 사전 확인(F5 Precheck)",
@@ -201,7 +239,19 @@ EVENT_LABELS = {
     "TIMEOUT_CLOSE": "타임아웃 청산(Timeout Close)",
     "TIMEOUT_RETRY": "타임아웃 청산 재시도(Timeout Retry)",
     "TIMEOUT_ORDER_FAILED": "타임아웃 청산 주문 실패(Timeout Order Failed)",
+    "TIMEOUT_ORDER_STATUS_UNKNOWN": (
+        "타임아웃 매도 상태 불명(Timeout Order Status Unknown)"
+    ),
+    "TIMEOUT_ORDER_SUBMISSION_UNKNOWN": (
+        "타임아웃 매도 접수 여부 불명(Timeout Order Submission Unknown)"
+    ),
     "TIMEOUT_STATE_CLOSE_FAILED": "타임아웃 상태 종료 실패(Timeout State Close Failed)",
+    "REAL_START_BLOCKED": "실전 시작 준비도 미달(Real Start Blocked)",
+    "REAL_ENTRY_BLOCKED": "실전 매수 준비도 차단(Real Entry Blocked)",
+    "REAL_SMOKE_BUY_AUTHORIZED": (
+        "실전 스모크 매수 승인(Real Smoke Buy Authorized)"
+    ),
+    "REAL_READINESS_FAILED": "실전 준비도 계산 실패(Real Readiness Failed)",
     "NOTIFICATION_FAILED": "알림 전송 실패(Notification Failed)",
     "ORDER_SMOKE_BUY_START": "주문 테스트 매수 시작(Order Smoke Buy Start)",
     "ORDER_SMOKE_BUY_FILLED": "주문 테스트 매수 체결(Order Smoke Buy Filled)",

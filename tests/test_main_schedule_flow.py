@@ -1315,6 +1315,38 @@ async def test_recover_state_terminal_state_file_skips_db_fallback(monkeypatch):
     assert skipped["recovered_status"] == "STATE_FILE_TERMINAL_SKIP_DB_FALLBACK"
 
 
+async def test_recover_state_restores_closed_trade_when_state_file_missing(monkeypatch):
+    today = main.datetime.now(main.KST).strftime("%Y%m%d")
+    persist = AsyncMock()
+    monkeypatch.setattr(main.state, "load", lambda _state_dir: None)
+    monkeypatch.setattr(
+        main.db,
+        "get_trade_by_date",
+        AsyncMock(return_value={
+            "id": 22,
+            "date": today,
+            "ticker": "439960",
+            "name": "코스모로보틱스",
+            "entry_price": 19_820.0,
+            "entry_qty": 376,
+            "entry_at": "2026-08-06T09:00:26+09:00",
+            "high_price": 21_350.0,
+            "highest_step": 0.075,
+            "close_reason": "TRAILING",
+            "status": "CLOSED",
+        }),
+    )
+    monkeypatch.setattr(main.state, "persist", persist)
+    monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
+
+    await main._recover_state()
+
+    assert state_mod.get().position_status == "CLOSED"
+    assert state_mod.get().remaining_qty == 0
+    assert state_mod.get().trade_id == 22
+    persist.assert_awaited_once()
+
+
 async def test_recover_state_db_open_trade_without_actual_holding_does_not_restore(monkeypatch):
     events = []
     send = AsyncMock()
@@ -1392,6 +1424,167 @@ async def test_recover_state_db_open_trade_uses_actual_holding_qty_for_pyramid(m
     assert state_mod.get().entry_qty == 100
     assert state_mod.get().remaining_qty == 100
     persist.assert_awaited_once()
+
+
+async def test_recover_state_keeps_total_entry_qty_separate_from_partial_exit_balance(
+    monkeypatch,
+):
+    """100주 진입 후 60주 매도된 재시작은 entry=100, remaining=40으로 복원한다."""
+    persisted_statuses = []
+
+    async def capture_persist(*_args, **_kwargs):
+        persisted_statuses.append(state_mod.get().position_status)
+
+    persist = AsyncMock(side_effect=capture_persist)
+    recover_pending_exit = AsyncMock(return_value=False)
+    today = main.datetime.now(main.KST).strftime("%Y%m%d")
+    pending = {
+        "client_order_id": "partial-exit",
+        "requested_qty": 100,
+        "reason": "HARD_STOP",
+        "submission_state": "ACKNOWLEDGED",
+        "order_id": "S-PARTIAL",
+    }
+
+    monkeypatch.setattr(main.state, "load", lambda _state_dir: None)
+    monkeypatch.setattr(
+        main.db,
+        "get_trade_by_date",
+        AsyncMock(return_value={
+            "id": 77,
+            "date": today,
+            "ticker": "005930",
+            "entry_price": 75_000.0,
+            "entry_qty": 100,
+            "confirmed_entry_qty": 100,
+            "entry_at": "2026-08-06T09:01:00+09:00",
+            "high_price": 78_000.0,
+            "highest_step": 0.05,
+            "pyramided": 0,
+            "status": "OPEN",
+        }),
+    )
+    monkeypatch.setattr(
+        main.kis_rest,
+        "get",
+        AsyncMock(return_value={
+            "rt_cd": "0",
+            "output1": [{"pdno": "005930", "hldg_qty": "40"}],
+        }),
+    )
+
+    async def merge_pending(data, _date):
+        return {**data, "position_status": "EXITING", "pending_exit": pending}
+
+    monkeypatch.setattr(main.exit_recovery, "merge_db_intent", merge_pending)
+    monkeypatch.setattr(main.f4_tracking, "recover_pending_exit", recover_pending_exit)
+    monkeypatch.setattr(main.state, "persist", persist)
+    monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
+
+    await main._recover_state()
+
+    assert state_mod.get().position_status == "EXITING"
+    assert state_mod.get().entry_qty == 100
+    assert state_mod.get().remaining_qty == 40
+    assert persisted_statuses == ["EXITING"]
+    recover_pending_exit.assert_awaited_once_with()
+
+
+async def test_recover_state_partial_exit_end_to_end_keeps_trade_open(
+    monkeypatch,
+):
+    """실제 SQLite 원장으로 100주 진입→60주 매도→잔고 40주를 끝까지 대사한다."""
+    today = main.datetime.now(main.KST).strftime("%Y%m%d")
+    now = main.datetime.now(main.KST)
+    send = AsyncMock()
+    await main.db.init(":memory:")
+    try:
+        trade_id = await main.db.open_trade(
+            today, "005930", 10_000.0, 100, "삼성전자"
+        )
+        buy_db_id = await main.db.record_order(
+            trade_id,
+            "BUY-E2E",
+            "BUY",
+            100,
+            10_000.0,
+            "FIRST_BUY",
+            "005930",
+        )
+        await main.db.update_order_fill(buy_db_id, 10_000.0, 100, 100)
+        sell_db_id = await main.db.record_order(
+            trade_id,
+            "SELL-E2E",
+            "SELL",
+            100,
+            0.0,
+            "CLOSE_SELL",
+            "005930",
+            client_order_id="partial-e2e",
+            submission_state="ACKNOWLEDGED",
+        )
+        await main.db.update_order_submission(
+            sell_db_id,
+            "ACKNOWLEDGED",
+            kis_order_id="SELL-E2E",
+            submitted=True,
+        )
+        await main.db.update_order_fill(
+            sell_db_id,
+            9_800.0,
+            60,
+            100,
+            status="PARTIAL_FILL",
+        )
+
+        monkeypatch.setattr(main.state, "load", lambda _state_dir: None)
+        monkeypatch.setattr(
+            main.kis_rest,
+            "get",
+            AsyncMock(side_effect=[
+                {
+                    "rt_cd": "0",
+                    "output1": [{"pdno": "005930", "hldg_qty": "40"}],
+                },
+                {
+                    "rt_cd": "0",
+                    "output1": [{
+                        "odno": "SELL-E2E",
+                        "pdno": "005930",
+                        "ord_qty": "100",
+                        "ord_tmd": now.strftime("%H%M%S"),
+                        "sll_buy_dvsn_cd": "01",
+                        "tot_ccld_qty": "60",
+                        "rmn_qty": "40",
+                        "tot_ccld_amt": "588000",
+                    }],
+                },
+            ]),
+        )
+        monkeypatch.setattr(main.notifier, "send", send)
+        monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
+
+        await main._recover_state()
+
+        s = state_mod.get()
+        assert s.position_status == "EXITING"
+        assert s.entry_qty == 100
+        assert s.remaining_qty == 40
+        trade = await main.db.get_trade_by_date(today)
+        assert trade["status"] == "OPEN"
+        assert trade["exit_qty"] is None
+        assert trade["close_reason"] is None
+        assert any(
+            call.args[0] == "EXIT_ORDER_RECOVERY_PENDING"
+            for call in send.await_args_list
+        )
+    finally:
+        s = state_mod.get()
+        s.position_status = "IDLE"
+        s.pending_exit = None
+        s.trade_id = 0
+        await main.db.close()
+
 
 async def test_recover_state_idle_state_without_qty_allows_db_fallback(monkeypatch):
     persist = AsyncMock()
@@ -1992,6 +2185,105 @@ async def test_main_spawns_resident_f4_loop(monkeypatch):
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
             await asyncio.wait_for(task, 5)
+
+
+async def test_main_keeps_runtime_alive_when_restart_reconciliation_fails(monkeypatch):
+    """F4를 먼저 시작하고 대사 예외는 자동 진입 차단으로 격리한다."""
+    import asyncio
+    import contextlib
+
+    f4_started = asyncio.Event()
+    ui_started = asyncio.Event()
+    events = []
+
+    async def fake_run_forever():
+        f4_started.set()
+        await asyncio.Event().wait()
+
+    async def failing_recovery():
+        await asyncio.wait_for(f4_started.wait(), 0.5)
+        raise RuntimeError("reconcile down")
+
+    class FakeUviServer:
+        def __init__(self, _config):
+            self.should_exit = False
+
+        async def serve(self):
+            ui_started.set()
+            while not self.should_exit:
+                await asyncio.sleep(0.01)
+
+    monkeypatch.setenv("DRY_RUN", "1")
+    monkeypatch.setattr(main.logger, "setup", lambda *a, **k: None)
+    monkeypatch.setattr(
+        main.logger,
+        "log",
+        lambda event, **kwargs: events.append((event, kwargs)),
+    )
+    monkeypatch.setattr(main, "strategy_fingerprint", lambda: "startup-version")
+    monkeypatch.setattr(main, "_write_pid", lambda: True)
+    monkeypatch.setattr(main, "_clear_pid", lambda: None)
+    monkeypatch.setattr(main.db, "init", AsyncMock())
+    monkeypatch.setattr(main.db, "close", AsyncMock())
+    monkeypatch.setattr(main.state, "load", lambda _state_dir: {
+        "date": main.datetime.now(main.KST).strftime("%Y%m%d"),
+        "ticker": "005930",
+        "entry_price": 75_000.0,
+        "entry_qty": 10,
+        "remaining_qty": 10,
+        "position_status": "HOLDING",
+    })
+    monkeypatch.setattr(main, "_recover_state", failing_recovery)
+    monkeypatch.setattr(main, "_run_catchup", AsyncMock())
+    monkeypatch.setattr(main.f4_tracking, "run_forever", fake_run_forever)
+    monkeypatch.setattr(main.notifier, "send", AsyncMock())
+    monkeypatch.setattr(main.uvicorn, "Config", lambda *a, **k: None)
+    monkeypatch.setattr(main.uvicorn, "Server", FakeUviServer)
+    monkeypatch.setattr(main.kis_rest, "close_client", AsyncMock())
+
+    task = asyncio.create_task(main.main())
+    try:
+        await asyncio.wait_for(ui_started.wait(), 1)
+        assert state_mod.get().day_skip is True
+        assert state_mod.get().position_status == "HOLDING"
+        assert state_mod.get().remaining_qty == 10
+        failure = [kwargs for event, kwargs in events if event == "STARTUP_RECOVERY_FAILED"]
+        assert len(failure) == 1
+        assert "reconcile down" in failure[0]["error"]
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+            await asyncio.wait_for(task, 5)
+
+
+async def test_main_blocks_real_below_readiness_100(monkeypatch):
+    clear_pid = MagicMock()
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setenv("KIS_MODE", "REAL")
+    monkeypatch.setattr(main.logger, "setup", lambda *a, **k: None)
+    monkeypatch.setattr(main.logger, "log", lambda *a, **k: None)
+    monkeypatch.setattr(main, "_write_pid", lambda: True)
+    monkeypatch.setattr(main, "_clear_pid", clear_pid)
+    monkeypatch.setattr(main.db, "init", AsyncMock())
+    monkeypatch.setattr(main.db, "close", AsyncMock())
+    monkeypatch.setattr(
+        main.readiness,
+        "calculate",
+        AsyncMock(return_value={
+            "percent": 99.0,
+            "eligible_for_real": False,
+            "blockers": ["PAPER evidence"],
+        }),
+    )
+    main.live.real_entry_enabled = True
+
+    with pytest.raises(SystemExit) as exc_info:
+        await main.main()
+
+    assert exc_info.value.code == 3
+    assert main.live.real_entry_enabled is False
+    main.db.close.assert_awaited_once_with()
+    clear_pid.assert_called_once_with()
 
 
 async def test_main_exits_and_releases_pid_when_ui_server_fails(monkeypatch):

@@ -22,6 +22,10 @@ _minute_history: deque[dict] = deque(maxlen=_MINUTE_HISTORY_MAX)
 # WebSocket 연결 상태
 ws_connected: bool = False
 
+# REAL 신규 매수는 main의 준비도 100% 게이트를 통과한 프로세스에서만 허용한다.
+# 청산·취소 주문은 포지션 보호를 위해 이 플래그로 막지 않는다.
+real_entry_enabled: bool = False
+
 # 당일 VI(변동성완화장치) 이벤트 — UI 차트 구간 표시·사후 분석용
 vi_events: list[dict] = []
 

@@ -1587,6 +1587,51 @@ async def test_entry_records_trade_with_target_name(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_filled_position_remains_holding_when_open_trade_db_fails(monkeypatch):
+    _reset_state()
+    persist = AsyncMock()
+    notify = AsyncMock()
+    send_buy = AsyncMock(return_value={
+        "rt_cd": "0",
+        "msg_cd": "MCA00000",
+        "msg1": "OK",
+        "output": {"ODNO": "FILLED-NO-DB", "KRX_FWDG_ORD_ORGNO": "001"},
+    })
+
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        f3, "_fetch_expected_price", AsyncMock(return_value=(1000.0, 970.0))
+    )
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=10_000.0))
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(
+        f3,
+        "_poll_fill",
+        AsyncMock(return_value={"fill_price": 1000, "fill_qty": 9}),
+    )
+    monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=1000))
+    monkeypatch.setattr(f3.notifier, "send", notify)
+    monkeypatch.setattr(
+        f3.db,
+        "open_trade",
+        AsyncMock(side_effect=RuntimeError("sqlite unavailable")),
+    )
+    monkeypatch.setattr(f3.state, "persist", persist)
+
+    await f3.run(force=True)
+
+    assert state.get().position_status == "HOLDING"
+    assert state.get().remaining_qty == 9
+    assert state.get().trade_id == 0
+    assert persist.await_count >= 2
+    assert [call.args[0] for call in notify.await_args_list] == [
+        "ENTRY_DB_DEGRADED",
+        "ENTRY_EXECUTED",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_entry_qty_is_clamped_by_buyable_quantity(monkeypatch):
     events = []
     _reset_state()

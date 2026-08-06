@@ -76,6 +76,17 @@ def test_f3_operational_events_have_human_readable_labels():
     )
 
 
+def test_startup_and_real_gate_events_have_human_readable_labels():
+    for event in (
+        "STARTUP_RECOVERY_FAILED",
+        "STARTUP_RECOVERY_FALLBACK_FAILED",
+        "STARTUP_RECOVERY_ALERT_FAILED",
+        "STRATEGY_FINGERPRINT_LOCKED",
+        "REAL_SMOKE_BUY_AUTHORIZED",
+    ):
+        assert event_label(event) != f"{event}({event})"
+
+
 def test_terminal_persist_and_candidate_events_have_distinct_labels():
     # 후보 소진은 마감초과(ENTRY_CANDIDATE_RETRY_SKIPPED)와 별개 이벤트/라벨이다
     exhausted = event_label("ENTRY_CANDIDATE_EXHAUSTED")

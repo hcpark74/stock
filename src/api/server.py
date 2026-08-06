@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
-from src import db, live, state
+from src import db, live, readiness, state
 from src.api import kis_rest
 from src.api.status_logic import (
     f1_summary_from_rows as _f1_summary_from_rows,
@@ -634,6 +634,24 @@ async def api_settings() -> JSONResponse:
         kis_rate_interval_sec = _env_float(
             "KIS_RATE_INTERVAL_SEC", kis_rest.default_rate_interval(), errors
         )
+        try:
+            readiness_report = await readiness.calculate()
+        except Exception as readiness_error:
+            log(
+                "REAL_READINESS_FAILED",
+                level="WARN",
+                error=repr(readiness_error),
+            )
+            readiness_report = {
+                "percent": 0,
+                "eligible_for_real": False,
+                "groups": [],
+                "blockers": ["준비도 계산 실패"],
+            }
+        readiness_report = {
+            **readiness_report,
+            "runtime_entry_latch_open": bool(live.real_entry_enabled),
+        }
 
         if "KIS_ACCT_NO" in os.environ and not os.getenv("KIS_ACCT_NO", ""):
             errors.append("KIS_ACCT_NO is set but empty.")
@@ -735,7 +753,9 @@ async def api_settings() -> JSONResponse:
             "safety": {
                 "real_mode_warning": mode == "REAL",
                 "kis_rate_interval_sec": kis_rate_interval_sec,
+                "real_entry_enabled": bool(live.real_entry_enabled),
             },
+            "real_readiness": readiness_report,
         })
     except Exception as exc:
         log("API_SETTINGS_FAILED", level="WARN", error=repr(exc))
@@ -755,8 +775,34 @@ async def api_settings() -> JSONResponse:
             "f4": {},
             "f5": {},
             "vi": {},
-            "safety": {},
+            "safety": {"real_entry_enabled": bool(live.real_entry_enabled)},
+            "real_readiness": {
+                "percent": 0,
+                "eligible_for_real": False,
+                "groups": [],
+                "blockers": ["설정 API 처리 실패"],
+            },
         })
+
+
+@app.get("/api/readiness")
+async def api_real_readiness() -> JSONResponse:
+    try:
+        report = await readiness.calculate()
+        return JSONResponse({
+            **report,
+            "runtime_entry_latch_open": bool(live.real_entry_enabled),
+        })
+    except Exception as exc:
+        log("REAL_READINESS_FAILED", level="WARN", error=repr(exc))
+        return JSONResponse(
+            {
+                "percent": 0,
+                "eligible_for_real": False,
+                "blockers": [f"준비도 계산 실패: {type(exc).__name__}"],
+            },
+            status_code=503,
+        )
 
 
 @app.get("/api/assets")

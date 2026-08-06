@@ -1355,13 +1355,26 @@ function renderSettings(s) {
   $('set-mode').className = 'sc2-val ' + (s.mode === 'REAL' ? 'pdn' : '');
   $('set-runtime').textContent = s.dry_run ? 'DRY_RUN' : 'LIVE';
   $('set-runtime').className = 'sc2-val ' + (s.dry_run ? 'pup' : '');
-  $('set-db').textContent = s.paths?.db || '—';
-  $('set-auto').textContent = s.auto_trading_control === 'read_only' ? '조회 전용' : yn(s.auto_trading);
-  $('set-auto').className = 'sc2-val';
+  const readiness = s.real_readiness || {};
+  const latchOpen = Boolean(readiness.runtime_entry_latch_open);
+  $('set-readiness').textContent = `${fmt(readiness.percent || 0, 1)}%`;
+  $('set-readiness').className = 'sc2-val ' + (readiness.eligible_for_real ? 'pup' : 'pdn');
+  const realGateOpen = s.mode === 'REAL' && latchOpen;
+  $('set-real-gate').textContent = s.mode === 'REAL'
+    ? (realGateOpen ? '열림' : '차단')
+    : (readiness.eligible_for_real ? '전환 가능' : '차단');
+  $('set-real-gate').className = 'sc2-val ' + ((realGateOpen || (s.mode !== 'REAL' && readiness.eligible_for_real)) ? 'pup' : 'pdn');
 
   const grid = $('settings-grid');
   if(grid) {
     grid.innerHTML = [
+      settingBox('REAL 준비도', [
+        ['현재 점수', `${fmt(readiness.percent || 0, 1)} / 100`, readiness.eligible_for_real ? 'pup' : 'pdn'],
+        ['코드 지문', readiness.strategy_fingerprint || '—'],
+        ['런타임 매수 래치', latchOpen ? 'OPEN' : 'CLOSED', latchOpen ? 'pup' : 'pdn'],
+        ['동일 버전 PAPER', `${fmt(readiness.clean_paper_trades || 0)} / ${fmt(readiness.required_paper_trades || 20)}회`],
+        ...((readiness.groups || []).map(g => [g.label, `${fmt(g.earned || 0, 1)} / ${fmt(g.weight || 0, 1)}`])),
+      ]),
       settingBox('F1 선정', [
         ['핵심 갭', pctRange(s.f1?.core_gap_pct)],
         ['고갭 조건', `${pctRange(s.f1?.high_gap_pct)} · 대금 ${fmt((s.f1?.high_gap_min_amount||0)/1e8, 0)}억 이상`],
@@ -1404,6 +1417,7 @@ function renderSettings(s) {
   const alerts = [];
   (s.errors || []).forEach(v => alerts.push(['오류', v]));
   (s.warnings || []).forEach(v => alerts.push(['주의', v]));
+  (readiness.blockers || []).forEach(v => alerts.push(['REAL 차단', v]));
   if(!alerts.length) alerts.push(['상태', '현재 설정에서 즉시 확인할 경고는 없습니다.']);
   const alertEl = $('settings-alerts');
   if(alertEl) {

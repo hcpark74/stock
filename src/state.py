@@ -34,6 +34,7 @@ class State:
     daily_pnl_pct: float = 0.0
     day_skip: bool = False
     pending_entry: dict | None = None   # 접수 후 체결/취소 대조 전인 매수 주문
+    pending_exit: dict | None = None    # 전송 전 의도부터 체결 대조까지의 매도 주문
     post_close_tracking_stopped: bool = False  # 매도 후 가격 관측 수동 종료
 
 
@@ -65,6 +66,7 @@ def _clear_for_trading_day(date_str: str) -> None:
     _state.daily_pnl_pct = 0.0
     _state.day_skip = False
     _state.pending_entry = None
+    _state.pending_exit = None
     _state.post_close_tracking_stopped = False
 
 
@@ -138,6 +140,7 @@ async def set_holding(entry_price: float, entry_qty: int, order_id: str) -> None
         _state.highest_step = 0.0
         _state.trade_id = 0
         _state.pending_entry = None
+        _state.pending_exit = None
         _state.post_close_tracking_stopped = False
 
 
@@ -167,6 +170,51 @@ async def set_exiting(reason: str) -> bool:
         return True
 
 
+async def begin_exit_intent(pending: dict) -> bool:
+    """매도 전송 전에 HOLDING → EXITING과 주문 의도를 원자적으로 설정한다.
+
+    F5 재시도는 직전 주문의 체결/취소 대사가 끝난 뒤 EXITING 상태에서 새
+    의도를 시작할 수 있다. 살아 있는 pending_exit이 있으면 중복 주문을
+    막기 위해 실패한다.
+    """
+    async with _lock:
+        if _state.position_status == "HOLDING":
+            _state.position_status = "EXITING"
+        elif _state.position_status != "EXITING":
+            return False
+        if _state.pending_exit is not None:
+            return False
+        _state.close_reason = str(pending.get("reason") or _state.close_reason or "TIMEOUT")
+        _state.pending_exit = dict(pending)
+        return True
+
+
+async def update_pending_exit(**changes) -> bool:
+    """현재 매도 의도의 주문번호·전송 상태를 갱신한다."""
+    async with _lock:
+        if _state.position_status != "EXITING" or _state.pending_exit is None:
+            return False
+        _state.pending_exit.update(changes)
+        return True
+
+
+async def clear_pending_exit() -> None:
+    """현재 매도 주문 대사가 끝난 뒤 다음 재시도 또는 종료를 허용한다."""
+    async with _lock:
+        _state.pending_exit = None
+
+
+async def reject_exit_intent() -> bool:
+    """브로커가 주문을 명시적으로 거절한 경우에만 EXITING → HOLDING 복귀."""
+    async with _lock:
+        if _state.position_status != "EXITING" or _state.pending_exit is None:
+            return False
+        _state.pending_exit = None
+        _state.position_status = "HOLDING"
+        _state.close_reason = None
+        return True
+
+
 async def set_exit_remaining_qty(remaining_qty: int) -> bool:
     """EXITING 상태의 확인된 미체결/잔여수량을 갱신한다."""
     async with _lock:
@@ -188,6 +236,7 @@ async def set_closed(reason: str) -> bool:
         _state.position_status = "CLOSED"
         _state.close_reason = reason
         _state.remaining_qty = 0
+        _state.pending_exit = None
         return True
 
 
@@ -210,6 +259,8 @@ async def reset_to_idle(reason: str) -> None:
         _state.target_candidates = None
         _state.entry_at = None
         _state.order_id = None
+        _state.pending_entry = None
+        _state.pending_exit = None
         _state.pending_entry = None
         _state.post_close_tracking_stopped = False
         live.clear_tick_history()
@@ -243,6 +294,7 @@ async def persist(state_dir: str, date_str: str) -> None:
         "position_status": _state.position_status,
         "close_reason": _state.close_reason,
         "pending_entry": _state.pending_entry,
+        "pending_exit": _state.pending_exit,
         "post_close_tracking_stopped": _state.post_close_tracking_stopped,
     }
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -306,6 +358,8 @@ def restore_from(data: dict) -> None:
     _state.close_reason = data.get("close_reason")
     pending = data.get("pending_entry")
     _state.pending_entry = dict(pending) if isinstance(pending, dict) else None
+    pending_exit = data.get("pending_exit")
+    _state.pending_exit = dict(pending_exit) if isinstance(pending_exit, dict) else None
     _state.post_close_tracking_stopped = bool(
         data.get("post_close_tracking_stopped", False)
     )

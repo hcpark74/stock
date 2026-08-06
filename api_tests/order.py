@@ -20,13 +20,24 @@ _SELL_TR = {"REAL": "TTTC0011U", "PAPER": "VTTC0011U"}
 _CCLD_TR = {"REAL": "TTTC0081R", "PAPER": "VTTC0081R"}
 
 
-async def _place_order(mode: str, side: str, qty: int) -> dict:
+async def _place_order(
+    mode: str,
+    side: str,
+    qty: int,
+    *,
+    allow_real_smoke_buy: bool = False,
+) -> dict:
     from src.api import kis_rest
 
     tr_id = _BUY_TR[mode] if side == "BUY" else _SELL_TR[mode]
     return await kis_rest.post(
         "/uapi/domestic-stock/v1/trading/order-cash",
         tr_id=tr_id,
+        # main()의 준비도 승인은 아직 획득할 수 없는 최초 REAL 스모크
+        # 매수 1건에만 --confirm 승인을 전달한다. REAL 매도에는 게이트가 없다.
+        allow_real_smoke_buy=(
+            mode == "REAL" and side == "BUY" and allow_real_smoke_buy
+        ),
         body={
             "CANO":         h.acct_no(),
             "ACNT_PRDT_CD": h.acct_cd(),
@@ -94,7 +105,12 @@ async def run(confirm: bool = False) -> bool:
 
     # BUY
     print(f"\n  [BUY] {TICKER} {QTY}주 시장가")
-    buy_resp = await _place_order(mode, "BUY", QTY)
+    buy_resp = await _place_order(
+        mode,
+        "BUY",
+        QTY,
+        allow_real_smoke_buy=confirm,
+    )
     buy_id   = buy_resp.get("output", {}).get("ODNO", "")
     print(f"  msg_cd={buy_resp.get('msg_cd')}  {buy_resp.get('msg1','').strip()}")
     print(f"  order_id : {buy_id}")

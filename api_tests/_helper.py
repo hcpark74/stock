@@ -16,7 +16,8 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-load_dotenv(_ROOT / ".env")
+if os.getenv("STOCK_SKIP_DOTENV", "0") != "1":
+    load_dotenv(_ROOT / ".env")
 
 
 def mode() -> str:

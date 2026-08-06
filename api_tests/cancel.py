@@ -62,6 +62,9 @@ async def run(confirm: bool = False) -> bool:
     buy_resp = await kis_rest.post(
         "/uapi/domestic-stock/v1/trading/order-cash",
         tr_id=_BUY_TR[mode],
+        # REAL 준비도 승인을 얻기 위한 최초 취소 스모크의 매수 1건만
+        # --confirm을 명시적 게이트 승인으로 전달한다.
+        allow_real_smoke_buy=(mode == "REAL" and confirm),
         body={
             "CANO":         h.acct_no(),
             "ACNT_PRDT_CD": h.acct_cd(),

@@ -1,7 +1,7 @@
 # DB 설계 문서 — SQLite
 
-> **버전**: 1.1
-> **최종 수정**: 2026-07-14
+> **버전**: 1.2
+> **최종 수정**: 2026-08-06
 > **대상 파일**: `data/db/trading.db`
 
 ---
@@ -55,6 +55,8 @@ erDiagram
         real highest_step
         integer pyramided
         text status
+        text execution_mode
+        text strategy_fingerprint
         text created_at
         text updated_at
     }
@@ -77,6 +79,9 @@ erDiagram
         text filled_at
         text error_code
         text error_msg
+        text client_order_id UK
+        text submission_state
+        text submitted_at
     }
 
     PARTIAL_EXITS {
@@ -158,6 +163,9 @@ CREATE TABLE IF NOT EXISTS trades (
     status       TEXT NOT NULL DEFAULT 'OPEN'
                      CHECK (status IN ('OPEN','CLOSED','SKIPPED')),
 
+    execution_mode TEXT,                       -- PAPER/REAL 실적 구분
+    strategy_fingerprint TEXT,                 -- 핵심 전략 코드 내용 지문
+
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
 );
@@ -172,6 +180,8 @@ CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(date);
 | `entry_price` | 1차+2차 체결가 가중평균. 2차 없으면 1차 그대로 |
 | `pnl_amount` | `(exit_price − entry_price) × exit_qty` 단순 계산 |
 | `pyramided` | F3에서 2차 30% 매수가 체결됐으면 1 |
+| `execution_mode` | 진입 당시 `KIS_MODE`; 준비도 계산은 PAPER만 인정 |
+| `strategy_fingerprint` | 동일 코드 버전의 PAPER 실적만 집계하기 위한 지문 |
 
 ---
 
@@ -220,12 +230,24 @@ CREATE TABLE IF NOT EXISTS orders (
     ordered_at   TEXT NOT NULL,                 -- 주문 시각
     filled_at    TEXT,                          -- 체결 시각 (미체결=NULL)
     error_code   TEXT,                          -- KIS 에러코드
-    error_msg    TEXT                           -- KIS 에러메시지
+    error_msg    TEXT,                          -- KIS 에러메시지
+
+    -- 주문 응답 유실 복구
+    client_order_id TEXT,                       -- 전송 전 생성한 로컬 상관 ID
+    submission_state TEXT NOT NULL DEFAULT 'ACKNOWLEDGED',
+                                                 -- PREPARED/SUBMITTING/UNKNOWN/ACKNOWLEDGED/REJECTED
+    submitted_at TEXT                            -- 실제 전송 시작 시각
 );
 
 CREATE INDEX IF NOT EXISTS idx_orders_trade_id    ON orders(trade_id);
 CREATE INDEX IF NOT EXISTS idx_orders_kis_order_id ON orders(kis_order_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_client_order_id
+    ON orders(client_order_id) WHERE client_order_id IS NOT NULL;
 ```
+
+매도는 `PREPARED → SUBMITTING → ACKNOWLEDGED` 순으로 기록한다. 전송 결과를
+확정할 수 없으면 `UNKNOWN`으로 남기고 주문시각·종목·수량을 KIS 당일 주문과
+대사한다. 유일한 일치 주문을 찾기 전에는 같은 수량을 자동 재주문하지 않는다.
 
 ---
 

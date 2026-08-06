@@ -1,10 +1,12 @@
 import asyncio
 import time
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
 import src.api.kis_rest as kis_rest
+from src import live
 
 
 def test_default_rate_interval_follows_kis_mode(monkeypatch):
@@ -16,6 +18,46 @@ def test_default_rate_interval_follows_kis_mode(monkeypatch):
 
     monkeypatch.delenv("KIS_MODE", raising=False)
     assert kis_rest.default_rate_interval() == 1.1
+
+
+@pytest.mark.asyncio
+async def test_real_buy_is_blocked_until_readiness_gate_opens(monkeypatch):
+    request = AsyncMock()
+    monkeypatch.setenv("KIS_MODE", "REAL")
+    monkeypatch.setattr(live, "real_entry_enabled", False)
+    monkeypatch.setattr(kis_rest, "_get_client", AsyncMock(return_value=request))
+
+    result = await kis_rest.post(
+        "/uapi/domestic-stock/v1/trading/order-cash",
+        tr_id="TTTC0012U",
+        body={},
+    )
+
+    assert result["msg_cd"] == "LOCAL_REAL_READINESS_BLOCKED"
+    request.request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_explicit_real_smoke_buy_passes_readiness_gate(monkeypatch):
+    class SmokeClient:
+        def __init__(self):
+            self.request = AsyncMock(return_value=_FakeResponse())
+
+    client = SmokeClient()
+    monkeypatch.setenv("KIS_MODE", "REAL")
+    monkeypatch.setattr(live, "real_entry_enabled", False)
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 0)
+    monkeypatch.setattr(kis_rest, "_get_client", AsyncMock(return_value=client))
+
+    result = await kis_rest.post(
+        "/uapi/domestic-stock/v1/trading/order-cash",
+        tr_id="TTTC0012U",
+        body={"ORD_QTY": "1"},
+        allow_real_smoke_buy=True,
+    )
+
+    assert result["rt_cd"] == "0"
+    client.request.assert_awaited_once()
 
 
 def test_account_helpers_accept_documented_env_names(monkeypatch):
@@ -102,6 +144,26 @@ class _FakeAsyncClient:
 
 
 @pytest.mark.asyncio
+async def test_real_sell_is_not_blocked_by_entry_readiness_gate(monkeypatch):
+    client = _FakeAsyncClient()
+    request = AsyncMock(return_value=_FakeResponse())
+    client.request = request
+    monkeypatch.setenv("KIS_MODE", "REAL")
+    monkeypatch.setattr(live, "real_entry_enabled", False)
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 0)
+    monkeypatch.setattr(kis_rest, "_get_client", AsyncMock(return_value=client))
+
+    result = await kis_rest.post(
+        "/uapi/domestic-stock/v1/trading/order-cash",
+        tr_id="TTTC0011U",
+        body={"ORD_QTY": "1"},
+    )
+
+    assert result["rt_cd"] == "0"
+    request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_get_can_return_continuation_response_metadata(monkeypatch):
     class ContinuationResponse(_FakeResponse):
         headers = {"tr_cont": "M"}
@@ -116,7 +178,41 @@ async def test_get_can_return_continuation_response_metadata(monkeypatch):
     resp = await kis_rest.get("/test", include_response_meta=True)
 
     assert resp["rt_cd"] == "0"
-    assert resp["_response_meta"] == {"tr_cont": "M"}
+    assert resp["_response_meta"] == {
+        "tr_cont": "M",
+        "http_status": 200,
+        "request_sent": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_post_surfaces_gateway_http_status_for_order_classification(monkeypatch):
+    class GatewayTimeoutResponse(_FakeResponse):
+        status_code = 504
+        headers = {}
+
+        def json(self):
+            return {
+                "rt_cd": "1",
+                "msg_cd": "GW_TIMEOUT",
+                "msg1": "gateway timeout",
+            }
+
+    class GatewayTimeoutClient(_FakeAsyncClient):
+        async def request(self, *args, **kwargs):
+            return GatewayTimeoutResponse()
+
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 0)
+    monkeypatch.setattr(kis_rest.httpx, "AsyncClient", GatewayTimeoutClient)
+
+    resp = await kis_rest.post(
+        "/order",
+        body={"qty": 1},
+        include_response_meta=True,
+    )
+
+    assert resp["_response_meta"]["http_status"] == 504
+    assert resp["_response_meta"]["request_sent"] is True
 
 
 class _ControlledClock:
@@ -584,6 +680,30 @@ async def test_kis_rest_investigation_mode_stops_on_http_429(monkeypatch):
         "rt_cd": "1",
         "msg_cd": "HTTP_429",
         "msg1": "HTTP 429 rate limit",
+    }
+    assert _RateLimitClient.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_post_http_429_is_not_retried_and_reports_uncertain_send(monkeypatch):
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 0.0)
+    monkeypatch.setattr(kis_rest, "_last_call_at", 0.0)
+    monkeypatch.setattr(kis_rest.httpx, "AsyncClient", _RateLimitClient)
+    _RateLimitClient.calls = 0
+    _RateLimitClient.status_code = 429
+
+    resp = await kis_rest.post(
+        "/uapi/domestic-stock/v1/trading/order-cash",
+        tr_id="VTTC0011U",
+        body={"ORD_QTY": "1"},
+        include_response_meta=True,
+    )
+
+    assert resp["msg_cd"] == "HTTP_429"
+    assert resp["_response_meta"] == {
+        "tr_cont": "",
+        "http_status": 429,
+        "request_sent": True,
     }
     assert _RateLimitClient.calls == 1
 

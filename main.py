@@ -9,7 +9,8 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
-load_dotenv()
+if os.getenv("STOCK_SKIP_DOTENV", "0") != "1":
+    load_dotenv()
 
 if os.getenv("DRY_RUN", "0") == "1":
     os.environ["LOG_DIR"] = os.getenv("DRY_RUN_LOG_DIR", "data/dry_run/logs")
@@ -18,9 +19,10 @@ if os.getenv("DRY_RUN", "0") == "1":
 
 import uvicorn  # noqa: E402
 
-from src import db, notifier, state  # noqa: E402
+from src import db, live, notifier, readiness, state  # noqa: E402
 from src.api import auth, kis_rest, server  # noqa: E402
 from src.modules import (  # noqa: E402
+    exit_recovery,
     f1_filter,
     f2_lockup,
     f3_entry,
@@ -28,6 +30,7 @@ from src.modules import (  # noqa: E402
     f5_timeout,
     paper_fast_probe,
 )
+from src.release import strategy_fingerprint  # noqa: E402
 from src.scheduler import (  # noqa: E402
     F1_H,
     F1_M,
@@ -798,6 +801,12 @@ async def _recover_state() -> None:
             )
         data = None
 
+    if data is not None and (
+        data.get("position_status") == "EXITING"
+        or isinstance(data.get("pending_exit"), dict)
+    ):
+        data = await exit_recovery.merge_db_intent(data, today)
+
     if data is not None and isinstance(data.get("pending_entry"), dict):
         state.restore_from(data)
         logger.log(
@@ -810,6 +819,22 @@ async def _recover_state() -> None:
             entry_blocked=True,
         )
         await f3_entry.recover_pending_entry()
+        return
+
+    if data is not None and isinstance(data.get("pending_exit"), dict):
+        state.restore_from(data)
+        state.get().day_skip = True
+        logger.log(
+            "PROCESS_RESTART_DETECTED",
+            level="CRIT",
+            recovered_status="PENDING_EXIT_RECONCILIATION",
+            recovery_source="STATE_FILE_DB_MERGED",
+            ticker=data.get("ticker"),
+            order_id=data.get("pending_exit", {}).get("order_id"),
+            client_order_id=data.get("pending_exit", {}).get("client_order_id"),
+            entry_blocked=True,
+        )
+        await f4_tracking.recover_pending_exit()
         return
 
     if data is not None and data.get("position_status") == "ENTERING":
@@ -912,6 +937,59 @@ async def _recover_state() -> None:
         return
 
     await _recover_open_trade_from_db(today)
+
+
+async def _recover_state_safely() -> bool:
+    """재시작 대사 장애를 런타임 시작 실패와 분리한다."""
+    try:
+        await _recover_state()
+        return True
+    except Exception as exc:
+        s = state.get()
+        # 대사 중 예외가 상태 복원 전에 발생했으면 마지막 내구 상태를 최소한
+        # 메모리에 되살린다. HOLDING은 F4/F5가 계속 보호하고, EXITING은 중복
+        # 매도를 피하기 위해 그대로 보존한다.
+        try:
+            fallback = state.load(STATE_DIR)
+            if isinstance(fallback, dict) and fallback.get("position_status") in {
+                "ENTERING",
+                "HOLDING",
+                "EXITING",
+            }:
+                state.restore_from(fallback)
+                s = state.get()
+        except Exception as fallback_exc:
+            logger.log(
+                "STARTUP_RECOVERY_FALLBACK_FAILED",
+                level="WARN",
+                error=repr(fallback_exc),
+            )
+        s.day_skip = True
+        logger.log(
+            "STARTUP_RECOVERY_FAILED",
+            level="CRIT",
+            ticker=s.target_ticker,
+            position_status=s.position_status,
+            error=repr(exc),
+            entry_blocked=True,
+        )
+        try:
+            await notifier.send(
+                "STARTUP_RECOVERY_FAILED",
+                level="CRIT",
+                message=(
+                    f"재시작 대사 실패. 런타임과 F4/F5는 계속 실행합니다: {exc!r}. "
+                    "KIS 주문·잔고를 수동 확인하세요."
+                ),
+                ticker=s.target_ticker,
+            )
+        except Exception as notify_exc:
+            logger.log(
+                "STARTUP_RECOVERY_ALERT_FAILED",
+                level="WARN",
+                error=repr(notify_exc),
+            )
+        return False
 
 
 def _is_terminal_state(data: dict) -> bool:
@@ -1067,12 +1145,45 @@ async def _log_holding_verify_failure(
 
 
 async def _recover_open_trade_from_db(today: str) -> None:
-    """Recover HOLDING state from today's OPEN trade when KIS confirms the holding."""
+    """상태 파일이 없을 때 당일 DB 거래에서 CLOSED/HOLDING 상태를 복원한다."""
     try:
         trade = await db.get_trade_by_date(today)
     except RuntimeError:
         return
-    if not trade or trade.get("status") != "OPEN":
+    if not trade:
+        return
+
+    if trade.get("status") == "CLOSED":
+        restore_data = {
+            "date": today,
+            "ticker": trade.get("ticker"),
+            "name": trade.get("name"),
+            "target_candidates": [],
+            "entry_price": trade.get("entry_price"),
+            "entry_at": trade.get("entry_at"),
+            "entry_qty": trade.get("entry_qty"),
+            "remaining_qty": 0,
+            "high_price": trade.get("high_price") or trade.get("entry_price"),
+            "trailing_active": bool(trade.get("highest_step")),
+            "highest_step": float(trade.get("highest_step") or 0.0),
+            "trade_id": int(trade.get("id") or 0),
+            "position_status": "CLOSED",
+            "close_reason": trade.get("close_reason"),
+            "post_close_tracking_stopped": True,
+        }
+        state.restore_from(restore_data)
+        await state.persist(STATE_DIR, today)
+        logger.log(
+            "PROCESS_RESTART_DETECTED",
+            level="WARN",
+            recovered_status="DB_CLOSED_TRADE_RESTORED",
+            recovery_source="DB_CLOSED_TRADE",
+            trade_id=restore_data["trade_id"],
+            ticker=restore_data["ticker"],
+        )
+        return
+
+    if trade.get("status") != "OPEN":
         return
 
     entry_price = float(trade.get("entry_price") or 0)
@@ -1112,6 +1223,16 @@ async def _recover_open_trade_from_db(today: str) -> None:
         )
         return
 
+    # entry_qty는 누적 진입량, remaining_qty는 현재 증권사 잔고다. 부분 매도 뒤
+    # 상태 파일이 유실된 경우 actual_qty를 entry_qty에도 복사하면 이미 체결된
+    # 매도량과 잔고를 잘못 비교해 살아 있는 잔여분을 CLOSED 처리할 수 있다.
+    # trades.entry_qty는 구버전에서 피라미딩 전 수량일 수 있으므로 확인된 BUY
+    # 체결 합계와 현재 잔고까지 하한으로 삼아 누적 진입량을 복원한다.
+    confirmed_entry_qty = int(trade.get("confirmed_entry_qty") or 0)
+    # actual_qty에는 같은 종목의 수동 매수가 섞일 수 있다. 그 경우 기준량이
+    # 커져 정상 청산 뒤에도 EXITING이 남을 수 있지만, 잔여 보유를 CLOSED로
+    # 오판하는 것보다 안전한 방향이므로 운영자 대사 대상으로 보존한다.
+    recovered_entry_qty = max(entry_qty, confirmed_entry_qty, actual_qty)
     highest_step = float(trade.get("highest_step") or 0.0)
     restore_data = {
         "date": today,
@@ -1120,7 +1241,7 @@ async def _recover_open_trade_from_db(today: str) -> None:
         "target_candidates": [],
         "entry_price": entry_price,
         "entry_at": trade.get("entry_at"),
-        "entry_qty": actual_qty,
+        "entry_qty": recovered_entry_qty,
         "remaining_qty": actual_qty,
         "high_price": trade.get("high_price") or entry_price,
         "trailing_active": highest_step >= f4_tracking.STEP_SIZE,
@@ -1129,8 +1250,26 @@ async def _recover_open_trade_from_db(today: str) -> None:
         "position_status": "HOLDING",
         "close_reason": None,
     }
-    state.restore_from(restore_data)
+    merged = await exit_recovery.merge_db_intent(restore_data, today)
+    has_pending_exit = isinstance(merged.get("pending_exit"), dict)
+    # F4가 이미 상주 중이므로 DB 의도가 있으면 HOLDING을 한 번 노출하지 않고
+    # 첫 메모리 복원·영속화부터 EXITING으로 원자적으로 공개한다.
+    state.restore_from(merged if has_pending_exit else restore_data)
+    if has_pending_exit:
+        state.get().day_skip = True
     await state.persist(STATE_DIR, today)
+    if has_pending_exit:
+        logger.log(
+            "PROCESS_RESTART_DETECTED",
+            level="CRIT",
+            recovered_status="DB_EXIT_INTENT_RESTORED",
+            recovery_source="DB_OPEN_TRADE_AND_ORDER",
+            trade_id=restore_data["trade_id"],
+            ticker=restore_data["ticker"],
+            client_order_id=merged["pending_exit"].get("client_order_id"),
+        )
+        await f4_tracking.recover_pending_exit()
+        return
     logger.log(
         "PROCESS_RESTART_DETECTED",
         level="CRIT",
@@ -1139,6 +1278,8 @@ async def _recover_open_trade_from_db(today: str) -> None:
         trade_id=restore_data["trade_id"],
         actual_qty=actual_qty,
         db_entry_qty=entry_qty,
+        confirmed_entry_qty=confirmed_entry_qty,
+        recovered_entry_qty=recovered_entry_qty,
         pyramided=trade.get("pyramided"),
         high_price=restore_data["high_price"],
         highest_step=highest_step,
@@ -1254,11 +1395,30 @@ def _clear_pid() -> None:
 
 async def main() -> None:
     dry_run = os.getenv("DRY_RUN", "0") == "1"
+    # 같은 인터프리터에서 main()이 다시 호출돼도 이전 REAL 승인을 재사용하지 않는다.
+    live.real_entry_enabled = False
     logger.setup(LOG_DIR)
+    # 디스크가 장중 배포로 바뀌어도 이 프로세스가 실제로 시작한 코드 지문을
+    # 모든 당일 거래에 기록하도록 스케줄/주문 시작 전에 캐시를 고정한다.
+    fingerprint = strategy_fingerprint()
+    logger.log("STRATEGY_FINGERPRINT_LOCKED", level="INFO", fingerprint=fingerprint)
     if not _write_pid():
         raise SystemExit(2)
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     await db.init(DB_PATH)
+    if os.getenv("KIS_MODE", "PAPER") == "REAL" and not dry_run:
+        real_readiness = await readiness.calculate()
+        if not real_readiness["eligible_for_real"]:
+            logger.log(
+                "REAL_START_BLOCKED",
+                level="CRIT",
+                readiness_percent=real_readiness["percent"],
+                blockers=real_readiness["blockers"],
+            )
+            await db.close()
+            _clear_pid()
+            raise SystemExit(3)
+        live.real_entry_enabled = True
     await _ensure_trading_day()
     # 휴장·종료 스킵(F3)은 인메모리라 같은 날 재시작 시 DB에서 복원해 재진입을 막는다
     await _restore_daily_skip_from_db()
@@ -1271,12 +1431,14 @@ async def main() -> None:
         time_sync.check_ntp(NTP_SERVERS)
         # 휴장일에 기동해도 catchup·스케줄 잡이 돌지 않도록 시작 시점에 1회 확인
         await _check_market_holiday()
-    await _recover_state()
 
     # F4: 상주 루프 — 거래일마다 HOLDING을 기다렸다가 추적한다.
     # 일회성 run()을 직접 띄우면 CLOSED 상태로 복원된 뒤 영구 종료되어
     # 다음 거래일 포지션을 아무도 추적하지 않는다 (2026-07-16 인시던트).
     f4_task = asyncio.create_task(f4_tracking.run_forever(), name="f4_tracking")
+    # 대사 API/SQLite 장애가 나도 이미 F4 보호 루프가 살아 있어야 하며,
+    # 실패는 자동 진입 차단+CRIT 알림으로 격리하고 나머지 런타임을 시작한다.
+    await _recover_state_safely()
 
     # Telegram 알림 워커
     notifier_task = None

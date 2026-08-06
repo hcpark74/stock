@@ -215,7 +215,7 @@ def _quote_is_fresh(quote: EntryQuote) -> bool:
 
 
 # KIS TR ID (PAPER/REAL 분기) — 신TR 기준
-_BUY_TR    = {"REAL": "TTTC0012U", "PAPER": "VTTC0012U"}
+_BUY_TR    = {"REAL": kis_rest.REAL_CASH_BUY_TR, "PAPER": "VTTC0012U"}
 _SELL_TR   = {"REAL": "TTTC0011U", "PAPER": "VTTC0011U"}
 _CANCEL_TR = {"REAL": "TTTC0013U", "PAPER": "VTTC0013U"}
 _CCLD_TR   = {"REAL": "TTTC0081R", "PAPER": "VTTC0081R"}
@@ -1677,29 +1677,64 @@ async def _run_single(
 
     # ── HOLDING 전환 + DB 기록 + 영속화 ──────────────────────────────
     await state.set_holding(fill_price, fill_qty, order_id)
-    trade_id = await db.open_trade(
-        _today(), ticker, fill_price, fill_qty, name=state.get().target_name,
-    )
-    state.get().trade_id = trade_id
-    order_db_id = await db.record_order(
-        trade_id,
-        order_id,
-        "BUY",
-        first_qty,
-        submitted_order_price,
-        "FIRST_BUY",
-        ticker,
-        state.get().target_name,
-        trigger_price=expected_price,
-    )
-    await db.update_order_fill(
-        order_db_id,
-        fill_price,
-        fill_qty,
-        fill_latency_ms,
-        status="PARTIAL_FILL" if fill_was_partial or fill_qty < first_qty else "FILLED",
-    )
+    # 실체결 포지션은 SQLite 감사 기록보다 먼저 상태 파일에 보존한다. DB 장애가
+    # 나더라도 trade_id=0인 HOLDING을 F4/F5가 계속 청산할 수 있어야 한다.
     await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
+    try:
+        trade_id = await db.open_trade(
+            _today(), ticker, fill_price, fill_qty, name=state.get().target_name,
+        )
+        state.get().trade_id = trade_id
+        order_db_id = await db.record_order(
+            trade_id,
+            order_id,
+            "BUY",
+            first_qty,
+            submitted_order_price,
+            "FIRST_BUY",
+            ticker,
+            state.get().target_name,
+            trigger_price=expected_price,
+        )
+        await db.update_order_fill(
+            order_db_id,
+            fill_price,
+            fill_qty,
+            fill_latency_ms,
+            status=(
+                "PARTIAL_FILL"
+                if fill_was_partial or fill_qty < first_qty
+                else "FILLED"
+            ),
+        )
+        await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
+    except Exception as exc:
+        try:
+            await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
+        except Exception as persist_exc:
+            log(
+                "ENTRY_PENDING_PERSIST_ERROR",
+                level="CRIT",
+                ticker=ticker,
+                phase="HOLDING_DB_DEGRADED",
+                error=repr(persist_exc),
+            )
+        log(
+            "ENTRY_DB_DEGRADED",
+            level="CRIT",
+            ticker=ticker,
+            order_id=order_id,
+            error=repr(exc),
+        )
+        await notifier.send(
+            "ENTRY_DB_DEGRADED",
+            level="CRIT",
+            message=(
+                f"진입 체결 후 DB 기록 실패: {ticker} {fill_qty}주. "
+                "손절·마감 청산은 계속되지만 거래 이력을 수동 복구하세요."
+            ),
+            ticker=ticker,
+        )
     log("ENTRY_EXECUTED", level="INFO", ticker=ticker,
         order_id=order_id, order_price=submitted_order_price, trigger_price=expected_price,
         order_qty=first_qty, fill_price=fill_price, fill_qty=fill_qty,

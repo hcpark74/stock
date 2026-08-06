@@ -59,6 +59,23 @@ async def test_open_trade_reuse_backfills_missing_name(mem):
     assert row["name"] == "삼성전자"
 
 
+async def test_get_trade_by_date_includes_all_confirmed_buy_fills(mem):
+    trade_id = await db.open_trade("20260625", "005930", 75_000.0, 70)
+    first = await db.record_order(
+        trade_id, "BUY-1", "BUY", 70, 75_000.0, "FIRST_BUY", "005930"
+    )
+    pyramid = await db.record_order(
+        trade_id, "BUY-2", "BUY", 30, 76_000.0, "PYRAMID_BUY", "005930"
+    )
+    await db.update_order_fill(first, 75_000.0, 70, 100)
+    await db.update_order_fill(pyramid, 76_000.0, 30, 100)
+
+    trade = await db.get_trade_by_date("20260625")
+
+    assert trade["entry_qty"] == 70
+    assert trade["confirmed_entry_qty"] == 100
+
+
 # ── record_order ──────────────────────────────────────────────────────
 
 
