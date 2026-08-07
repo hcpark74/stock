@@ -997,6 +997,7 @@ function orderStatusBadge(status) {
   if(s === 'PARTIAL_FILL') return '<span class="badge b-op">부분체결</span>';
   if(s === 'CANCELLED') return '<span class="badge b-to">취소</span>';
   if(s === 'FAILED') return '<span class="badge b-hs">실패</span>';
+  if(s === 'UNCERTAIN') return '<span class="badge b-hs">MTS 즉시확인</span>';
   return '<span class="badge b-op">대기</span>';
 }
 
@@ -1015,6 +1016,7 @@ function renderOrders(rows) {
   if($('order-filled')) $('order-filled').textContent = fmt(orders.filter(o=>o.status === 'FILLED').length);
   if($('order-pending')) $('order-pending').textContent = fmt(orders.filter(o=>o.status === 'PENDING' || o.status === 'PARTIAL_FILL').length);
   if($('order-closed')) $('order-closed').textContent = fmt(orders.filter(o=>o.status === 'CANCELLED' || o.status === 'FAILED').length);
+  if($('order-uncertain')) $('order-uncertain').textContent = fmt(orders.filter(o=>o.status === 'UNCERTAIN').length);
 
   const body = $('orders-tbody');
   if(!body) return;
@@ -1024,6 +1026,9 @@ function renderOrders(rows) {
   }
   body.innerHTML = orders.map(o => {
     const orderTickerName = tickerName(o.ticker, o.name);
+    const auditSource = o.audit_source === 'entry_order_attempts' ? '진입 감사원장' : '';
+    const reason = o.error_msg || o.error_code || (o.status === 'UNCERTAIN' ? 'MTS 즉시 확인' : '');
+    const detail = [reason, auditSource].filter(Boolean).join(' · ') || '—';
     return `<tr>
       <td>${esc(o.kis_order_id || (o.id ? `DB#${o.id}` : '—'))}</td>
       <td>${esc(shortTime(o.ordered_at))}</td>
@@ -1034,7 +1039,7 @@ function renderOrders(rows) {
       <td>${o.fill_qty == null ? '—' : fmt(o.fill_qty)}</td>
       <td>${orderStatusBadge(o.status)}</td>
       <td>${esc(o.order_phase || '—')}</td>
-      <td>${esc(o.error_msg || o.error_code || '—')}</td>
+      <td>${esc(detail)}</td>
     </tr>`;
   }).join('');
 }

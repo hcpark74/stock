@@ -80,6 +80,7 @@ def reset_fill_poll_summary(monkeypatch):
     monkeypatch.setattr(f3, "F3_VI_RELEASE_WAIT_SEC", 0)
     monkeypatch.setattr(f3, "_fetch_buyable_qty", AsyncMock(return_value=_buyable()))
     monkeypatch.setattr(f3, "_fetch_vi_active", AsyncMock(return_value=None))
+    monkeypatch.setattr(f3.db, "record_entry_order_attempt", AsyncMock(return_value=1))
     # 마감 검사를 실제 시계와 분리 — 마감 동작 테스트는 개별적으로 False를 덮어쓴다
     monkeypatch.setattr(f3, "_before_deadline", lambda _deadline: True)
     yield
@@ -948,6 +949,40 @@ async def test_order_rejected_sets_day_skip(monkeypatch):
     assert notify.await_args.args[0] == "ENTRY_FAIL"
     assert notify.await_args.kwargs["ticker"] == "006340"
     assert "rejected" in notify.await_args.kwargs["message"]
+
+
+@pytest.mark.asyncio
+async def test_empty_order_id_is_rejected_even_when_rt_cd_is_success(monkeypatch):
+    events = []
+    _reset_state()
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10310.0, 10000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(
+        f3,
+        "_send_buy",
+        AsyncMock(
+            return_value={
+                "rt_cd": "0",
+                "msg_cd": "MCA00000",
+                "msg1": "missing ODNO",
+                "output": {"ODNO": ""},
+            }
+        ),
+    )
+    poll_fill = AsyncMock()
+    monkeypatch.setattr(f3, "_poll_fill", poll_fill)
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3.run()
+
+    assert state.get().position_status == "IDLE"
+    assert state.get().day_skip is True
+    poll_fill.assert_not_awaited()
+    rejected = [kwargs for event, kwargs in events if event == "ENTRY_FAIL"]
+    assert rejected[-1]["reason"] == "ORDER_REJECTED"
 
 
 @pytest.mark.asyncio
@@ -2705,6 +2740,23 @@ async def test_entry_retries_after_unfilled_order(monkeypatch):
     assert "ENTRY_RETRY_START" in event_names
     assert "ENTRY_EXECUTED" in event_names
     assert state.get().position_status == "HOLDING"
+    current_tasks = [
+        task
+        for task in f3._entry_audit_tasks
+        if task.get_loop() is asyncio.get_running_loop()
+    ]
+    if current_tasks:
+        await asyncio.gather(*current_tasks)
+    audit_calls = f3.db.record_entry_order_attempt.await_args_list
+    assert {call.kwargs["kis_order_id"] for call in audit_calls} == {
+        "0000000937",
+        "0000000938",
+    }
+    assert [call.kwargs["status"] for call in audit_calls].count("PENDING") == 2
+    assert {call.kwargs["status"] for call in audit_calls} >= {
+        "CANCELLED",
+        "PARTIAL_FILL",
+    }
 
 
 @pytest.mark.asyncio
@@ -2957,6 +3009,13 @@ async def test_recover_pending_entry_reuses_existing_order_record(monkeypatch):
     monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
 
     recovered = await f3.recover_pending_entry()
+    current_tasks = [
+        task
+        for task in f3._entry_audit_tasks
+        if task.get_loop() is asyncio.get_running_loop()
+    ]
+    if current_tasks:
+        await asyncio.gather(*current_tasks)
 
     assert recovered is True
     record_order.assert_not_awaited()
@@ -2969,6 +3028,182 @@ async def test_recover_pending_entry_reuses_existing_order_record(monkeypatch):
     )
     assert state.get().position_status == "HOLDING"
     assert state.get().pending_entry is None
+
+
+@pytest.mark.asyncio
+async def test_recover_pending_entry_creates_cancelled_audit_after_initial_write_failure(
+    monkeypatch,
+):
+    """ACK 직후 감사 INSERT 전에 죽은 경우도 상태 파일만으로 최종 행을 만든다."""
+    _reset_state()
+    s = state.get()
+    s.position_status = "ENTERING"
+    s.pending_entry = {
+        "date": "20260701",
+        "order_id": "RECOVER-AUDIT-1",
+        "org_no": "001",
+        "ticker": "006340",
+        "requested_qty": 48,
+        "limit_price": 14_510,
+        "anchor_price": 14_440,
+        "attempt": 1,
+        "max_attempts": 2,
+        "mode": "PAPER",
+    }
+
+    async def audit_write(**kwargs):
+        if kwargs["status"] == "PENDING":
+            raise RuntimeError("initial audit unavailable")
+        return 91
+
+    record_audit = AsyncMock(side_effect=audit_write)
+    monkeypatch.setattr(f3.db, "record_entry_order_attempt", record_audit)
+    monkeypatch.setattr(f3, "_fetch_order_fill_snapshot", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        f3,
+        "_cancel_entry_order_confirmed",
+        AsyncMock(return_value=("CANCELLED", None)),
+    )
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+
+    recovered = await f3.recover_pending_entry()
+    current_tasks = [
+        task
+        for task in f3._entry_audit_tasks
+        if task.get_loop() is asyncio.get_running_loop()
+    ]
+    if current_tasks:
+        await asyncio.gather(*current_tasks)
+
+    assert recovered is True
+    final = [
+        call
+        for call in record_audit.await_args_list
+        if call.kwargs["status"] == "CANCELLED"
+    ]
+    assert len(final) == 1
+    assert final[0].kwargs["date"] == "20260701"
+    assert final[0].kwargs["kis_order_id"] == "RECOVER-AUDIT-1"
+    assert state.get().pending_entry is None
+
+
+@pytest.mark.asyncio
+async def test_entry_audit_failure_is_swallowed_and_logged(monkeypatch):
+    events = []
+    audit = {
+        "date": "20260701",
+        "kis_order_id": "AUDIT-FAIL-1",
+        "ticker": "006340",
+        "qty": 1,
+        "price": 14_510.0,
+        "trigger_price": 14_440.0,
+        "attempt": 1,
+        "max_attempts": 2,
+        "mode": "PAPER",
+    }
+    monkeypatch.setattr(
+        f3.db,
+        "record_entry_order_attempt",
+        AsyncMock(side_effect=RuntimeError("sqlite unavailable")),
+    )
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+
+    await f3._upsert_entry_attempt_safe(audit, "UNCERTAIN")
+
+    degraded = [kwargs for event, kwargs in events if event == "ENTRY_DB_DEGRADED"]
+    assert degraded[-1]["attempt_status"] == "UNCERTAIN"
+    assert "sqlite unavailable" in degraded[-1]["error"]
+
+
+@pytest.mark.asyncio
+async def test_entry_audit_timeout_is_bounded(monkeypatch):
+    blocker = asyncio.Event()
+    events = []
+
+    async def stalled_audit(**_kwargs):
+        await blocker.wait()
+
+    monkeypatch.setattr(f3, "F3_ENTRY_AUDIT_TIMEOUT_SEC", 0.01)
+    monkeypatch.setattr(f3.db, "record_entry_order_attempt", stalled_audit)
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    audit = {
+        "date": "20260701",
+        "kis_order_id": "AUDIT-SLOW-1",
+        "ticker": "006340",
+        "qty": 1,
+        "price": 14_510.0,
+        "trigger_price": 14_440.0,
+        "attempt": 1,
+        "max_attempts": 2,
+        "mode": "PAPER",
+    }
+
+    await asyncio.wait_for(f3._upsert_entry_attempt_safe(audit, "PENDING"), 0.1)
+
+    degraded = [kwargs for event, kwargs in events if event == "ENTRY_DB_DEGRADED"]
+    assert degraded[-1]["attempt_status"] == "PENDING"
+    assert "TimeoutError" in degraded[-1]["error"]
+
+
+@pytest.mark.asyncio
+async def test_entry_audit_tasks_are_drained_before_shutdown(monkeypatch):
+    blocker = asyncio.Event()
+    events = []
+    task = asyncio.create_task(blocker.wait())
+    f3._entry_audit_tasks.add(task)
+    monkeypatch.setattr(f3, "F3_ENTRY_AUDIT_TIMEOUT_SEC", 0.01)
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+
+    await f3.drain_entry_audit_tasks()
+
+    assert task.cancelled()
+    assert task not in f3._entry_audit_tasks
+    shutdown = [
+        kwargs
+        for event, kwargs in events
+        if event == "ENTRY_DB_DEGRADED"
+        and kwargs.get("phase") == "ENTRY_ATTEMPT_AUDIT_SHUTDOWN"
+    ]
+    assert shutdown[-1]["pending_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_initial_entry_audit_is_detached_from_live_reconciliation(monkeypatch):
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def stalled_audit(**_kwargs):
+        started.set()
+        await release.wait()
+        return 1
+
+    monkeypatch.setattr(f3, "F3_ENTRY_AUDIT_TIMEOUT_SEC", 1.0)
+    monkeypatch.setattr(f3.db, "record_entry_order_attempt", stalled_audit)
+    audit = {
+        "date": "20260701",
+        "kis_order_id": "AUDIT-DETACHED-1",
+        "ticker": "006340",
+        "qty": 1,
+        "price": 14_510.0,
+        "trigger_price": 14_440.0,
+        "attempt": 1,
+        "max_attempts": 2,
+        "mode": "PAPER",
+    }
+
+    f3._start_entry_attempt_audit(audit)
+    await asyncio.wait_for(started.wait(), 0.1)
+    current_tasks = [
+        task
+        for task in f3._entry_audit_tasks
+        if task.get_loop() is asyncio.get_running_loop()
+    ]
+    assert current_tasks and not current_tasks[-1].done()
+
+    release.set()
+    await asyncio.gather(*current_tasks)
 
 
 @pytest.mark.asyncio
@@ -2998,6 +3233,37 @@ async def test_recover_pending_entry_api_error_preserves_pending_and_blocks(monk
     assert state.get().position_status == "ENTERING"
     assert state.get().pending_entry["order_id"] == "0000000937"
     f3.notifier.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_recovery_continues_when_audit_payload_cannot_be_built(monkeypatch):
+    events = []
+    _reset_state()
+    s = state.get()
+    s.position_status = "ENTERING"
+    s.pending_entry = {
+        "order_id": "RECOVER-NO-AUDIT",
+        "org_no": "001",
+        "ticker": "006340",
+        "requested_qty": 8,
+    }
+    monkeypatch.setattr(f3, "_entry_audit_from_pending", lambda *args, **kwargs: None)
+    monkeypatch.setattr(f3, "_fetch_order_fill_snapshot", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        f3,
+        "_cancel_entry_order_confirmed",
+        AsyncMock(return_value=("CANCELLED", None)),
+    )
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+
+    recovered = await f3.recover_pending_entry()
+
+    assert recovered is True
+    assert s.pending_entry is None
+    degraded = [kwargs for event, kwargs in events if event == "ENTRY_DB_DEGRADED"]
+    assert degraded[-1]["reason"] == "INVALID_PENDING_AUDIT_FIELDS"
 
 
 @pytest.mark.asyncio
@@ -3037,6 +3303,14 @@ async def test_recover_cancelled_pyramid_keeps_existing_holding(monkeypatch):
     assert s.remaining_qty == 40
     assert s.pending_entry is None
     assert s.day_skip is False
+    pyramid_audits = [
+        call
+        for call in f3.db.record_entry_order_attempt.await_args_list
+        if call.kwargs.get("kis_order_id") == "0000000938"
+    ]
+    assert pyramid_audits
+    assert {call.kwargs["order_phase"] for call in pyramid_audits} == {"PYRAMID_BUY"}
+    assert "CANCELLED" in {call.kwargs["status"] for call in pyramid_audits}
 
 
 @pytest.mark.asyncio
@@ -3393,6 +3667,71 @@ async def test_known_active_vi_waits_for_confirmed_release(monkeypatch):
         "VI_ENTRY_WAIT_STARTED",
         "VI_ENTRY_RELEASED",
     ]
+
+
+@pytest.mark.asyncio
+async def test_vi_release_rechecks_fresh_quote_then_submits_capped_limit(monkeypatch):
+    """VI 해제 뒤 과거 호가를 재사용하지 않고 신선 호가로 지정가를 만든다."""
+    events = []
+    call_order = []
+    _reset_state()
+    vi_responses = iter([dict(_VI_ACTIVE_INFO), None])
+
+    async def fetch_vi(_ticker):
+        call_order.append("vi_check")
+        return next(vi_responses)
+
+    async def wait_sleep(_seconds):
+        call_order.append("vi_wait")
+
+    async def fetch_final_quote(_ticker):
+        call_order.append("final_quote")
+        return _entry_quote(10_400)
+
+    async def send_buy(*_args, **_kwargs):
+        call_order.append("send_buy")
+        return {
+            "rt_cd": "0",
+            "msg_cd": "MCA00000",
+            "msg1": "OK",
+            "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
+        }
+
+    send_buy_mock = AsyncMock(side_effect=send_buy)
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(f3, "F3_VI_RELEASE_WAIT_SEC", 130.0)
+    monkeypatch.setattr(f3, "F3_VI_RELEASE_POLL_SEC", 2.0)
+    monkeypatch.setattr(f3.asyncio, "sleep", wait_sleep)
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10_310.0, 10_000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_fetch_vi_active", fetch_vi)
+    monkeypatch.setattr(f3, "_fetch_final_entry_quote", fetch_final_quote)
+    monkeypatch.setattr(f3, "_send_buy", send_buy_mock)
+    monkeypatch.setattr(
+        f3,
+        "_poll_fill",
+        AsyncMock(return_value={"fill_price": 10_400, "fill_qty": 90}),
+    )
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "record_order", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "update_order_fill", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+
+    await f3.run()
+
+    assert call_order == ["vi_check", "vi_wait", "vi_check", "final_quote", "send_buy"]
+    assert send_buy_mock.await_args.args == ("006340", 90, "PAPER")
+    assert send_buy_mock.await_args.kwargs["limit_price"] == 10_500
+    assert callable(send_buy_mock.await_args.kwargs["send_guard"])
+    assert send_buy_mock.await_args.kwargs["send_guard"]() is True
+    event_names = [event for event, _kwargs in events]
+    assert event_names.index("VI_ENTRY_RELEASED") < event_names.index("ENTRY_PRICE_APPROVED")
+    assert event_names.index("ENTRY_PRICE_APPROVED") < event_names.index("ENTRY_ORDER_SENT")
+    assert state.get().position_status == "HOLDING"
+    f3.db.record_skip.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -4207,6 +4546,33 @@ def _wire_successful_entry(monkeypatch, send_buy):
     monkeypatch.setattr(f3.db, "record_order", AsyncMock(return_value=1))
     monkeypatch.setattr(f3.db, "update_order_fill", AsyncMock())
     monkeypatch.setattr(f3.state, "persist", AsyncMock())
+
+
+@pytest.mark.asyncio
+async def test_live_order_reconciliation_continues_without_audit_payload(monkeypatch):
+    events = []
+    _reset_state()
+    send_buy = AsyncMock(
+        return_value={
+            "rt_cd": "0",
+            "msg_cd": "MCA00000",
+            "msg1": "OK",
+            "output": {"ODNO": "LIVE-NO-AUDIT", "KRX_FWDG_ORD_ORGNO": "001"},
+        }
+    )
+    _wire_successful_entry(monkeypatch, send_buy)
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(3985.0, 3865.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_entry_audit_from_pending", lambda *args, **kwargs: None)
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+
+    await f3.run()
+
+    assert state.get().position_status == "HOLDING"
+    f3._poll_fill.assert_awaited_once()
+    degraded = [kwargs for event, kwargs in events if event == "ENTRY_DB_DEGRADED"]
+    assert degraded[-1]["reason"] == "INVALID_PENDING_AUDIT_FIELDS"
 
 
 @pytest.mark.asyncio

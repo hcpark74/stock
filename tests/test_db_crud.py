@@ -79,6 +79,236 @@ async def test_get_trade_by_date_includes_all_confirmed_buy_fills(mem):
 # ── record_order ──────────────────────────────────────────────────────
 
 
+async def test_entry_order_attempt_audits_cancelled_order_without_trade(mem):
+    attempt_id = await db.record_entry_order_attempt(
+        "20260807",
+        "0000000839",
+        "064400",
+        103,
+        75_300.0,
+        74_500.0,
+        1,
+        2,
+        "PAPER",
+        org_no="00950",
+        name="LG씨엔에스",
+        status="CANCELLED",
+    )
+
+    conn = db.get()
+    async with conn.execute(
+        "SELECT * FROM entry_order_attempts WHERE id=?",
+        (attempt_id,),
+    ) as cur:
+        row = await cur.fetchone()
+
+    assert row["kis_order_id"] == "0000000839"
+    assert row["ticker"] == "064400"
+    assert row["status"] == "CANCELLED"
+    assert row["order_phase"] == "FIRST_BUY"
+    assert row["order_qty"] == 103
+    assert row["order_price"] == pytest.approx(75_300.0)
+    assert row["trigger_price"] == pytest.approx(74_500.0)
+
+
+async def test_entry_order_attempt_records_fill_reconciliation(mem):
+    attempt_id = await db.record_entry_order_attempt(
+        "20260807",
+        "0000000947",
+        "064400",
+        103,
+        75_100.0,
+        74_500.0,
+        2,
+        2,
+        "PAPER",
+        status="FILLED",
+        fill_price=74_400.0,
+        fill_qty=103,
+        fill_latency_ms=4_552,
+    )
+
+    conn = db.get()
+    async with conn.execute(
+        "SELECT status, fill_price, fill_qty, fill_latency_ms "
+        "FROM entry_order_attempts WHERE id=?",
+        (attempt_id,),
+    ) as cur:
+        row = await cur.fetchone()
+
+    assert dict(row) == {
+        "status": "FILLED",
+        "fill_price": 74_400.0,
+        "fill_qty": 103,
+        "fill_latency_ms": 4_552,
+    }
+
+
+async def test_entry_order_attempt_natural_key_upsert_resolves_uncertain(mem):
+    audit = {
+        "date": "20260807",
+        "kis_order_id": "0000000951",
+        "ticker": "064400",
+        "qty": 3,
+        "price": 75_100.0,
+        "trigger_price": 74_500.0,
+        "attempt": 1,
+        "max_attempts": 2,
+        "mode": "PAPER",
+    }
+    attempt_id = await db.record_entry_order_attempt(**audit, status="UNCERTAIN")
+    resolved_id = await db.record_entry_order_attempt(
+        **audit,
+        status="FILLED",
+        fill_price=75_000.0,
+        fill_qty=3,
+        fill_latency_ms=800,
+    )
+    # A late detached initial write must not downgrade the resolved row.
+    await db.record_entry_order_attempt(**audit, status="PENDING")
+
+    async with db.get().execute(
+        "SELECT * FROM entry_order_attempts WHERE date=? AND kis_order_id=?",
+        (audit["date"], audit["kis_order_id"]),
+    ) as cur:
+        row = await cur.fetchone()
+
+    assert resolved_id == attempt_id
+    assert row["status"] == "FILLED"
+    assert row["fill_price"] == pytest.approx(75_000.0)
+    assert row["fill_qty"] == 3
+
+
+async def test_entry_order_attempt_status_update_preserves_fill_values(mem):
+    await db.record_entry_order_attempt(
+        "20260807",
+        "0000000952",
+        "064400",
+        3,
+        75_100.0,
+        74_500.0,
+        1,
+        2,
+        "PAPER",
+        status="PARTIAL_FILL",
+        fill_price=75_000.0,
+        fill_qty=1,
+    )
+
+    await db.record_entry_order_attempt(
+        "20260807",
+        "0000000952",
+        "064400",
+        3,
+        75_100.0,
+        74_500.0,
+        1,
+        2,
+        "PAPER",
+        status="UNCERTAIN",
+    )
+
+    async with db.get().execute(
+        "SELECT status, fill_price, fill_qty FROM entry_order_attempts "
+        "WHERE date=? AND kis_order_id=?",
+        ("20260807", "0000000952"),
+    ) as cur:
+        row = await cur.fetchone()
+    assert dict(row) == {
+        "status": "UNCERTAIN",
+        "fill_price": 75_000.0,
+        "fill_qty": 1,
+    }
+
+
+async def test_entry_order_attempt_preserves_pyramid_phase(mem):
+    await db.record_entry_order_attempt(
+        "20260807",
+        "PYRAMID-CANCELLED-1",
+        "064400",
+        2,
+        75_500.0,
+        75_300.0,
+        1,
+        1,
+        "PAPER",
+        order_phase="PYRAMID_BUY",
+        status="CANCELLED",
+    )
+
+    async with db.get().execute(
+        "SELECT order_phase, status FROM entry_order_attempts "
+        "WHERE date=? AND kis_order_id=?",
+        ("20260807", "PYRAMID-CANCELLED-1"),
+    ) as cur:
+        row = await cur.fetchone()
+
+    assert dict(row) == {
+        "order_phase": "PYRAMID_BUY",
+        "status": "CANCELLED",
+    }
+
+
+async def test_init_migrates_legacy_entry_attempt_phase(tmp_path):
+    import aiosqlite
+
+    path = str(tmp_path / "legacy-entry-attempt.db")
+    async with aiosqlite.connect(path) as conn:
+        await conn.execute("""
+            CREATE TABLE entry_order_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                kis_order_id TEXT NOT NULL,
+                org_no TEXT,
+                ticker TEXT NOT NULL,
+                name TEXT,
+                entry_attempt INTEGER NOT NULL,
+                max_attempts INTEGER NOT NULL,
+                order_qty INTEGER NOT NULL,
+                order_price REAL NOT NULL,
+                trigger_price REAL,
+                execution_mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                fill_price REAL,
+                fill_qty INTEGER,
+                fill_latency_ms INTEGER,
+                ordered_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (date, kis_order_id)
+            )
+        """)
+        await conn.execute(
+            "INSERT INTO entry_order_attempts "
+            "(date, kis_order_id, ticker, entry_attempt, max_attempts, "
+            "order_qty, order_price, execution_mode, status, ordered_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "20260806",
+                "LEGACY-ENTRY-1",
+                "064400",
+                1,
+                2,
+                3,
+                75_100.0,
+                "PAPER",
+                "CANCELLED",
+                "2026-08-06T09:00:00+09:00",
+                "2026-08-06T09:00:01+09:00",
+            ),
+        )
+        await conn.commit()
+
+    await db.init(path)
+    async with db.get().execute(
+        "SELECT order_phase FROM entry_order_attempts WHERE kis_order_id=?",
+        ("LEGACY-ENTRY-1",),
+    ) as cur:
+        row = await cur.fetchone()
+    await db.close()
+
+    assert row["order_phase"] == "FIRST_BUY"
+
+
 async def test_open_trade_reuses_existing_same_day_trade(mem):
     first_id = await db.open_trade("20260623", "005930", 75_000.0, 10)
     second_id = await db.open_trade("20260623", "000660", 120_000.0, 1)

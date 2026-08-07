@@ -853,17 +853,39 @@ async def api_orders(limit: int = 60) -> JSONResponse:
     try:
         conn = db.get()
         async with conn.execute(
-            """SELECT o.id, o.kis_order_id, o.order_type, o.order_phase,
-                      o.ticker, o.name, o.order_qty, o.order_price, o.trigger_price,
-                      o.fill_price, o.fill_qty, o.fill_latency_ms,
-                      o.status, o.ordered_at, o.filled_at,
-                      o.error_code, o.error_msg, t.date
-               FROM orders o
-               JOIN trades t ON t.id = o.trade_id
-               WHERE t.date = ?
-               ORDER BY o.ordered_at DESC, o.id DESC
+            """SELECT * FROM (
+                   SELECT o.id, o.kis_order_id, o.order_type, o.order_phase,
+                          o.ticker, o.name, o.order_qty, o.order_price, o.trigger_price,
+                          o.fill_price, o.fill_qty, o.fill_latency_ms,
+                          o.status, o.ordered_at, o.filled_at,
+                          o.error_code, o.error_msg, t.date,
+                          'orders' AS audit_source
+                     FROM orders o
+                     JOIN trades t ON t.id = o.trade_id
+                    WHERE t.date = ?
+                   UNION ALL
+                   SELECT -a.id AS id, a.kis_order_id, 'BUY' AS order_type,
+                          a.order_phase,
+                          a.ticker, a.name, a.order_qty, a.order_price, a.trigger_price,
+                          a.fill_price, a.fill_qty, a.fill_latency_ms,
+                          a.status, a.ordered_at,
+                          CASE WHEN a.status IN ('FILLED','PARTIAL_FILL')
+                               THEN a.updated_at ELSE NULL END AS filled_at,
+                          NULL AS error_code, NULL AS error_msg, a.date,
+                          'entry_order_attempts' AS audit_source
+                     FROM entry_order_attempts a
+                    WHERE a.date = ?
+                      AND NOT EXISTS (
+                          SELECT 1
+                            FROM orders o2
+                            JOIN trades t2 ON t2.id = o2.trade_id
+                           WHERE t2.date = a.date
+                             AND o2.kis_order_id = a.kis_order_id
+                      )
+               )
+               ORDER BY ordered_at DESC, id DESC
                LIMIT ?""",
-            (_today(), limit),
+            (_today(), _today(), limit),
         ) as cur:
             rows = await cur.fetchall()
         return JSONResponse([dict(r) for r in rows])

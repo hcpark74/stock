@@ -2,7 +2,37 @@
 
 최종 코드 점검일: 2026-08-07
 
-이 문서는 PAPER에서 정상 동작했다는 사실만으로 REAL을 활성화하지 않도록 코드 수준의 차이와 승인 조건을 기록한다. 아래 `남은 REAL-BLOCKER`가 하나라도 남아 있으면 `KIS_MODE=REAL`로 전환하지 않는다.
+이 문서는 PAPER에서 정상 동작했다는 사실만으로 REAL을 활성화하지 않도록 코드 수준의 차이와 승인 조건을 기록한다. `python scripts/real_readiness.py`의 `eligible_for_real`이 `false`이거나 아래 미완료 항목이 하나라도 남아 있으면 상주 프로세스를 `KIS_MODE=REAL`로 시작하지 않는다.
+
+## 현재 판정 (2026-08-07)
+
+```text
+준비도                  39/100
+REAL 진입 가능          아니오
+현재 전략 fingerprint   20e1be68b17c
+동일 fingerprint PAPER  0/20
+```
+
+현재 점수는 `.env`와 운영 DB를 읽어 산출한 값이다. 문서를 보고 승인값을 먼저 바꾸지 말고 아래 명령으로 매번 다시 확인한다.
+
+```powershell
+python scripts/real_readiness.py
+```
+
+### 현재 남은 REAL-BLOCKER
+
+| 차단 항목 | 현재값 | 해제 조건 |
+|---|---|---|
+| 동일 버전 PAPER 정상 청산 | `0/20` | fingerprint `20e1be68b17c`로 진입·전량 청산이 정상 대사된 PAPER 거래 20회 |
+| 초기 투입비율 | `F3_ALLOC_RATIO=0.95` | REAL 상주 프로세스 시작 전에 `0 < F3_ALLOC_RATIO <= 0.20` |
+| PAPER 실험 기능 | `PAPER_FAST_PROBE=1`, `PAPER_FAST_HYBRID=1` | REAL에서는 둘 다 `0` |
+| 최종 호가 신선도 | `F3_FINAL_QUOTE_MAX_AGE_MS=1500` | REAL에서는 명시적으로 `500` 이하로 설정하거나 변수를 제거해 REAL 기본값 500ms 사용 |
+| 실전 접속 설정 검증 | 미승인 | 실전 키·계좌·REST/WS URL을 실제 조회로 확인한 뒤 `REAL_CONFIG_VERIFIED=1` |
+| REAL 최소수량 스모크 | 미승인 | 아래 스모크 절차의 주문·취소·체결·잔고 대사를 완료한 뒤 `REAL_SMOKE_TEST_APPROVED=1` |
+| CRIT 알림 실수신 | 미승인 | 휴대폰에서 CRIT 메시지를 확인한 뒤 `REAL_ALERT_TEST_APPROVED=1` |
+| 운영자 장애 대응 훈련 | 미승인 | MTS 수동청산·프로세스 중지·잔고 대사를 실제로 수행한 뒤 `REAL_OPERATOR_DRILL_APPROVED=1` |
+
+오늘 09:00 거래는 fingerprint `58a5a3ba697e`로 실행돼 현재 버전 실적에 포함되지 않는다. 현재 코드로 오늘 F1 스냅샷을 재생하면 한화솔루션이 F1·F2·F3 1순위이고 10% 미만 갭/지정가 안전 검사를 통과하지만, 이는 오프라인 재생 결과이지 현재 fingerprint의 정상 청산 실적이 아니다.
 
 ## 이번 점검에서 완료된 항목
 
@@ -14,6 +44,14 @@
 - F3/F4/F5의 확인된 체결은 주문 호출 직전부터 체결 조회 확인까지의 `fill_latency_ms`를 기록한다. 체결 미확인 주문은 `PENDING`, 부분체결은 `PARTIAL_FILL`로 남긴다.
 - F1 후보 처리 로그는 처리·적격·제외·예상가 성공/대체·오류 건수와 제외 사유별 건수를 함께 기록한다.
 - 실전투자 준비도를 100점으로 계산하며, 100% 미만이면 REAL 프로세스 시작과 REAL 매수 주문을 이중 차단한다. 청산 매도는 안전을 위해 차단하지 않는다.
+- F1은 8~10% 고갭 후보를 정적 VI 근접만으로 제거하지 않는다. 예상 체결대금 50억원 이상인 경우에만 허용하며, 실제 VI 활성 여부는 F3 주문 직전에 확인한다.
+- F3 매수는 설정으로 해제할 수 없는 지정가 전용이다. 신선한 최종 1호 매도호가의 1% 상한과 전일 종가 대비 10% 미만의 마지막 유효 호가 중 낮은 가격만 제출한다.
+- 10% 경계는 `Decimal`과 KRX 호가단위로 계산해 정적 VI 발동가와 같은 가격에는 주문하지 않는다. 최종 호가가 오래됐거나 갭이 2~10% 범위를 벗어나면 주문 전송 없이 차단한다.
+- VI 대기, 잔고 재시도, 주문 재시도 뒤에도 진입 마감(기본 09:11)과 최종 호가 신선도를 다시 확인한다. `FORCE_CATCHUP`은 이 마감을 우회하지 않는다.
+- 미체결 지정가는 취소와 잔량 대사를 마친 뒤에만 재시도한다. 레거시 시장가 매수 및 호출자가 없던 `force=True` 진입 경로는 제거했다.
+- KIS가 접수한 모든 진입 시도는 상태 파일을 먼저 저장한 뒤 `entry_order_attempts` 감사 원장에 기록한다. 무체결 취소도 `CANCELLED`로 남고, `FIRST_BUY`/`PYRAMID_BUY` 단계가 보존된 채 `/api/orders`에서 조회된다.
+- REAL 왕복 스모크 매수도 운영 F3와 동일한 신선 호가·2~10% 갭·1% 호가 상한·절대 10% 미만 지정가 정책을 사용하며 시장가 매수로 폴백하지 않는다.
+- pytest의 상태·probe·로그·DB·인증 출력은 테스트별 임시 디렉터리로 격리한다. 테스트 로그를 PAPER 운영 증거로 집계하지 않는다.
 
 ## 해결된 이전 REAL-BLOCKER
 
@@ -70,6 +108,13 @@ HOLDING -> EXITING -> CLOSED
 
 코드 지문은 주문·전략·상태 복구 핵심 파일의 내용으로 계산한다. 이 파일들이 변경되면 PAPER 실적은 새 지문으로 다시 쌓아야 한다. `python scripts/real_readiness.py` 또는 웹의 설정 화면에서 현재 점수와 차단 사유를 확인한다.
 
+PAPER 정상 청산 1회로 인정되려면 다음 조건을 모두 만족해야 한다.
+
+- `trades.execution_mode='PAPER'`이고 `strategy_fingerprint`가 현재 값과 같다.
+- `trades.status='CLOSED'`, `entry_qty > 0`, `exit_qty = entry_qty`다.
+- 연결된 매도 주문에 `PENDING`, `PARTIAL_FILL`, `FAILED`가 남아 있지 않다.
+- pytest·수동 합성 데이터가 아니라 격리된 운영 PAPER 프로세스가 만든 거래다.
+
 ## 실전 전 권장 보완
 
 - 이론적 스탑과 KRX 호가단위로 보정한 실행 트리거 가격을 구분해 기록한다.
@@ -79,14 +124,66 @@ HOLDING -> EXITING -> CLOSED
 - `RATE_LIMIT_HIT`, 토큰 갱신, WebSocket 단절, REST 백업 전환을 장 시작 전 실전 서버에서 확인한다.
 - 프로세스·네트워크 장애 시 MTS/HTS로 즉시 수동 청산할 운영자를 09:00~15:15(F5 마감 청산까지) 동안 확보한다.
 
-## 설정 확인
+## REAL 전환 실행 순서
 
-- `DRY_RUN=0`
-- `KIS_MODE=REAL`
-- 실전 REST/WebSocket URL과 실전 키·계좌번호 사용
-- 초기에는 `F3_ALLOC_RATIO`를 낮춰 최소 위험금액으로 시작
-- Telegram CRIT 알림 실수신 확인
-- `FIRST_RATIO=1.00` 유지
+### 1. PAPER 증거 확정
+
+- `KIS_MODE=PAPER`, `DRY_RUN=0`을 유지한다.
+- `python scripts/real_readiness.py`에서 현재 fingerprint를 기록한다.
+- 같은 fingerprint로 PAPER 정상 청산 20회를 채운다. 전략 파일이 변경돼 fingerprint가 바뀌면 0회부터 다시 시작한다.
+- 부분체결, 주문응답 유실, 취소 미확인, SQLite 장애, 재시작 복구 테스트가 모두 통과하는지 확인한다.
+- 운영 PAPER 로그와 pytest 출력이 섞이지 않았는지 `LOG_DIR`, `DB_DIR`, `STATE_DIR`, `PAPER_FAST_PROBE_DIR`을 확인한다.
+
+### 2. REAL 읽기 전용 점검
+
+상주 봇은 중지하고 MTS에서 보유수량과 미체결 주문이 0인지 먼저 확인한다. 그 다음 아래 설정을 적용한다.
+
+```dotenv
+KIS_MODE=REAL
+DRY_RUN=0
+FORCE_CATCHUP=0
+F3_ALLOC_RATIO=0.20
+F3_FINAL_QUOTE_MAX_AGE_MS=500
+PAPER_FAST_PROBE=0
+PAPER_FAST_HYBRID=0
+```
+
+- 실전용 `KIS_APP_KEY`, `KIS_APP_SECRET`, 계좌번호와 상품코드를 사용한다.
+- `KIS_BASE_URL=https://openapi.koreainvestment.com:9443`, `KIS_WS_URL=ws://ops.koreainvestment.com:21000`인지 확인한다.
+- `STOCK_SKIP_DOTENV`는 테스트 전용이므로 운영 환경에 설정하지 않는다.
+- `F4_REST_BACKUP_ENABLED=1`, `F4_REST_ONLY_WHEN_WS_STALE=1`, 런타임 `FIRST_RATIO=1.00`을 확인한다.
+- 주문 플래그 없이 `python api_tests/run_all.py`를 실행해 인증·체결조회·잔고·매수가능수량·취소가능수량 조회를 검증한다.
+- 조회 결과의 계좌번호, 예수금, 보유종목이 MTS와 일치할 때만 `REAL_CONFIG_VERIFIED=1`로 승인한다.
+
+### 3. REAL 최소수량 스모크
+
+이 단계는 실제 주문을 발생시킨다. 장중에 운영자가 MTS를 열어 둔 상태에서 실행 시점의 F1 적격 종목 1주로만 수행한다. `REAL_SMOKE_TICKER`는 최종 매도호가 기준 갭이 2% 이상 10% 미만인 종목으로 실행 직전에 지정한다.
+
+```powershell
+python api_tests/cancel.py --confirm
+$env:REAL_SMOKE_TICKER="현재_F1_적격_종목코드"
+python api_tests/order.py --confirm
+python api_tests/ccld.py
+python api_tests/balance.py
+```
+
+- `--confirm`이 없으면 주문 HTTP 호출 없이 종료한다.
+- `--confirm`은 준비도 100점을 얻기 위한 최초 REAL 스모크 매수에만 명시적인 1회 우회를 허용한다. 상주 `main.py`의 REAL 매수 게이트는 열지 않는다.
+- 취소 스모크는 1주 지정가 주문의 주문번호·원주문 조직번호를 받은 뒤 전량 취소하고, 체결량 0·잔량 0을 확인한다.
+- 왕복 스모크는 신선 최종 호가의 1% 상한과 전일 종가 대비 10% 미만 상한 중 낮은 가격으로 1주 지정가 매수하고, 같은 수량을 시장가 매도해 모두 체결 확인한다. 호가가 오래됐거나 갭 범위를 벗어나면 주문 없이 실패한다.
+- 지정가가 제한 시간 안에 체결되지 않으면 원주문을 취소하고 잔량·체결 경쟁을 대사한다. 취소가 확인되지 않으면 성공으로 처리하지 않으며 MTS 수동 확인을 요구한다.
+- 스모크 전후 CCLD 주문번호·매수/매도 체결수량과 잔고 0을 MTS에서 대사한다.
+- `data/logs/YYYYMMDD.jsonl`의 `REAL_SMOKE_BUY_AUTHORIZED` CRIT 기록과 터미널 결과를 보존한다. 스모크 스크립트는 운영 거래 DB를 만들지 않으므로 MTS·CCLD·잔고·로그가 승인 근거다.
+- 어느 단계에서든 매도 체결 또는 잔고 0이 확인되지 않으면 즉시 MTS로 수동 청산하고 `REAL_SMOKE_TEST_APPROVED`를 `0`으로 유지한다.
+- 모든 대사가 끝난 뒤에만 `REAL_SMOKE_TEST_APPROVED=1`로 설정한다.
+
+### 4. 운영 승인과 최초 기동
+
+- CRIT 테스트 메시지를 휴대폰에서 직접 확인한 뒤 `REAL_ALERT_TEST_APPROVED=1`로 설정한다.
+- 프로세스 종료·네트워크 단절을 가정하고 MTS 수동 매도 및 잔고 대사를 수행한 뒤 `REAL_OPERATOR_DRILL_APPROVED=1`로 설정한다.
+- `python scripts/real_readiness.py` 결과가 정확히 100점, `eligible_for_real=true`, `blockers=[]`인지 확인한다.
+- 첫 기동 전 보유수량·미체결 주문 0, 시스템 시간 동기화, 절전 해제, 유선/안정 네트워크, Telegram 수신 상태를 확인한다.
+- 첫 1~2주는 09:00~15:15 동안 운영자가 화면과 MTS를 함께 모니터링한다.
 
 ## REAL 승인 기준
 
@@ -94,6 +191,6 @@ HOLDING -> EXITING -> CLOSED
 
 1. 실전투자 준비도가 100%이며 REAL 게이트의 차단 사유가 없다.
 2. PAPER에서 부분체결, 체결조회 실패, 주문응답 유실, 재시작 시나리오가 통과했다.
-3. 실전 서버 최소 수량 스모크 테스트에서 주문·취소·체결·잔고·DB가 일치한다.
+3. 실전 서버 최소 수량 스모크 테스트에서 주문·취소·체결·잔고가 KIS CCLD 및 MTS와 일치한다.
 4. 청산 후 `trades.exit_qty`가 매도 체결 합계와 같고, `pnl_amount`가 수수료 제외 계산과 일치한다.
 5. 운영자가 장애 대응 및 수동 청산 절차를 실제로 수행해 봤다.

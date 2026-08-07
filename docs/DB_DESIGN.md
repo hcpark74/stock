@@ -1,7 +1,7 @@
 # DB 설계 문서 — SQLite
 
-> **버전**: 1.2
-> **최종 수정**: 2026-08-06
+> **버전**: 1.3
+> **최종 수정**: 2026-08-07
 > **대상 파일**: `data/db/trading.db`
 
 ---
@@ -17,7 +17,7 @@
 | 수량 | `INTEGER` |
 | Enum 값 | `TEXT` CHECK 제약으로 강제 |
 | 운영 상태 | `today_state.json` 유지 — crash recovery 전용 |
-| 분석/이력 | SQLite (`trades`, `orders`, `partial_exits`, `daily_skips`, `asset_snapshots`) |
+| 분석/이력 | SQLite (`trades`, `orders`, `entry_order_attempts`, `partial_exits`, `daily_skips`, `asset_snapshots`) |
 
 ---
 
@@ -27,6 +27,7 @@
 trades (1) ──< orders       (N)
 trades (1) ──< partial_exits(N)
 trades (1) ──  daily_skips  (date 기준 선택적)
+entry_order_attempts        (체결 전 진입 주문 감사, trade와 독립)
 asset_snapshots             (KIS 자산 조회 이력)
 ```
 
@@ -251,7 +252,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_client_order_id
 
 ---
 
-### 3-2-1. `asset_snapshots` — KIS 자산 조회 이력
+### 3-2-1. `entry_order_attempts` — 체결 전 진입 주문 감사
+
+체결 전에는 당일 `trades` 행을 만들 수 없다. 무체결 취소 뒤 다른 후보가 체결될 수 있고 `trades.date`가 UNIQUE이기 때문이다. 따라서 KIS가 접수한 진입 주문은 상태 파일을 먼저 저장한 다음 이 독립 테이블에 즉시 기록한다.
+
+- 식별·갱신 키: `(date, kis_order_id)` UNIQUE. 프로세스 로컬 `id`를 복구 키로 사용하지 않는다.
+- 상태: `PENDING`, `CANCELLED`, `PARTIAL_FILL`, `FILLED`, `UNCERTAIN`
+- 저장값: 종목·시도번호·주문 단계(`FIRST_BUY`/`PYRAMID_BUY`)·주문수량·제출 지정가·판단 기준가·체결 결과
+- 체결된 주문은 이후 `trades`와 `orders`에 정상 기록한다. `/api/orders`는 같은 KIS 주문번호의 `orders`가 없을 때만 감사 행을 합쳐 반환한다.
+- 최초 `PENDING` 기록은 상태 파일 저장 뒤 비동기로 실행하며 기본 250ms 안에 중단한다. 감사 DB 지연·실패는 이미 접수된 주문의 체결조회·취소 대사를 중단시키지 않는다.
+- 복구 및 정상 대사의 최종 상태도 같은 자연키로 UPSERT한다. 따라서 최초 기록 전 프로세스가 종료되거나 `UNCERTAIN`이 먼저 기록돼도 이후 `CANCELLED`/`PARTIAL_FILL`/`FILLED`로 확정할 수 있다. 늦게 완료된 `PENDING`은 확정 상태를 되돌리지 않는다.
+- `order_phase`가 없던 기존 감사 행은 마이그레이션 시 `FIRST_BUY`로 보존하고, 신규 PYRAMID 복구 행은 `PYRAMID_BUY`로 기록해 `/api/orders`에서 최초 진입과 구분한다.
+
+---
+
+### 3-2-2. `asset_snapshots` — KIS 자산 조회 이력
 
 자산 메뉴의 현재값은 KIS 잔고 조회가 원천이지만, 조회 성공 결과는 장애 분석과 감사 추적을 위해 DB에도 저장한다.
 
@@ -434,7 +449,9 @@ aiosqlite==0.20.0
 ```
 F1  run()               → daily_skips (NO_TARGET)
 F2  run()               → (없음, 선택 종목은 state에)
-F3  run()               → trades.open_trade()
+F3  run()/recovery      → entry_order_attempts.upsert(PENDING, 비동기·시간제한)
+                           entry_order_attempts.upsert(CANCELLED | PARTIAL_FILL | FILLED | UNCERTAIN)
+                           trades.open_trade() [체결 확인 후]
                            orders.record_order(FIRST_BUY)
                            orders.update_order_fill()
                            orders.record_order(PYRAMID_BUY) [조건부]

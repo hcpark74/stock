@@ -1,6 +1,6 @@
 # DAILY 1 갭업 자동매매 시스템
 
-KOSPI/KOSDAQ 장전 갭업 후보를 자동으로 찾고, 09:00 전후 진입부터 장 마감 전 전량 청산까지 사람 개입 없이 관리하는 Python 자동매매 봇입니다. 한국투자증권(KIS) OpenAPI를 사용하며, `PAPER` 모의투자와 `REAL` 실계좌 전환을 지원합니다.
+KOSPI/KOSDAQ 갭업 후보를 자동으로 찾고, 정상 경로에서 09:00 전후 진입부터 장 마감 전 청산까지 관리하는 Python 자동매매 봇입니다. 한국투자증권(KIS) OpenAPI를 사용하며, `PAPER` 모의투자와 준비도 게이트를 통과한 `REAL` 실계좌 전환을 지원합니다.
 
 ## 목차
 
@@ -19,37 +19,53 @@ KOSPI/KOSDAQ 장전 갭업 후보를 자동으로 찾고, 09:00 전후 진입부
 
 **갭업(Gap-Up)** 이란 어떤 종목이 전날 종가보다 눈에 띄게 높은 가격으로 장을 시작하는 현상을 말합니다. 이 시스템은 "갭업으로 시작한 종목은 장 초반에 추가 상승 흐름이 이어지는 경우가 많다"는 전략을 자동화한 것입니다.
 
-핵심 방향성은 다음 세 가지입니다.
+핵심 방향성은 다음과 같습니다.
 
-- **하루 1회, 짧은 승부**: 매일 장 시작 직후(09:00~09:11)에 조건에 맞는 종목 하나에 진입하고, 늦어도 **15:15**에는 전량 매도하고 하루를 마칩니다. 밤새 보유하는 위험(오버나이트 리스크)이 없습니다.
-- **사람 개입 최소화**: 종목 선정, 매수, 손절/익절 추적, 최종 청산까지 전 과정이 자동입니다. 운영자는 Web UI와 Telegram 알림으로 상태를 지켜보기만 하면 됩니다.
-- **안전 우선**: 실계좌(`REAL`)에 연결하기 전에 모의투자(`PAPER`)와 완전 오프라인 테스트(`DRY_RUN`)로 충분히 검증할 수 있도록 3단계 실행 모드를 제공합니다. 조건이 애매하면 매수하지 않고 그날은 쉬는 것이 기본 동작입니다.
+- **하루 한 종목, 장중 청산 목표**: 09:00~09:11에 조건을 통과한 한 종목에만 진입하고 15:15부터 잔여 수량 전량 청산을 시도합니다. 전량 체결이 확인되기 전에는 거래를 `CLOSED`로 확정하지 않습니다. API·시장 장애로 청산이 끝나지 않을 수 있으므로 오버나이트 위험이 “없다”는 보장은 아닙니다.
+- **상승 여력과 체결 안전을 함께 평가**: 3~8% 갭을 핵심 구간으로 보고, 8~10% 고갭도 예상 체결대금이 충분하면 후보로 허용합니다. 고갭 자체를 위험하다는 이유만으로 버리지 않되 점수에는 과열 페널티를 적용하고, 10% 이상은 정적 VI·추격매수 위험 때문에 제외합니다.
+- **매수는 가격 상한 지정가만 사용**: 최종 1호 매도호가와 전일 종가 대비 10% 미만 절대 상한 중 낮은 가격으로 주문합니다. 정적 VI 발동가와 같은 가격에는 주문하지 않으며, 최종 호가가 오래됐거나 진입 마감이 지나면 HTTP 전송 직전에도 차단합니다.
+- **상태 파일 우선 복구**: 접수된 매수·매도 의도는 상태 파일에 먼저 남깁니다. DB 장애만으로 살아 있는 주문의 체결조회·취소·청산을 중단하지 않으며, 재시작 시 주문과 실제 잔고를 대사합니다.
+- **사람 개입 최소화, 수동 대응 준비 필수**: 정상 경로는 종목 선정부터 청산까지 자동이지만 `CRIT`, `UNCERTAIN`, 청산 실패가 발생하면 운영자가 MTS/HTS로 즉시 확인하고 필요하면 수동 정리해야 합니다.
+- **단계적 검증**: 완전 오프라인 `DRY_RUN`, KIS 모의투자 `PAPER`, 준비도 100%를 충족한 `REAL` 순서로 전환합니다. 조건이나 데이터가 불명확하면 신규 매수를 막는 것이 기본 동작입니다.
 
 ## 2. 하루 매매 흐름 (F1~F5)
 
-봇의 하루는 F1부터 F5까지 5단계로 나뉩니다. 각 단계는 정해진 시각에 자동으로 실행됩니다.
+봇의 하루는 F1부터 F5까지 5단계로 나뉩니다. F1 완료 후 F2/F3는 즉시 이어서 실행하며, 09:10/09:10:10 예약 작업은 체이닝이 시작되지 않았을 때의 안전망입니다.
 
 ```text
-F1 09:00~09:10  후보 스캔: 갭/유동성 필터 + 예상체결가 보강
-F2 09:10        대상 종목 잠금: F1 점수와 예상 체결대금 순위 확정
-F3 09:10:10     진입: 갭 재검증, 매수 주문, 미체결 시 짧은 재시도
-F4 진입 후       보유 추적: WebSocket/REST 가격 추적, Step Trailing, Hard Stop
-F5 15:15        마감 청산: 남은 수량 시장가 전량 청산
+F1 09:00 시작       후보 스캔: 3~10% 미만 갭·유동성 필터 + 예상체결가 보강
+F2 F1 완료 직후     대상 종목 잠금: 점수와 예상 체결대금 순위 확정
+F3 F2 완료 직후     지정가 진입·체결 대사·잔량 취소 (신규 주문 절대 마감 09:11)
+F4 체결 후          WebSocket/REST 가격 추적, Step Trailing, Hard Stop
+F5 15:14:50/15:15  잔고 사전 확인 후 남은 수량 시장가 청산·재대사
 ```
 
 쉽게 풀면 이렇습니다.
 
 | 단계 | 하는 일 | 비유 |
 |---|---|---|
-| F1 | 갭업한 종목들을 훑어보고 후보 목록을 만듭니다 | 서류 심사 |
-| F2 | 후보 중 조건을 모두 통과한 종목 하나를 확정합니다 | 최종 면접 |
-| F3 | 확정 종목을 실제로 매수합니다 | 계약 |
-| F4 | 보유 중 가격을 계속 지켜보며 이익은 지키고 손실은 자릅니다 | 관리 |
-| F5 | 15:15이 되면 남은 수량을 무조건 전부 팝니다 | 마감 |
+| F1 | 갭·예상 체결대금·거래대금 증가를 평가해 후보를 만듭니다 | 서류 심사 |
+| F2 | 필터를 통과한 후보를 점수화해 한 종목을 잠급니다 | 최종 면접 |
+| F3 | 신선한 호가를 다시 확인하고 가격 상한 지정가로 매수합니다 | 계약 |
+| F4 | 실제 보유 수량과 가격을 추적하며 손절·트레일링 청산을 실행합니다 | 관리 |
+| F5 | 15:15부터 잔고를 재확인하며 최대 3회 청산·대사하고, 미해결이면 긴급 알림을 보냅니다 | 마감 |
+
+### F1 후보 기준
+
+- 기본 갭 범위는 3% 이상 10% 미만입니다.
+- 3~8%는 핵심 구간입니다. 8~10%는 예상 체결대금 50억 원 이상인 종목만 허용하고 갭이 10%에 가까울수록 점수에서 과열 페널티를 늘립니다.
+- 전체 후보는 예상 체결대금 1억 원 이상이어야 하며, 유동성 상위 10%를 우선 사용하되 최소 후보 수를 확보합니다.
+- VI 근접 여부만으로 후보를 제거하지 않습니다. 실제 VI 발동 여부는 F3 직전에 다시 확인하며, 발동 중이면 대체 후보를 먼저 검토합니다.
+
+### F3 주문과 복구
+
+F3는 시장가 매수 경로가 없습니다. 최종 호가·갭·주문가능현금을 다시 확인해 지정가와 수량을 결정하고, HTTP 전송 순간에도 호가 신선도와 09:11 마감을 검사합니다. 주문이 접수되면 상태 파일을 먼저 저장한 뒤 감사 DB를 비동기로 기록합니다.
+
+미체결 잔량은 취소를 확인한 뒤에만 재시도합니다. 취소나 체결 여부가 불명확하면 다른 후보나 다음 주문으로 넘어가지 않고 `ENTERING`/`pending_entry`를 유지합니다. 재시작 시 같은 주문번호를 다시 대사해 `CANCELLED`, `PARTIAL_FILL`, `FILLED`, `UNCERTAIN` 중 하나로 감사 원장을 갱신합니다. 감사 행에는 `FIRST_BUY`/`PYRAMID_BUY` 단계도 보존해 MTS 대사에서 최초 진입과 추가매수를 구분합니다.
 
 ### 진입이 막히는 경우
 
-F2에서 대상 종목이 잠기면 F3는 기본적으로 매수 실행을 시도합니다. 단, 당일 스킵, 대상 없음, 갭 재검증 실패, 가격 조회 불가, 주문가능수량 0, 상태 충돌처럼 명확한 사유가 있으면 `F3_ENTRY_BLOCKED`로 이유를 남기고 진입을 막습니다. F3 진입이 실패하면 주문 취소와 실패 사유를 로그로 남기고 당일 진입을 종료합니다. UI 하단 파이프라인은 현재 포지션 상태뿐 아니라 오늘 로그 기준 진행 단계도 반영하므로, 진입 실패 후 `IDLE`로 돌아가도 F3 실패까지 진행된 것으로 표시됩니다.
+F2에서 대상 종목이 잠기면 F3는 기본적으로 매수 실행을 시도합니다. 단, 당일 스킵, 대상 없음, 갭 재검증 실패, 최종 호가 노후화, VI 발동, 가격·잔고 조회 실패, 주문가능수량 0, 진입 마감, 상태 충돌처럼 명확한 사유가 있으면 `F3_ENTRY_BLOCKED` 또는 `ENTRY_PRICE_BLOCKED`로 이유를 남기고 진입을 막습니다. 주문이 이미 접수된 뒤라면 단순 실패로 종료하지 않고 체결·취소를 확정할 때까지 대사합니다. UI 하단 파이프라인은 현재 포지션 상태뿐 아니라 오늘 로그 기준 진행 단계도 반영하므로, 진입 실패 후 `IDLE`로 돌아가도 F3 실패까지 진행된 것으로 표시됩니다.
 
 ### 늦게 켜도 이어서 실행 (catch-up)
 
@@ -84,7 +100,7 @@ python scripts/real_readiness.py
 
 | # | 확인 항목 | 기준 |
 |---|---|---|
-| 1 | PAPER에서 진입~청산 전체 사이클(F1~F5) 검증 | 통계 메뉴에서 여러 거래일의 승률·청산 사유 확인 |
+| 1 | 동일 전략 fingerprint PAPER 정상 청산 20회 | `execution_mode=PAPER`, 전량 청산·체결 대사 정상인 현재 fingerprint 거래만 인정 |
 | 2 | `DRY_RUN=0` | 시뮬레이션 모드 해제 |
 | 3 | `KIS_MODE=REAL` | 실행 모드 전환 |
 | 4 | `KIS_BASE_URL=https://openapi.koreainvestment.com:9443`<br>`KIS_WS_URL=ws://ops.koreainvestment.com:21000` | 실계좌 API 주소로 교체 (`.env.example` 주석 참조) |
@@ -94,7 +110,17 @@ python scripts/real_readiness.py
 | 8 | Telegram 알림 실제 수신 테스트 | 봇 기동 시 알림이 휴대폰에 도착하는지 확인 |
 | 9 | 시간 동기화 상태 확인 | 오늘 화면의 NTP 표시가 정상인지, `TIME_SYNC_WARN` 로그가 없는지 |
 | 10 | 자산 메뉴에서 예수금·주문가능금액 확인 | 의도한 투입 금액과 일치하는지 |
-| 11 | 첫 1~2주는 장중 직접 모니터링 | 09:00~15:15 화면과 알림을 실시간 확인 |
+| 11 | REAL 주문 스모크 수행 | 아래 절차로 1주 지정가 매수→체결량 전량 매도 사이클을 직접 확인 |
+| 12 | 첫 1~2주는 장중 직접 모니터링 | 09:00~15:15 화면과 알림을 실시간 확인 |
+
+REAL 주문 스모크는 상주 프로세스의 진입 래치를 임의로 여는 기능이 아닙니다. `--confirm`으로 명시적으로 승인한 이 스크립트의 첫 REAL 매수 1건만 제한적으로 허용하며, 매수에는 F3와 같은 최종 호가 신선도·2% 이상 10% 미만 갭·절대 갭 상한 지정가를 적용합니다. 미체결이면 취소와 최종 대사를 확인하고, 체결되면 실제 체결 수량만 시장가로 매도합니다. 실행 시점에 조건을 만족하는 종목 코드를 지정해야 합니다.
+
+```powershell
+$env:REAL_SMOKE_TICKER="005930"  # 실행 시점 F1/F3 적격 종목으로 교체
+python api_tests/order.py --confirm
+```
+
+`--confirm`이 없으면 인증·조회·주문 HTTP 호출 없이 종료합니다. `BUY 전송 차단`, 취소 미확인, 매도 미체결이 나오면 성공으로 간주하지 말고 MTS에서 주문과 잔고를 즉시 확인합니다. 정상 사이클을 직접 확인한 뒤에만 `REAL_SMOKE_TEST_APPROVED=1`을 설정합니다.
 
 참고: KIS 모의투자는 장전 예상체결가, KOSDAQ 랭킹 조회 등 일부 응답이 실계좌와 다르므로, REAL 전환 직후 며칠은 F1 후보 선정 결과가 PAPER와 달라질 수 있습니다.
 
@@ -114,6 +140,7 @@ Telegram 알림은 `제목 → 상황 → 조치 → 세부 → 코드` 형식�
 | **PC/네트워크 완전 장애 (장중 보유 중)** | 아무것도 못 함 — 손절 미실행 상태 | 복구가 오래 걸릴 것 같으면 MTS로 직접 청산 판단. "봇이 다시 붙을 때까지 스탑이 없다"를 전제로 결정 |
 | **시간 동기화 실패** (`TIME_SYNC_ERROR`) | NTP 서버 조회 실패를 알림 | 시스템 시계가 크게 어긋나지 않았는지 확인 (스케줄 시각이 밀릴 수 있음) |
 | **잔고 조회 실패** (`BALANCE_QUERY_FAILED`) | 진입 직전 잔고 조회가 오류(호출 제한 등)를 반환하면 1초 간격으로 최대 3회 재시도. 끝내 실패하면 현금 0으로 오인하지 않고 진입을 차단하며 긴급 알림 발송 (실제 잔고 부족 `INSUFFICIENT_BALANCE`와 구분됨) | KIS API 상태와 계좌를 확인. 일시 장애면 다음 거래일 자동 정상화 |
+| **진입 주문 상태 불명** (`ENTRY_CANCEL_UNCONFIRMED`) | 신규 진입과 후보 교체를 중단하고 `pending_entry`를 유지한 채 주문을 다시 대사합니다. 결과가 끝내 확정되지 않으면 감사 원장에 `UNCERTAIN`으로 남기고 UI에 `MTS 즉시확인`을 표시합니다 | **즉시** MTS의 미체결 주문과 실제 보유 수량을 확인. 살아 있는 주문은 수동 취소하고, 체결분이 있으면 봇 상태와 일치하는지 확인한 뒤 재시작 |
 
 ### 3.4 일반 주의사항
 
@@ -193,7 +220,8 @@ F1_MIN_CANDIDATES=10
 F1_EXPECTED_QUOTE_CONCURRENCY=1
 F1_MARKET_INTERVAL_SEC=3.0
 
-# PAPER 전용 Fast Path 관측 프로브(매매 판단/주문에는 영향 없음)
+# PAPER 전용 시가 Fast Path. PROBE/SHADOW만 켜면 관측 전용이며,
+# HYBRID=1은 PAPER 후보·잔고 경로에 실제 사용되므로 검증 후에만 활성화.
 PAPER_FAST_PROBE=0
 PAPER_FAST_PROBE_DIR=data/paper_fast_probe
 PAPER_FAST_PROBE_OPEN_OFFSET_MS=300
@@ -229,9 +257,11 @@ F3_QUOTE_MOVE_WARN_PCT=1.5
 F3_FINAL_QUOTE_MAX_AGE_MS=1500
 # 상한 지정가 체결 대기 시간(초). 이후 잔량은 취소하고 체결분만 보유
 F3_LIMIT_FILL_TIMEOUT_SEC=2.0
+# 진입 감사 DB 쓰기 상한(초). 체결/취소 대사를 기다리게 하지 않음
+F3_ENTRY_AUDIT_TIMEOUT_SEC=0.25
 # 후보 선정 이후 총 진입시간 shadow 예산(초); 현재는 초과 로그만 기록
 F3_ENTRY_TOTAL_BUDGET_SEC=45.0
-# 추가 매수(피라미딩) 실행 시각과 체결 대기 시간(초)
+# 레거시 호환 설정. 런타임 FIRST_RATIO=1.00이라 추가 매수는 실행하지 않음
 F3_PYRAMID_AT=09:10:40
 F4_REST_BACKUP_ENABLED=1
 F4_REST_ONLY_WHEN_WS_STALE=1
@@ -249,6 +279,8 @@ PAPER Fast Path 관측 범위와 다음 거래일 판정 기준은
 [`docs/PAPER_FAST_PATH_PROBE.md`](docs/PAPER_FAST_PATH_PROBE.md)를 참고하세요.
 
 F3 진입은 설정으로 해제할 수 없는 지정가 전용 경로입니다. 지정가는 신선한 최종 1호 매도호가에 `F3_ASK_SLIPPAGE_RATIO`를 더한 가격과 전일 종가 대비 주문 갭 상한(10% 미만) 중 낮은 값을 사용합니다. 수량은 이 실제 제출 지정가와 주문가능현금을 기준으로 다시 제한합니다. 실제 VI 발동 중이고 다른 후보가 있으면 즉시 후보를 교체하며, 단일 후보이면서 발동가가 갭 상한 미만일 때만 최대 `F3_VI_RELEASE_WAIT_SEC` 동안 기다린 뒤 최종 호가·갭을 다시 검증합니다. `FORCE_CATCHUP`은 라이브 진입 마감을 우회하지 않습니다. `F3_FINAL_QUOTE_MAX_AGE_MS`를 직접 설정하지 않으면 PAPER는 1500ms, REAL은 500ms를 사용합니다.
+
+KIS가 매수 주문을 접수하면 `today_state.json`에 복구 정보를 먼저 저장합니다. 이후 감사 DB는 `(거래일, KIS 주문번호)` 자연키로 비동기 UPSERT하며, DB 쓰기가 `F3_ENTRY_AUDIT_TIMEOUT_SEC`을 넘거나 실패해도 살아 있는 주문의 체결조회·취소 대사는 계속됩니다. 재시작 복구가 `CANCELLED`, `PARTIAL_FILL`, `FILLED`을 확인하면 기존 `UNCERTAIN` 행도 최종 상태로 갱신하며, 늦게 끝난 `PENDING` 쓰기가 확정 상태나 체결값을 되돌리지 않습니다.
 
 > **설정 마이그레이션 — `F3_MAX_ENTRY_SLIPPAGE_RATIO` 제거됨**
 >
@@ -326,6 +358,8 @@ data/dry_run/state
 data/dry_run/db
 ```
 
+`DRY_RUN` 결과는 주문 로직과 화면 흐름을 확인하는 용도이며 PAPER 실적이나 REAL 준비도 점수에는 포함되지 않습니다. 동일 전략 fingerprint의 실적은 실제 KIS 모의투자 주문이 전량 청산까지 정상 대사된 `PAPER` 거래만 인정합니다.
+
 ## 6. 화면 안내 (Web UI)
 
 봇을 실행하면 웹 브라우저로 볼 수 있는 관리 화면이 함께 켜집니다(기본 주소 `http://localhost:8080`). 운영자는 이 화면에서 오늘의 진행 상황, 계좌 상태, 거래 기록을 확인합니다.
@@ -335,7 +369,7 @@ data/dry_run/db
 | 오늘 | 현재 상태, F1/F2/F3 선정 요약, 보유 후 가격흐름, 가격/손익, 하단 진행 파이프라인, 이벤트 로그 |
 | 우선 선정 | F1 스냅샷 후보 목록과 통과 가능성 우선 정렬 |
 | 자산 | 계좌 현재 스냅샷: 총평가금액, 예수금, 보유종목, 주식평가금액, 평가손익, 주문가능금액 |
-| 주문 | 주문/체결 처리 이력: 주문번호, 종목, 매수/매도, 수량, 가격, 체결 상태, 주문 단계 |
+| 주문 | 주문/체결 처리 이력: 주문번호, 종목, 매수/매도, 수량, 가격, 체결 상태, 주문 단계. 상태 불명 주문은 `MTS 즉시확인` 및 별도 건수로 강조 |
 | 이력 | 과거 거래 기록 |
 | 통계 | 승률, 평균 손익, 청산 사유별 성과 |
 
@@ -359,6 +393,8 @@ Telegram 알림은 내부 로그 코드가 아니라 운영자가 바로 이해�
 
 형식은 `제목 -> 상황 -> 조치 -> 세부 -> 코드` 순서입니다.
 
+`CRIT` 알림, `ENTRY_CANCEL_UNCONFIRMED`, `EXIT_ORDER_RECOVERY_PENDING`은 자동으로 해결됐다고 가정하지 않습니다. 알림의 주문번호·종목·수량을 MTS 주문/체결 및 실제 잔고와 대조하고, UI 주문 메뉴의 `MTS 즉시확인` 상태가 남아 있으면 신규 주문보다 수동 확인을 우선합니다.
+
 ## 8. 개발자 안내
 
 ### 프로젝트 구조
@@ -374,14 +410,20 @@ src/
     status_logic.py     # 상태/F1 표시용 순수 헬퍼 (API·테스트 공용)
   modules/
     f1_filter.py        # F1 후보 스캔, 예상체결가 보강, 스냅샷 저장
-    f1_selector.py      # F1 후보 점수화·선정 기준 (갭/거래대금/VI 가중치)
+    f1_selector.py      # F1 후보 점수화 (갭/거래대금/증가율·과열 페널티)
     f2_lockup.py        # F2 대상 종목 잠금
     f3_entry.py         # F3 진입 주문, 재시도, 실패 로그
     f4_tracking.py      # F4 Step Trailing / Hard Stop
     f5_timeout.py       # F5 마감 청산
+    exit_recovery.py    # 매도 의도·응답 유실 재시작 대사
+    paper_fast_probe.py # PAPER 장전/시가 Fast Path 관측
+    vi_watch.py         # VI 상태 조회·해제 대기
   db.py                 # SQLite CRUD
   live.py               # UI/WS 공유 라이브 상태
   notifier.py           # Telegram 알림 큐와 문구 포매터
+  readiness.py          # REAL 준비도 점수와 런타임 진입 래치
+  release.py            # 전략 fingerprint 계산
+  schedule_times.py     # F1~F5 공용 시각 상수
   scheduler.py          # APScheduler 등록
   state.py              # 인메모리 상태 + today_state.json 복구
   utils/
@@ -406,7 +448,9 @@ tests/
 ### Web UI 내부 동작
 
 - FastAPI 서버가 봇과 같은 이벤트 루프에서 실행됩니다.
-- 주문/체결 내역은 `/api/orders`를 조회해 표시합니다. `/api/stream`의 로그 이벤트가 들어오면 즉시 재조회하고, 5초 폴링을 백업으로 사용합니다.
+- 주문/체결 내역은 `/api/orders`를 조회해 표시합니다. 체결 거래의 `orders`와 체결 전 취소·불확실 진입을 보존하는 `entry_order_attempts` 감사 원장을 합치되, 같은 KIS 주문번호는 중복 표시하지 않습니다. `/api/stream`의 로그 이벤트가 들어오면 즉시 재조회하고, 5초 폴링을 백업으로 사용합니다.
+- 진입 감사 기록은 상태 파일 저장 뒤 `(date, kis_order_id)`로 UPSERT하며 기본 250ms 제한(`F3_ENTRY_AUDIT_TIMEOUT_SEC`)을 둡니다. 감사 DB 장애나 잠금이 살아 있는 주문의 체결·취소 대사를 지연시키지 않으며, 복구 결과가 이전 `UNCERTAIN` 상태를 최종 상태로 갱신합니다. 늦은 `PENDING`은 이미 확정된 상태·체결값·갱신시각을 덮지 않습니다.
+- 주문 상태가 `UNCERTAIN`이면 일반 미체결과 합산하지 않고 빨간 `MTS 즉시확인` 배지와 별도 요약 건수로 표시합니다. `entry_order_attempts`에서 보완된 행은 사유 열에 `진입 감사원장` 출처를 표시합니다.
 - 자산 조회 성공 결과는 `asset_snapshots` DB 테이블에도 저장해 감사/장애 분석용 이력으로 남깁니다.
 - 보유 후 가격흐름 차트는 서버의 최근 tick 버퍼(최대 5,000건)를 원천으로 원시 tick 선을 그립니다. 보유 중에는 `[max(진입시각, 지금-20분) ~ 지금]` 슬라이딩 창, 청산(CLOSED) 후에는 진입~마지막 관측 tick/체결 구간을 고정해 표시합니다. 눈금 간격은 창 크기에 따라 1/2/5/10분, 시간 라벨 간격은 겹치지 않도록 화면 너비 기준으로 1·2·5·10·15·30분 중 자동 선택됩니다. 캔버스 폭은 CSS `width:100%`를 따릅니다.
 - tick 버퍼가 20분을 못 담는 활발한 종목은 첫 tick 이전 구간을 분 단위 이력(`minute_price_history`)으로 채웁니다. 그리기는 150ms 코얼레싱 + 시간 버킷 min/max 다운샘플링으로 tick 폭주 시에도 부하를 제한합니다.
@@ -418,19 +462,30 @@ tests/
 
 ### 테스트
 
-현재 기준 검증 명령:
+pytest는 상태·probe·로그·DB·인증 출력 경로를 테스트별 임시 디렉터리로 바꿉니다. 테스트가 `data/` 운영 기록이나 PAPER 실적 증거를 만들지 않도록 공통 fixture에서 격리하며, 테스트 종료 후 로거 파일 핸들러도 정리합니다.
+
+현재 기준 전체 검증 명령:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\test_kis_rest.py tests\test_f1_filter.py tests\test_f2_lockup.py tests\test_f3_entry.py tests\test_f4_step_trailing.py tests\test_api_server.py tests\test_notifier.py -q -p no:cacheprovider
-.\.venv\Scripts\python.exe -m ruff check src\notifier.py tests\test_notifier.py
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m ruff check .
+.\.venv\Scripts\python.exe -m compileall -q src api_tests tests
+git diff --check
 ```
 
-최근 catch-up/token/UI 변경 검증:
+진입 감사·REAL 스모크 변경만 빠르게 확인하려면 다음을 실행합니다.
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_db_crud.py tests\test_f3_entry.py tests\test_api_order_smoke_gate.py tests\test_api_server.py -q
+```
+
+스케줄·REST·UI 회귀만 별도로 확인하려면 다음을 실행합니다.
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests\test_main_schedule_flow.py tests\test_kis_rest.py -q -p no:cacheprovider
 .\.venv\Scripts\python.exe -m ruff check main.py src\api\kis_rest.py src\utils\logger.py tests\test_kis_rest.py tests\test_main_schedule_flow.py
 node --check docs\html\assets\app.js
+node tests\js\schedule_checks.js
 node tests\js\price_flow_checks.js
 ```
 

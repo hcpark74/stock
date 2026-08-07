@@ -30,11 +30,19 @@ def setup_logging() -> None:
 def mode() -> str:
     return os.getenv("KIS_MODE", "PAPER")
 
+
 def acct_no() -> str:
-    return os.getenv("KIS_ACCT_NO", "")
+    """Use the same documented account-variable precedence as production."""
+    from src.api import kis_rest
+
+    return kis_rest.account_no()
+
 
 def acct_cd() -> str:
-    return os.getenv("KIS_ACCT_CD", "01")
+    from src.api import kis_rest
+
+    return kis_rest.account_cd()
+
 
 def header(title: str) -> None:
     bar = "-" * 54

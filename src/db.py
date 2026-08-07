@@ -88,6 +88,40 @@ async def init(db_path: str) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_orders_trade_id     ON orders(trade_id);
         CREATE INDEX IF NOT EXISTS idx_orders_kis_order_id ON orders(kis_order_id);
+
+        CREATE TABLE IF NOT EXISTS entry_order_attempts (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            date            TEXT NOT NULL,
+            kis_order_id    TEXT NOT NULL,
+            org_no          TEXT,
+            ticker          TEXT NOT NULL,
+            name            TEXT,
+            entry_attempt   INTEGER NOT NULL,
+            max_attempts    INTEGER NOT NULL,
+            order_qty       INTEGER NOT NULL,
+            order_price     REAL NOT NULL,
+            trigger_price   REAL,
+            execution_mode  TEXT NOT NULL,
+            order_phase     TEXT NOT NULL DEFAULT 'FIRST_BUY'
+                                CHECK (order_phase IN ('FIRST_BUY','PYRAMID_BUY')),
+            status          TEXT NOT NULL DEFAULT 'PENDING'
+                                CHECK (status IN (
+                                    'PENDING','FILLED','PARTIAL_FILL',
+                                    'CANCELLED','UNCERTAIN'
+                                )),
+            fill_price      REAL,
+            fill_qty        INTEGER,
+            fill_latency_ms INTEGER,
+            ordered_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL,
+            UNIQUE (date, kis_order_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_entry_attempts_date
+            ON entry_order_attempts(date);
+        CREATE INDEX IF NOT EXISTS idx_entry_attempts_kis_order_id
+            ON entry_order_attempts(kis_order_id);
+
         CREATE TABLE IF NOT EXISTS partial_exits (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             trade_id      INTEGER NOT NULL REFERENCES trades(id),
@@ -157,6 +191,11 @@ async def init(db_path: str) -> None:
             "TEXT NOT NULL DEFAULT 'ACKNOWLEDGED'",
         ),
         ("orders", "submitted_at", "TEXT"),
+        (
+            "entry_order_attempts",
+            "order_phase",
+            "TEXT NOT NULL DEFAULT 'FIRST_BUY'",
+        ),
     ):
         try:
             await _conn.execute(
@@ -459,6 +498,97 @@ async def record_order(
         order_db_id = cur.lastrowid
     await conn.commit()
     return order_db_id
+
+
+async def record_entry_order_attempt(
+    date: str,
+    kis_order_id: str,
+    ticker: str,
+    qty: int,
+    price: float,
+    trigger_price: float,
+    attempt: int,
+    max_attempts: int,
+    mode: str,
+    *,
+    org_no: str | None = None,
+    name: str | None = None,
+    order_phase: str = "FIRST_BUY",
+    status: str = "PENDING",
+    fill_price: float | None = None,
+    fill_qty: int | None = None,
+    fill_latency_ms: int | None = None,
+) -> int:
+    """Upsert an acknowledged entry attempt by its KIS natural key.
+
+    Entry attempts cannot safely create a ``trades`` row before a fill because
+    the daily unique trade would block candidate retries. This independent audit
+    row preserves accepted-then-cancelled orders without changing position truth.
+    A late asynchronous ``PENDING`` write never downgrades a reconciled row.
+    """
+    now = _now()
+    conn = get()
+    async with conn.execute(
+        """INSERT INTO entry_order_attempts
+               (date, kis_order_id, org_no, ticker, name,
+                entry_attempt, max_attempts, order_qty, order_price,
+                trigger_price, execution_mode, order_phase, status, fill_price, fill_qty,
+                fill_latency_ms, ordered_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(date, kis_order_id) DO UPDATE SET
+               org_no=excluded.org_no,
+               ticker=excluded.ticker,
+               name=COALESCE(excluded.name, entry_order_attempts.name),
+               entry_attempt=excluded.entry_attempt,
+               max_attempts=excluded.max_attempts,
+               order_qty=excluded.order_qty,
+               order_price=excluded.order_price,
+               trigger_price=excluded.trigger_price,
+               execution_mode=excluded.execution_mode,
+               order_phase=excluded.order_phase,
+               status=CASE
+                   WHEN excluded.status = 'PENDING'
+                    AND entry_order_attempts.status <> 'PENDING'
+                   THEN entry_order_attempts.status
+                   ELSE excluded.status
+               END,
+               fill_price=COALESCE(excluded.fill_price, entry_order_attempts.fill_price),
+               fill_qty=COALESCE(excluded.fill_qty, entry_order_attempts.fill_qty),
+               fill_latency_ms=COALESCE(
+                   excluded.fill_latency_ms,
+                   entry_order_attempts.fill_latency_ms
+               ),
+               updated_at=CASE
+                   WHEN excluded.status = 'PENDING'
+                    AND entry_order_attempts.status <> 'PENDING'
+                   THEN entry_order_attempts.updated_at
+                   ELSE excluded.updated_at
+               END
+           RETURNING id""",
+        (
+            date,
+            kis_order_id,
+            org_no,
+            ticker,
+            name,
+            attempt,
+            max_attempts,
+            qty,
+            price,
+            trigger_price,
+            mode,
+            order_phase,
+            status,
+            fill_price,
+            fill_qty,
+            fill_latency_ms,
+            now,
+            now,
+        ),
+    ) as cur:
+        row = await cur.fetchone()
+    await conn.commit()
+    return int(row["id"])
 
 
 async def update_order_submission(

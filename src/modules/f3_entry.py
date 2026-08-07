@@ -123,6 +123,11 @@ F3_LIMIT_FILL_TIMEOUT_SEC = max(
     0.1,
     float(os.getenv("F3_LIMIT_FILL_TIMEOUT_SEC", "2.0")),
 )
+F3_ENTRY_AUDIT_TIMEOUT_SEC = max(
+    0.01,
+    _env_float("F3_ENTRY_AUDIT_TIMEOUT_SEC", 0.25),
+)
+_entry_audit_tasks: set[asyncio.Task[None]] = set()
 # 체결 폴링 간격 상한. 실제 대기는 min(interval, 남은 예산)로 적응 — 마감을
 # 넘겨 새 조회를 시작하지 않으면서, 절삭/무조건 1초 대기로 폴링이 1회로 굳는
 # 것을 막는다. 기본 1.0초로 기존 폴링 부하(조회 빈도)를 유지한다.
@@ -717,6 +722,9 @@ async def _fail_pending_entry_recovery(
             order_id=order_id,
             error=repr(persist_error),
         )
+    audit = _entry_audit_from_pending(pending, ticker=ticker, order_id=order_id)
+    if audit is not None:
+        await _upsert_entry_attempt_safe(audit, "UNCERTAIN")
     try:
         await db.record_skip(
             _today(),
@@ -733,6 +741,109 @@ async def _fail_pending_entry_recovery(
             error=repr(db_error),
         )
     return False
+
+
+def _entry_audit_from_pending(
+    pending: dict,
+    *,
+    ticker: str | None = None,
+    order_id: str | None = None,
+) -> dict | None:
+    """Build a complete natural-key audit payload from durable pending state."""
+    resolved_order_id = str(order_id or pending.get("order_id") or "")
+    resolved_ticker = str(ticker or pending.get("ticker") or "")
+    requested_qty = int(pending.get("requested_qty") or 0)
+    if not resolved_order_id or not resolved_ticker or requested_qty <= 0:
+        return None
+    attempt = max(1, int(pending.get("attempt") or 1))
+    order_phase = (
+        "PYRAMID_BUY"
+        if str(pending.get("phase") or "ENTRY") == "PYRAMID"
+        else "FIRST_BUY"
+    )
+    return {
+        "date": str(pending.get("date") or _today()),
+        "kis_order_id": resolved_order_id,
+        "ticker": resolved_ticker,
+        "qty": requested_qty,
+        "price": float(pending.get("limit_price") or 0),
+        "trigger_price": float(pending.get("anchor_price") or 0),
+        "attempt": attempt,
+        "max_attempts": max(attempt, int(pending.get("max_attempts") or attempt)),
+        "mode": str(pending.get("mode") or os.getenv("KIS_MODE", "PAPER")),
+        "org_no": str(pending.get("org_no") or "") or None,
+        "name": pending.get("name") or state.get().target_name,
+        "order_phase": order_phase,
+    }
+
+
+async def _upsert_entry_attempt_safe(
+    audit: dict | None,
+    status: str,
+    *,
+    fill: dict | None = None,
+    fill_latency_ms: int | None = None,
+) -> None:
+    """Bound audit I/O so it never stalls live-order reconciliation."""
+    if audit is None:
+        return
+    try:
+        await asyncio.wait_for(
+            db.record_entry_order_attempt(
+                **audit,
+                status=status,
+                fill_price=(float(fill.get("fill_price") or 0) if fill else None),
+                fill_qty=(int(fill.get("fill_qty") or 0) if fill else None),
+                fill_latency_ms=fill_latency_ms,
+            ),
+            timeout=F3_ENTRY_AUDIT_TIMEOUT_SEC,
+        )
+    except Exception as exc:
+        log(
+            "ENTRY_DB_DEGRADED",
+            level="CRIT",
+            ticker=audit.get("ticker"),
+            order_id=audit.get("kis_order_id"),
+            phase="ENTRY_ATTEMPT_AUDIT_UPSERT",
+            attempt_status=status,
+            error=repr(exc),
+        )
+
+
+def _start_entry_attempt_audit(audit: dict) -> None:
+    """Schedule the initial PENDING audit without delaying fill polling."""
+    stale_tasks = [task for task in tuple(_entry_audit_tasks) if task.done()]
+    _entry_audit_tasks.difference_update(stale_tasks)
+    task = asyncio.create_task(_upsert_entry_attempt_safe(audit, "PENDING"))
+    _entry_audit_tasks.add(task)
+    task.add_done_callback(_entry_audit_tasks.discard)
+
+
+async def drain_entry_audit_tasks() -> None:
+    """Give in-flight audit writes one bounded chance to finish before DB close."""
+    loop = asyncio.get_running_loop()
+    tasks = tuple(
+        task
+        for task in _entry_audit_tasks
+        if task.get_loop() is loop and not task.done()
+    )
+    if not tasks:
+        return
+    _done, pending = await asyncio.wait(
+        tasks,
+        timeout=F3_ENTRY_AUDIT_TIMEOUT_SEC,
+    )
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+        log(
+            "ENTRY_DB_DEGRADED",
+            level="WARN",
+            phase="ENTRY_ATTEMPT_AUDIT_SHUTDOWN",
+            pending_count=len(pending),
+        )
+    _entry_audit_tasks.difference_update(tasks)
 
 
 async def recover_pending_entry() -> bool:
@@ -752,6 +863,18 @@ async def recover_pending_entry() -> bool:
             order_id=order_id or None,
             reason="INVALID_PENDING_STATE",
         )
+    audit = _entry_audit_from_pending(pending, ticker=ticker, order_id=order_id)
+    if audit is None:
+        log(
+            "ENTRY_DB_DEGRADED",
+            level="CRIT",
+            ticker=ticker,
+            order_id=order_id,
+            phase="ENTRY_ATTEMPT_AUDIT_PAYLOAD",
+            reason="INVALID_PENDING_AUDIT_FIELDS",
+        )
+    else:
+        _start_entry_attempt_audit(audit)
 
     try:
         fill = await _fetch_order_fill_snapshot(
@@ -796,6 +919,7 @@ async def recover_pending_entry() -> bool:
         await state.clear_pending_entry()
         if phase == "PYRAMID" and s.position_status == "HOLDING":
             await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
+            await _upsert_entry_attempt_safe(audit, "CANCELLED")
             log(
                 "PENDING_ENTRY_RECOVERED",
                 level="WARN",
@@ -807,6 +931,7 @@ async def recover_pending_entry() -> bool:
         await state.reset_to_idle("ENTRY_FAIL")
         state.get().day_skip = True
         await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
+        await _upsert_entry_attempt_safe(audit, "CANCELLED")
         await db.record_skip(
             _today(),
             "ENTRY_FAIL",
@@ -912,6 +1037,11 @@ async def recover_pending_entry() -> bool:
 
     await state.clear_pending_entry()
     await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
+    await _upsert_entry_attempt_safe(
+        audit,
+        "PARTIAL_FILL" if partial else "FILLED",
+        fill=fill,
+    )
     log(
         "PENDING_ENTRY_RECOVERED",
         level="CRIT",
@@ -1145,6 +1275,7 @@ async def _run_single(
     ask_cap = 0.0
     fill_was_partial = False
     for attempt in range(1, max_attempts + 1):
+        entry_audit: dict | None = None
         if attempt > 1:
             if not _before_deadline(_entry_retry_deadline()):
                 log(
@@ -1534,7 +1665,7 @@ async def _run_single(
             await _reset_to_idle_persisted("ENTRY_FAIL")
             await _block_entry_deadline_passed(ticker, "AT_HTTP_SEND")
             return
-        order_id = order_resp.get("output", {}).get("ODNO", "UNKNOWN")
+        order_id = str(order_resp.get("output", {}).get("ODNO") or "")
         _pending_buy_org_no = order_resp.get("output", {}).get("KRX_FWDG_ORD_ORGNO", "")
         log(
             "ENTRY_ORDER_SENT",
@@ -1555,7 +1686,7 @@ async def _run_single(
             msg_cd=order_resp.get("msg_cd"),
             msg1=order_resp.get("msg1"),
         )
-        if order_id == "UNKNOWN" or str(order_resp.get("rt_cd", "0")) != "0":
+        if not order_id or str(order_resp.get("rt_cd", "0")) != "0":
             if _is_market_closed_rejection(order_resp):
                 await _reset_to_idle_persisted("MARKET_CLOSED")
                 state.get().day_skip = True
@@ -1624,6 +1755,11 @@ async def _run_single(
                 "anchor_price": expected_price,
                 "prev_close": prev_close,
                 "attempt": attempt,
+                "max_attempts": max_attempts,
+                "mode": mode,
+                "name": state.get().target_name,
+                "date": _today(),
+                "phase": "ENTRY",
                 "sent_at": datetime.now(KST).isoformat(),
             }
         )
@@ -1644,6 +1780,25 @@ async def _run_single(
                 ticker=ticker,
             )
 
+        entry_audit = _entry_audit_from_pending(
+            state.get().pending_entry or {},
+            ticker=ticker,
+            order_id=order_id,
+        )
+        # 상태 파일 저장 이후에만 감사 기록을 시작한다. DB가 잠겨 있어도
+        # 살아 있는 주문의 체결 폴링은 즉시 시작되어야 하므로 기다리지 않는다.
+        if entry_audit is None:
+            log(
+                "ENTRY_DB_DEGRADED",
+                level="CRIT",
+                ticker=ticker,
+                order_id=order_id,
+                phase="ENTRY_ATTEMPT_AUDIT_PAYLOAD",
+                reason="INVALID_PENDING_AUDIT_FIELDS",
+            )
+        else:
+            _start_entry_attempt_audit(entry_audit)
+
         fill_deadline = _deadline_dt_after_seconds(F3_LIMIT_FILL_TIMEOUT_SEC)
         fill = await _poll_fill(
             order_id,
@@ -1655,6 +1810,12 @@ async def _run_single(
             fill_latency_ms = max(
                 0,
                 round((time.perf_counter() - order_started_at) * 1000),
+            )
+            await _upsert_entry_attempt_safe(
+                entry_audit,
+                "FILLED",
+                fill=fill,
+                fill_latency_ms=fill_latency_ms,
             )
             await state.clear_pending_entry()
             break
@@ -1677,6 +1838,12 @@ async def _run_single(
                 round((time.perf_counter() - order_started_at) * 1000),
             )
             fill_was_partial = int(fill.get("fill_qty") or 0) < first_qty
+            await _upsert_entry_attempt_safe(
+                entry_audit,
+                "PARTIAL_FILL" if fill_was_partial else "FILLED",
+                fill=fill,
+                fill_latency_ms=fill_latency_ms,
+            )
             await state.clear_pending_entry()
             log(
                 "ENTRY_FILL_RECONCILED",
@@ -1694,6 +1861,7 @@ async def _run_single(
             # 전환·IDLE 전환 모두 금지하고(중복 포지션 위험) ENTERING을 유지한
             # 채 pending 복구 경로로 즉시 한 번 더 대조한다.
             state.get().day_skip = True
+            await _upsert_entry_attempt_safe(entry_audit, "UNCERTAIN")
             _log_entry_blocked(
                 ticker,
                 "CANCEL_UNCONFIRMED",
@@ -1719,6 +1887,7 @@ async def _run_single(
                 f"reason=CANCEL_UNCONFIRMED,order_id={order_id},entry_attempt={attempt}",
             )
             return
+        await _upsert_entry_attempt_safe(entry_audit, "CANCELLED")
         await state.clear_pending_entry()
         await state.persist(os.getenv("STATE_DIR", "data/state"), _today())
         if attempt < max_attempts and F3_ENTRY_CANCEL_RELEASE_WAIT_SEC > 0:
@@ -1990,6 +2159,10 @@ async def _run_single(
                 "anchor_price": current_price,
                 "prev_close": prev_close,
                 "attempt": 1,
+                "max_attempts": 1,
+                "mode": mode,
+                "name": state.get().target_name,
+                "date": _today(),
                 "phase": "PYRAMID",
                 "sent_at": datetime.now(KST).isoformat(),
             }

@@ -2209,6 +2209,7 @@ async def test_main_exits_and_releases_pid_when_ui_server_fails(monkeypatch):
             raise OSError("bind failed")
 
     clear_pid = MagicMock()
+    drain_audits = AsyncMock()
     monkeypatch.setenv("DRY_RUN", "1")
     monkeypatch.setattr(main.logger, "setup", lambda *a, **k: None)
     monkeypatch.setattr(main.logger, "log", lambda *a, **k: None)
@@ -2219,6 +2220,7 @@ async def test_main_exits_and_releases_pid_when_ui_server_fails(monkeypatch):
     monkeypatch.setattr(main, "_recover_state", AsyncMock())
     monkeypatch.setattr(main, "_run_catchup", AsyncMock())
     monkeypatch.setattr(main.f4_tracking, "run_forever", fake_run_forever)
+    monkeypatch.setattr(main.f3_entry, "drain_entry_audit_tasks", drain_audits)
     monkeypatch.setattr(main.uvicorn, "Config", lambda *a, **k: None)
     monkeypatch.setattr(main.uvicorn, "Server", FailingUviServer)
     monkeypatch.setattr(main.kis_rest, "close_client", AsyncMock())
@@ -2229,3 +2231,4 @@ async def test_main_exits_and_releases_pid_when_ui_server_fails(monkeypatch):
     clear_pid.assert_called_once_with()
     main.db.close.assert_awaited_once_with()
     main.kis_rest.close_client.assert_awaited_once_with()
+    drain_audits.assert_awaited_once_with()

@@ -1404,6 +1404,7 @@ async def main() -> None:
         if tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.gather(*tasks)
+        await f3_entry.drain_entry_audit_tasks()
         await kis_rest.close_client()
         await db.close()
         _clear_pid()

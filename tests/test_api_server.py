@@ -26,6 +26,17 @@ def test_server_uses_f1_snapshot_dir_constant():
     assert server._F1_SNAPSHOT_DIR == Path(f1_filter.F1_SNAPSHOT_DIR)
 
 
+def test_orders_ui_surfaces_uncertain_audit_as_immediate_action():
+    root = Path(__file__).resolve().parents[1]
+    app_js = (root / "docs/html/assets/app.js").read_text(encoding="utf-8")
+    index_html = (root / "docs/html/index.html").read_text(encoding="utf-8")
+
+    assert "MTS 즉시확인" in app_js
+    assert "o.status === 'UNCERTAIN'" in app_js
+    assert "entry_order_attempts' ? '진입 감사원장'" in app_js
+    assert 'id="order-uncertain"' in index_html
+
+
 def test_f1_snapshot_saved_is_only_weak_done_signal():
     logs = [
         {"event": "F1_SNAPSHOT_SAVED"},
@@ -527,6 +538,20 @@ async def test_api_orders_returns_today_orders(tmp_path, monkeypatch):
         trigger_price=75_000.0,
     )
     await db.update_order_fill(order_id, 75_100.0, 10, 120)
+    await db.record_entry_order_attempt(
+        today,
+        "ORD-CANCELLED",
+        "064400",
+        3,
+        75_300.0,
+        74_500.0,
+        1,
+        2,
+        "PAPER",
+        name="LG씨엔에스",
+        order_phase="PYRAMID_BUY",
+        status="CANCELLED",
+    )
     old_trade_id = await db.open_trade("20260701", "000660", 120_000.0, 1)
     await db.record_order(old_trade_id, "OLD001", "BUY", 1, 120_000.0, "FIRST_BUY", "000660")
 
@@ -540,6 +565,10 @@ async def test_api_orders_returns_today_orders(tmp_path, monkeypatch):
     assert '"fill_latency_ms":120' in body
     assert '"name":"삼성전자"' in body
     assert '"status":"FILLED"' in body
+    assert '"kis_order_id":"ORD-CANCELLED"' in body
+    assert '"order_phase":"PYRAMID_BUY"' in body
+    assert '"audit_source":"entry_order_attempts"' in body
+    assert '"status":"CANCELLED"' in body
     assert "OLD001" not in body
     await db.close()
 
