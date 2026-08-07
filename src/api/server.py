@@ -42,21 +42,18 @@ from src.modules.f1_filter import (
     GAP_MIN,
     HIGH_GAP_MAX,
     HIGH_GAP_MIN_EXPECTED_AMOUNT,
-    HIGH_GAP_MIN_VI_GAP,
     MIN_EXPECTED_AMOUNT,
 )
 from src.modules.f3_entry import (
     ALLOC_RATIO,
-    F3_ENTRY_FIRST_FILL_SEC,
     F3_ENTRY_MAX_ATTEMPTS,
     F3_ENTRY_RETRY_DEADLINE,
     F3_ENTRY_RETRY_DELAY_SEC,
-    F3_ENTRY_RETRY_FILL_SEC,
     F3_ENTRY_TOTAL_BUDGET_SEC,
     F3_FIRST_ORDER_AT,
+    F3_LIMIT_FILL_TIMEOUT_SEC,
     F3_PRE_ORDER_QUIET_SEC,
     F3_PYRAMID_AT,
-    F3_PYRAMID_FILL_SEC,
     F3_VI_CHECK_ENABLED,
     FIRST_RATIO,
     GAP_MAX_FILL,
@@ -193,17 +190,14 @@ def _fast_candidates_from_logs(logs: list[dict]) -> list[dict]:
     if not selected_event:
         return []
 
-    tickers = [
-        str(ticker)
-        for ticker in selected_event.get("tickers", [])
-        if ticker
-    ]
+    tickers = [str(ticker) for ticker in selected_event.get("tickers", []) if ticker]
     if not tickers:
         return []
 
     locked_event = next(
         (
-            entry for entry in reversed(logs)
+            entry
+            for entry in reversed(logs)
             if entry.get("event") == "TARGET_LOCKED"
             and any(
                 str(ticker) in tickers
@@ -252,10 +246,10 @@ def _f1_status_from_logs(logs: list[dict]) -> tuple[str, dict | None]:
     last_event: dict | None = None
     for entry in logs:
         event = entry.get("event")
-        if (
-            not str(event).startswith("F1")
-            and event not in {"NO_TARGET", "PAPER_FAST_PATH_SELECTED"}
-        ):
+        if not str(event).startswith("F1") and event not in {
+            "NO_TARGET",
+            "PAPER_FAST_PATH_SELECTED",
+        }:
             continue
         last_event = entry
         if event == "PAPER_FAST_PATH_SELECTED":
@@ -279,13 +273,12 @@ def _f1_status_from_logs(logs: list[dict]) -> tuple[str, dict | None]:
     return status, last_event
 
 
-
 def _latest_entry_event(logs: list[dict]) -> dict | None:
     return next(
         (
-            e for e in reversed(logs)
-            if e.get("event") in {"ENTRY_EXECUTED", "DRY_RUN_ENTRY_EXECUTED"}
-            and e.get("ticker")
+            e
+            for e in reversed(logs)
+            if e.get("event") in {"ENTRY_EXECUTED", "DRY_RUN_ENTRY_EXECUTED"} and e.get("ticker")
         ),
         None,
     )
@@ -344,12 +337,14 @@ def _summary_with_trade_anchor(summary: dict, logs: list[dict], current_state=No
         "selection_source": "TRADE_EXECUTED" if entry_event else "STATE_TRADE",
     }
 
+
 def _selection_process_from_logs(summary: dict, logs: list[dict]) -> list[dict]:
     selected = summary.get("selected") or {}
     f1_ticker = selected.get("ticker")
     f1_count = summary.get("liquidity_pass") or summary.get("gap_pass") or 0
     candidate_tickers = {
-        str(c.get("ticker")) for c in summary.get("candidates", []) if c.get("ticker")}
+        str(c.get("ticker")) for c in summary.get("candidates", []) if c.get("ticker")
+    }
     candidate_names = {
         str(c.get("ticker")): c.get("name")
         for c in summary.get("candidates", [])
@@ -364,24 +359,28 @@ def _selection_process_from_logs(summary: dict, logs: list[dict]) -> list[dict]:
         if code and label_name:
             return f"{code} {label_name}"
         return code or (label_name or "")
-    steps = [{
-        "key": "f1",
-        "phase": "F1 선정",
-        "tickers": summary.get("selected_tickers") or ([f1_ticker] if f1_ticker else []),
-        "ticker": f1_ticker,
-        "name": selected.get("name"),
-        "gap_pct": selected.get("gap_pct"),
-        "expected_amount": selected.get("expected_amount"),
-        "status": "완료" if f1_ticker else "대기",
-        "detail": f"{f1_count}개 후보",
-    }]
+
+    steps = [
+        {
+            "key": "f1",
+            "phase": "F1 선정",
+            "tickers": summary.get("selected_tickers") or ([f1_ticker] if f1_ticker else []),
+            "ticker": f1_ticker,
+            "name": selected.get("name"),
+            "gap_pct": selected.get("gap_pct"),
+            "expected_amount": selected.get("expected_amount"),
+            "status": "완료" if f1_ticker else "대기",
+            "detail": f"{f1_count}개 후보",
+        }
+    ]
 
     entry_event = _latest_entry_event(logs)
     entry_ticker = entry_event.get("ticker") if entry_event else None
     entry_ts = _event_ts(entry_event)
     f2_event = next(
         (
-            e for e in reversed(logs)
+            e
+            for e in reversed(logs)
             if e.get("event") == "TARGET_LOCKED"
             and _at_or_before(e, entry_ts)
             and (not entry_ticker or _ticker_in_event(str(entry_ticker), e))
@@ -402,36 +401,48 @@ def _selection_process_from_logs(summary: dict, logs: list[dict]) -> list[dict]:
         or candidate_names.get(str(ticker))
         for idx, ticker in enumerate(f2_tickers)
     ]
-    steps.append({
-        "key": "f2",
-        "phase": "F2 잠금",
-        "tickers": f2_tickers,
-        "ticker": f2_event.get("ticker") if f2_event else None,
-        "names": f2_names,
-        "name": (f2_event.get("name") or (f2_names[0] if f2_names else None)) if f2_event else None,
-        "gap_pct": (
-            (float(f2_event.get("gap_pct")) / 100)
-            if f2_event and f2_event.get("gap_pct") is not None else None
-        ),
-        "expected_price": f2_event.get("expected_price") if f2_event else None,
-        "expected_amount": f2_event.get("expected_amount") if f2_event else None,
-        "status": "잠금" if f2_event else "대기",
-        "detail": (
-            ", ".join(
-                stock_label(ticker, f2_names[idx] if idx < len(f2_names) else None)
-                for idx, ticker in enumerate(f2_tickers)
-            ) if f2_tickers else "최대 3개 lock"
-        ),
-    })
+    steps.append(
+        {
+            "key": "f2",
+            "phase": "F2 잠금",
+            "tickers": f2_tickers,
+            "ticker": f2_event.get("ticker") if f2_event else None,
+            "names": f2_names,
+            "name": (f2_event.get("name") or (f2_names[0] if f2_names else None))
+            if f2_event
+            else None,
+            "gap_pct": (
+                (float(f2_event.get("gap_pct")) / 100)
+                if f2_event and f2_event.get("gap_pct") is not None
+                else None
+            ),
+            "expected_price": f2_event.get("expected_price") if f2_event else None,
+            "expected_amount": f2_event.get("expected_amount") if f2_event else None,
+            "status": "잠금" if f2_event else "대기",
+            "detail": (
+                ", ".join(
+                    stock_label(ticker, f2_names[idx] if idx < len(f2_names) else None)
+                    for idx, ticker in enumerate(f2_tickers)
+                )
+                if f2_tickers
+                else "최대 3개 lock"
+            ),
+        }
+    )
 
     f3_events = {
-        "F3_FINAL_PICK", "ENTRY_ORDER_SENT", "ENTRY_EXECUTED", "F3_ENTRY_BLOCKED",
-        "F3_SKIPPED", "GAP_CHANGED", "GAP_RECHECK_UNAVAILABLE",
-        "BUYABLE_QTY_QUERY_FAILED", "BUYABLE_QTY_ZERO",
+        "F3_FINAL_PICK",
+        "ENTRY_ORDER_SENT",
+        "ENTRY_EXECUTED",
+        "F3_ENTRY_BLOCKED",
+        "F3_SKIPPED",
+        "GAP_CHANGED",
+        "GAP_RECHECK_UNAVAILABLE",
+        "BUYABLE_QTY_QUERY_FAILED",
+        "BUYABLE_QTY_ZERO",
     }
     f3_event = entry_event or (
-        next((e for e in reversed(logs) if e.get("event") in f3_events), None)
-        if f2_event else None
+        next((e for e in reversed(logs) if e.get("event") in f3_events), None) if f2_event else None
     )
     f3_status = {
         "F3_FINAL_PICK": "최종",
@@ -445,17 +456,22 @@ def _selection_process_from_logs(summary: dict, logs: list[dict]) -> list[dict]:
         "BUYABLE_QTY_ZERO": "차단",
     }.get(f3_event.get("event") if f3_event else None, "대기")
     f3_ticker = f3_event.get("ticker") if f3_event else None
-    steps.append({
-        "key": "f3",
-        "phase": "F3 최종",
-        "tickers": [f3_ticker] if f3_ticker else [],
-        "ticker": f3_ticker,
-        "name": (f3_event.get("name") or candidate_names.get(str(f3_ticker))) if f3_event else None,
-        "expected_price": f3_event.get("expected_price") if f3_event else None,
-        "status": f3_status,
-        "detail": _f3_detail_from_event(f3_event),
-    })
+    steps.append(
+        {
+            "key": "f3",
+            "phase": "F3 최종",
+            "tickers": [f3_ticker] if f3_ticker else [],
+            "ticker": f3_ticker,
+            "name": (f3_event.get("name") or candidate_names.get(str(f3_ticker)))
+            if f3_event
+            else None,
+            "expected_price": f3_event.get("expected_price") if f3_event else None,
+            "status": f3_status,
+            "detail": _f3_detail_from_event(f3_event),
+        }
+    )
     return steps
+
 
 async def _fetch_asset_snapshot() -> dict:
     mode = os.getenv("KIS_MODE", "PAPER")
@@ -529,6 +545,7 @@ async def _latest_asset_snapshot_from_db() -> dict | None:
 
 # ─── /api/status ──────────────────────────────────────────────────────
 
+
 async def _today_trade_marks() -> list[dict]:
     """오늘 체결된 매수/매도 주문 목록 — UI 가격흐름 차트의 매매 마커용."""
     try:
@@ -566,48 +583,52 @@ async def api_status() -> JSONResponse:
     if s.trailing_active and entry and s.highest_step:
         trail_stop = round(entry * (1 + s.highest_step - STEP_TRAIL))
 
-    return JSONResponse({
-        "mode": _MODE,
-        "position_status": s.position_status,
-        "ticker": s.target_ticker,
-        "name": s.target_name,
-        "entry_price": s.entry_price,
-        "entry_at": s.entry_at,
-        "entry_qty": s.entry_qty,
-        "remaining_qty": s.remaining_qty,
-        "high_price": s.high_price,
-        "current_price": cur,
-        "pnl_pct": pnl_pct,
-        "trailing_active": s.trailing_active,
-        "highest_step": s.highest_step,
-        "hard_stop": hard_stop,
-        "trail_stop": trail_stop,
-        "ws_connected": live.ws_connected,
-        "ntp_offset_ms": live.ntp_offset_ms,
-        "ntp_level": live.ntp_level,
-        "close_reason": s.close_reason,
-        "post_close_tracking_active": f4_tracking.post_close_observation_active(),
-        "post_close_tracking_stopped": s.post_close_tracking_stopped,
-        "assets": assets,
-        # 청산(CLOSED) 후에도 당일 리뷰용으로 tick 이력을 유지해 내려준다.
-        "tick_history": (
-            live.tick_history(s.target_ticker, since=s.entry_at)
-            if s.position_status in ("HOLDING", "EXITING", "CLOSED") else []
-        ),
-        "minute_price_history": (
-            live.minute_price_history(s.target_ticker, since=s.entry_at)
-            if s.position_status in ("HOLDING", "EXITING", "CLOSED") else []
-        ),
-        "trade_marks": (
-            await _today_trade_marks()
-            if s.position_status in ("HOLDING", "EXITING", "CLOSED") else []
-        ),
-        "vi_events": (
-            live.vi_events
-            if s.position_status in ("HOLDING", "EXITING", "CLOSED") else []
-        ),
-        **_pipeline_from_logs(logs, s.position_status),
-    })
+    return JSONResponse(
+        {
+            "mode": _MODE,
+            "position_status": s.position_status,
+            "ticker": s.target_ticker,
+            "name": s.target_name,
+            "entry_price": s.entry_price,
+            "entry_at": s.entry_at,
+            "entry_qty": s.entry_qty,
+            "remaining_qty": s.remaining_qty,
+            "high_price": s.high_price,
+            "current_price": cur,
+            "pnl_pct": pnl_pct,
+            "trailing_active": s.trailing_active,
+            "highest_step": s.highest_step,
+            "hard_stop": hard_stop,
+            "trail_stop": trail_stop,
+            "ws_connected": live.ws_connected,
+            "ntp_offset_ms": live.ntp_offset_ms,
+            "ntp_level": live.ntp_level,
+            "close_reason": s.close_reason,
+            "post_close_tracking_active": f4_tracking.post_close_observation_active(),
+            "post_close_tracking_stopped": s.post_close_tracking_stopped,
+            "assets": assets,
+            # 청산(CLOSED) 후에도 당일 리뷰용으로 tick 이력을 유지해 내려준다.
+            "tick_history": (
+                live.tick_history(s.target_ticker, since=s.entry_at)
+                if s.position_status in ("HOLDING", "EXITING", "CLOSED")
+                else []
+            ),
+            "minute_price_history": (
+                live.minute_price_history(s.target_ticker, since=s.entry_at)
+                if s.position_status in ("HOLDING", "EXITING", "CLOSED")
+                else []
+            ),
+            "trade_marks": (
+                await _today_trade_marks()
+                if s.position_status in ("HOLDING", "EXITING", "CLOSED")
+                else []
+            ),
+            "vi_events": (
+                live.vi_events if s.position_status in ("HOLDING", "EXITING", "CLOSED") else []
+            ),
+            **_pipeline_from_logs(logs, s.position_status),
+        }
+    )
 
 
 @app.post("/api/tracking/stop")
@@ -620,6 +641,7 @@ async def api_stop_post_close_tracking() -> JSONResponse:
 
 
 # ─── /api/logs ────────────────────────────────────────────────────────
+
 
 @app.get("/api/settings")
 async def api_settings() -> JSONResponse:
@@ -666,133 +688,135 @@ async def api_settings() -> JSONResponse:
         if dry_run:
             warnings.append("DRY_RUN이 켜져 있어 외부 주문/API 경로가 시뮬레이션 또는 우회됩니다.")
 
-        return JSONResponse({
-            "mode": mode,
-            "dry_run": dry_run,
-            "auto_trading": None,
-            "auto_trading_control": "read_only",
-            "valid": not errors,
-            "errors": errors,
-            "warnings": warnings,
-            "paths": {
-                "db": _db_path(),
-                "logs": os.getenv("LOG_DIR", "data/logs"),
-                "state": os.getenv("STATE_DIR", "data/state"),
-                "f1_snapshots": str(_F1_SNAPSHOT_DIR),
-            },
-            "account": {
-                "configured": account_configured,
-                "account_source": _env_source("KIS_ACCT_NO", "KIS_ACCOUNT_NO"),
-                "product_code_source": _env_source("KIS_ACCT_CD", "KIS_ACCOUNT_TYPE"),
-                "app_key_configured": app_key_configured,
-                "app_secret_configured": app_secret_configured,
-            },
-            "f1": {
-                "core_gap_pct": [round(GAP_MIN * 100, 2), round(GAP_MAX * 100, 2)],
-                "high_gap_pct": [round(GAP_MAX * 100, 2), round(HIGH_GAP_MAX * 100, 2)],
-                "high_gap_min_amount": HIGH_GAP_MIN_EXPECTED_AMOUNT,
-                "high_gap_min_vi_gap_pct": round(HIGH_GAP_MIN_VI_GAP * 100, 2),
-                "min_expected_amount": MIN_EXPECTED_AMOUNT,
-                "min_candidates": F1_MIN_CANDIDATES,
-                "retry_deadline": f"{F1_DEADLINE_H:02d}:{F1_DEADLINE_M:02d}",
-                "retry_interval_sec": F1_RETRY_INTERVAL_SEC,
-                "expected_quote_concurrency": F1_EXPECTED_QUOTE_CONCURRENCY,
-                "market_interval_sec": F1_MARKET_INTERVAL_SEC,
-            },
-            "f2": {
-                "lockup": "target selection only",
-                "retry_f1_on_fail_supported": False,
-            },
-            "f3": {
-                "alloc_ratio_pct": round(ALLOC_RATIO * 100, 2),
-                "first_ratio_pct": round(FIRST_RATIO * 100, 2),
-                "pyramid_ratio_pct": round((1 - FIRST_RATIO) * 100, 2),
-                "pyramid_min_up_pct": round(PYRAMID_MIN_UP * 100, 2),
-                "order_gap_max_pct": round(GAP_MAX_ORDER * 100, 2),
-                "fill_gap_max_pct": round(GAP_MAX_FILL * 100, 2),
-                "first_order_at": F3_FIRST_ORDER_AT,
-                "pyramid_at": F3_PYRAMID_AT,
-                "max_attempts": F3_ENTRY_MAX_ATTEMPTS,
-                "retry_delay_sec": F3_ENTRY_RETRY_DELAY_SEC,
-                "first_fill_sec": F3_ENTRY_FIRST_FILL_SEC,
-                "retry_fill_sec": F3_ENTRY_RETRY_FILL_SEC,
-                "retry_deadline": F3_ENTRY_RETRY_DEADLINE,
-                "total_budget_sec": F3_ENTRY_TOTAL_BUDGET_SEC,
-                "total_budget_enforcement": False,
-                "pre_order_quiet_sec": F3_PRE_ORDER_QUIET_SEC,
-                "pyramid_fill_sec": F3_PYRAMID_FILL_SEC,
-                "vi_check_enabled": F3_VI_CHECK_ENABLED,
-            },
-            "f4": {
-                "hard_stop_pct": round(HARD_STOP_RATIO * 100, 2),
-                "step_size_pct": round(STEP_SIZE * 100, 2),
-                "step_trail_pct": round(STEP_TRAIL * 100, 2),
-                "force_trailing_time": (
-                    f"{FORCE_TRAILING_HOUR:02d}:{FORCE_TRAILING_MINUTE:02d}"
-                ),
-                "rest_backup": {
-                    "enabled": F4_REST_BACKUP_ENABLED,
-                    "only_when_ws_stale": F4_REST_ONLY_WHEN_WS_STALE,
-                    "ws_stale_sec": F4_WS_STALE_SEC,
-                    "poll_interval_sec": F4_REST_POLL_INTERVAL_SEC,
-                    "post_close_enabled": F4_POST_CLOSE_REST_BACKUP_ENABLED,
-                    "post_close_poll_interval_sec": (
-                        F4_POST_CLOSE_REST_POLL_INTERVAL_SEC
-                    ),
+        return JSONResponse(
+            {
+                "mode": mode,
+                "dry_run": dry_run,
+                "auto_trading": None,
+                "auto_trading_control": "read_only",
+                "valid": not errors,
+                "errors": errors,
+                "warnings": warnings,
+                "paths": {
+                    "db": _db_path(),
+                    "logs": os.getenv("LOG_DIR", "data/logs"),
+                    "state": os.getenv("STATE_DIR", "data/state"),
+                    "f1_snapshots": str(_F1_SNAPSHOT_DIR),
                 },
-            },
-            "f5": {
-                "timeout_time": _F5_EXEC_TIME,
-                "precheck_time": _F5_PRECHECK_TIME,
-            },
-            "vi": {
-                "watch_enabled": VI_WATCH_ENABLED,
-                "freeze_suspect_sec": VI_FREEZE_SUSPECT_SEC,
-                "check_cooldown_sec": VI_CHECK_COOLDOWN_SEC,
-            },
-            "safety": {
-                "real_mode_warning": mode == "REAL",
-                "kis_rate_interval_sec": kis_rate_interval_sec,
-                "real_entry_enabled": bool(live.real_entry_enabled),
-            },
-            "real_readiness": readiness_report,
-        })
+                "account": {
+                    "configured": account_configured,
+                    "account_source": _env_source("KIS_ACCT_NO", "KIS_ACCOUNT_NO"),
+                    "product_code_source": _env_source("KIS_ACCT_CD", "KIS_ACCOUNT_TYPE"),
+                    "app_key_configured": app_key_configured,
+                    "app_secret_configured": app_secret_configured,
+                },
+                "f1": {
+                    "core_gap_pct": [round(GAP_MIN * 100, 2), round(GAP_MAX * 100, 2)],
+                    "high_gap_pct": [round(GAP_MAX * 100, 2), round(HIGH_GAP_MAX * 100, 2)],
+                    "high_gap_min_amount": HIGH_GAP_MIN_EXPECTED_AMOUNT,
+                    "min_expected_amount": MIN_EXPECTED_AMOUNT,
+                    "min_candidates": F1_MIN_CANDIDATES,
+                    "retry_deadline": f"{F1_DEADLINE_H:02d}:{F1_DEADLINE_M:02d}",
+                    "retry_interval_sec": F1_RETRY_INTERVAL_SEC,
+                    "expected_quote_concurrency": F1_EXPECTED_QUOTE_CONCURRENCY,
+                    "market_interval_sec": F1_MARKET_INTERVAL_SEC,
+                },
+                "f2": {
+                    "lockup": "target selection only",
+                    "retry_f1_on_fail_supported": False,
+                },
+                "f3": {
+                    "alloc_ratio_pct": round(ALLOC_RATIO * 100, 2),
+                    "first_ratio_pct": round(FIRST_RATIO * 100, 2),
+                    "pyramid_ratio_pct": round((1 - FIRST_RATIO) * 100, 2),
+                    "pyramid_min_up_pct": round(PYRAMID_MIN_UP * 100, 2),
+                    "order_gap_max_pct": round(GAP_MAX_ORDER * 100, 2),
+                    "fill_gap_max_pct": round(GAP_MAX_FILL * 100, 2),
+                    "first_order_at": F3_FIRST_ORDER_AT,
+                    "pyramid_at": F3_PYRAMID_AT,
+                    "max_attempts": F3_ENTRY_MAX_ATTEMPTS,
+                    "retry_delay_sec": F3_ENTRY_RETRY_DELAY_SEC,
+                    "limit_fill_timeout_sec": F3_LIMIT_FILL_TIMEOUT_SEC,
+                    "retry_deadline": F3_ENTRY_RETRY_DEADLINE,
+                    "total_budget_sec": F3_ENTRY_TOTAL_BUDGET_SEC,
+                    "total_budget_enforcement": False,
+                    "pre_order_quiet_sec": F3_PRE_ORDER_QUIET_SEC,
+                    "vi_check_enabled": F3_VI_CHECK_ENABLED,
+                },
+                "f4": {
+                    "hard_stop_pct": round(HARD_STOP_RATIO * 100, 2),
+                    "step_size_pct": round(STEP_SIZE * 100, 2),
+                    "step_trail_pct": round(STEP_TRAIL * 100, 2),
+                    "force_trailing_time": (
+                        f"{FORCE_TRAILING_HOUR:02d}:{FORCE_TRAILING_MINUTE:02d}"
+                    ),
+                    "rest_backup": {
+                        "enabled": F4_REST_BACKUP_ENABLED,
+                        "only_when_ws_stale": F4_REST_ONLY_WHEN_WS_STALE,
+                        "ws_stale_sec": F4_WS_STALE_SEC,
+                        "poll_interval_sec": F4_REST_POLL_INTERVAL_SEC,
+                        "post_close_enabled": F4_POST_CLOSE_REST_BACKUP_ENABLED,
+                        "post_close_poll_interval_sec": (F4_POST_CLOSE_REST_POLL_INTERVAL_SEC),
+                    },
+                },
+                "f5": {
+                    "timeout_time": _F5_EXEC_TIME,
+                    "precheck_time": _F5_PRECHECK_TIME,
+                },
+                "vi": {
+                    "watch_enabled": VI_WATCH_ENABLED,
+                    "freeze_suspect_sec": VI_FREEZE_SUSPECT_SEC,
+                    "check_cooldown_sec": VI_CHECK_COOLDOWN_SEC,
+                },
+                "safety": {
+                    "real_mode_warning": mode == "REAL",
+                    "kis_rate_interval_sec": kis_rate_interval_sec,
+                    "real_entry_enabled": bool(live.real_entry_enabled),
+                },
+                "real_readiness": readiness_report,
+            }
+        )
     except Exception as exc:
         log("API_SETTINGS_FAILED", level="WARN", error=repr(exc))
-        return JSONResponse({
-            "mode": os.getenv("KIS_MODE", "PAPER"),
-            "dry_run": _env_flag("DRY_RUN"),
-            "auto_trading": None,
-            "auto_trading_control": "read_only",
-            "valid": False,
-            "errors": [f"설정 API 처리 실패: {type(exc).__name__}"],
-            "warnings": [],
-            "paths": {},
-            "account": {"configured": False},
-            "f1": {},
-            "f2": {"retry_f1_on_fail_supported": False},
-            "f3": {},
-            "f4": {},
-            "f5": {},
-            "vi": {},
-            "safety": {"real_entry_enabled": bool(live.real_entry_enabled)},
-            "real_readiness": {
-                "percent": 0,
-                "eligible_for_real": False,
-                "groups": [],
-                "blockers": ["설정 API 처리 실패"],
-            },
-        })
+        return JSONResponse(
+            {
+                "mode": os.getenv("KIS_MODE", "PAPER"),
+                "dry_run": _env_flag("DRY_RUN"),
+                "auto_trading": None,
+                "auto_trading_control": "read_only",
+                "valid": False,
+                "errors": [f"설정 API 처리 실패: {type(exc).__name__}"],
+                "warnings": [],
+                "paths": {},
+                "account": {"configured": False},
+                "f1": {},
+                "f2": {"retry_f1_on_fail_supported": False},
+                "f3": {},
+                "f4": {},
+                "f5": {},
+                "vi": {},
+                "safety": {"real_entry_enabled": bool(live.real_entry_enabled)},
+                "real_readiness": {
+                    "percent": 0,
+                    "eligible_for_real": False,
+                    "groups": [],
+                    "blockers": ["설정 API 처리 실패"],
+                    "runtime_entry_latch_open": bool(live.real_entry_enabled),
+                },
+            }
+        )
 
 
 @app.get("/api/readiness")
 async def api_real_readiness() -> JSONResponse:
     try:
         report = await readiness.calculate()
-        return JSONResponse({
-            **report,
-            "runtime_entry_latch_open": bool(live.real_entry_enabled),
-        })
+        return JSONResponse(
+            {
+                **report,
+                "runtime_entry_latch_open": bool(live.real_entry_enabled),
+            }
+        )
     except Exception as exc:
         log("REAL_READINESS_FAILED", level="WARN", error=repr(exc))
         return JSONResponse(
@@ -800,6 +824,7 @@ async def api_real_readiness() -> JSONResponse:
                 "percent": 0,
                 "eligible_for_real": False,
                 "blockers": [f"준비도 계산 실패: {type(exc).__name__}"],
+                "runtime_entry_latch_open": bool(live.real_entry_enabled),
             },
             status_code=503,
         )
@@ -821,6 +846,7 @@ async def api_logs(n: int = 60) -> JSONResponse:
 
 
 # ─── /api/orders ──────────────────────────────────────────────────────
+
 
 @app.get("/api/orders")
 async def api_orders(limit: int = 60) -> JSONResponse:
@@ -848,6 +874,7 @@ async def api_orders(limit: int = 60) -> JSONResponse:
 
 # ─── /api/history ─────────────────────────────────────────────────────
 
+
 @app.get("/api/f1")
 async def api_f1() -> JSONResponse:
     logs = _read_today_logs(limit=500)
@@ -866,18 +893,21 @@ async def api_f1() -> JSONResponse:
     if rows and status in {"IDLE", "NO_TARGET"}:
         status = "DONE" if summary["gap_pass"] else "NO_TARGET"
 
-    return JSONResponse({
-        "status": status,
-        "last_event": last_event,
-        "snapshot_name": snapshot_path.name if snapshot_path else None,
-        "updated_at": (
-            datetime.fromtimestamp(snapshot_path.stat().st_mtime, tz=KST).isoformat()
-            if snapshot_path else None
-        ),
-        "selection_data_source": selection_data_source,
-        "selection_process": _selection_process_from_logs(summary, logs),
-        **summary,
-    })
+    return JSONResponse(
+        {
+            "status": status,
+            "last_event": last_event,
+            "snapshot_name": snapshot_path.name if snapshot_path else None,
+            "updated_at": (
+                datetime.fromtimestamp(snapshot_path.stat().st_mtime, tz=KST).isoformat()
+                if snapshot_path
+                else None
+            ),
+            "selection_data_source": selection_data_source,
+            "selection_process": _selection_process_from_logs(summary, logs),
+            **summary,
+        }
+    )
 
 
 @app.get("/api/history")
@@ -901,6 +931,7 @@ async def api_history(limit: int = 60) -> JSONResponse:
 
 
 # ─── /api/stats ───────────────────────────────────────────────────────
+
 
 @app.get("/api/stats")
 async def api_stats() -> JSONResponse:
@@ -928,8 +959,9 @@ async def api_stats() -> JSONResponse:
                GROUP BY close_reason"""
         ) as cur:
             rows = await cur.fetchall()
-        by_reason = {r["close_reason"]: {"n": r["n"], "avg_pnl": round(r["avg_pnl"] or 0, 2)}
-                     for r in rows}
+        by_reason = {
+            r["close_reason"]: {"n": r["n"], "avg_pnl": round(r["avg_pnl"] or 0, 2)} for r in rows
+        }
 
         # ???됰Ŧ???????썹땟???????
         async with conn.execute(
@@ -940,8 +972,9 @@ async def api_stats() -> JSONResponse:
                GROUP BY ym ORDER BY ym"""
         ) as cur:
             rows = await cur.fetchall()
-        monthly = [{"ym": r["ym"], "n": r["n"], "sum_pnl": round(r["sum_pnl"] or 0, 2)}
-                   for r in rows]
+        monthly = [
+            {"ym": r["ym"], "n": r["n"], "sum_pnl": round(r["sum_pnl"] or 0, 2)} for r in rows
+        ]
 
         async with conn.execute(
             """SELECT pyramided,
@@ -974,8 +1007,7 @@ async def api_stats() -> JSONResponse:
         ) as cur:
             rows = await cur.fetchall()
         by_step = {
-            r["step_bucket"]: {"n": r["n"], "avg_pnl": round(r["avg_pnl"] or 0, 2)}
-            for r in rows
+            r["step_bucket"]: {"n": r["n"], "avg_pnl": round(r["avg_pnl"] or 0, 2)} for r in rows
         }
 
         async with conn.execute(
@@ -988,32 +1020,45 @@ async def api_stats() -> JSONResponse:
         ) as cur:
             rows = await cur.fetchall()
         by_entry_hour = [
-            {"hour": r["hour"], "n": r["n"], "avg_pnl": round(r["avg_pnl"] or 0, 2)}
-            for r in rows
+            {"hour": r["hour"], "n": r["n"], "avg_pnl": round(r["avg_pnl"] or 0, 2)} for r in rows
         ]
 
         total = agg.get("total") or 0
         wins = agg.get("wins") or 0
-        return JSONResponse({
-            "total": total,
-            "wins": wins,
-            "losses": total - wins,
-            "win_rate": round(wins / total * 100, 1) if total else 0,
-            "avg_pnl": round(agg.get("avg_pnl") or 0, 2),
-            "max_loss": round(agg.get("max_loss") or 0, 2),
-            "max_gain": round(agg.get("max_gain") or 0, 2),
-            "by_reason": by_reason,
-            "monthly": monthly,
-            "by_pyramided": by_pyramided,
-            "by_step": by_step,
-            "by_entry_hour": by_entry_hour,
-        })
+        return JSONResponse(
+            {
+                "total": total,
+                "wins": wins,
+                "losses": total - wins,
+                "win_rate": round(wins / total * 100, 1) if total else 0,
+                "avg_pnl": round(agg.get("avg_pnl") or 0, 2),
+                "max_loss": round(agg.get("max_loss") or 0, 2),
+                "max_gain": round(agg.get("max_gain") or 0, 2),
+                "by_reason": by_reason,
+                "monthly": monthly,
+                "by_pyramided": by_pyramided,
+                "by_step": by_step,
+                "by_entry_hour": by_entry_hour,
+            }
+        )
     except Exception as exc:
         log("API_STATS_FAILED", level="WARN", error=repr(exc))
-        return JSONResponse({"total": 0, "wins": 0, "losses": 0, "win_rate": 0,
-                             "avg_pnl": 0, "max_loss": 0, "max_gain": 0,
-                             "by_reason": {}, "monthly": [], "by_pyramided": {},
-                             "by_step": {}, "by_entry_hour": []})
+        return JSONResponse(
+            {
+                "total": 0,
+                "wins": 0,
+                "losses": 0,
+                "win_rate": 0,
+                "avg_pnl": 0,
+                "max_loss": 0,
+                "max_gain": 0,
+                "by_reason": {},
+                "monthly": [],
+                "by_pyramided": {},
+                "by_step": {},
+                "by_entry_hour": [],
+            }
+        )
 
 
 # ─── /api/improve ─────────────────────────────────────────────────────
@@ -1099,16 +1144,20 @@ def _improve_from_rows(
         reason = t.get("close_reason") or ""
         highest_step = t.get("highest_step") or 0.0
         mfe = round((high / entry - 1) * 100, 2) if entry and high else None
-        giveback = (
-            round(mfe - pnl, 2) if mfe is not None and pnl is not None else None
-        )
+        giveback = round(mfe - pnl, 2) if mfe is not None and pnl is not None else None
         if mfe is not None:
             mfe_observed_n += 1
-        mfe_rows.append({
-            "date": t.get("date"), "ticker": t.get("ticker"),
-            "name": t.get("name"), "mfe_pct": mfe, "pnl_pct": pnl,
-            "giveback_pp": giveback, "close_reason": reason,
-        })
+        mfe_rows.append(
+            {
+                "date": t.get("date"),
+                "ticker": t.get("ticker"),
+                "name": t.get("name"),
+                "mfe_pct": mfe,
+                "pnl_pct": pnl,
+                "giveback_pp": giveback,
+                "close_reason": reason,
+            }
+        )
 
         step_reached = highest_step >= STEP_SIZE
         if step_reached or mfe is not None:
@@ -1146,9 +1195,7 @@ def _improve_from_rows(
     mfe_rows.reverse()
 
     avg_fill_pnl = _avg(hs_pnl)
-    avg_slip_pp = (
-        max(0.0, -(avg_fill_pnl + HARD_STOP_RATIO * 100)) if hs_pnl else 0.0
-    )
+    avg_slip_pp = max(0.0, -(avg_fill_pnl + HARD_STOP_RATIO * 100)) if hs_pnl else 0.0
 
     slip_acc: dict[str, dict[str, list]] = {}
     for o in orders:
@@ -1190,25 +1237,25 @@ def _improve_from_rows(
         no_target_days = skips.get("NO_TARGET", 0)
         market_closed_days = skips.get("MARKET_CLOSED", 0)
         operational_skip_n = sum(
-            n for reason, n in skips.items()
-            if reason not in {"NO_TARGET", "MARKET_CLOSED"}
+            n for reason, n in skips.items() if reason not in {"NO_TARGET", "MARKET_CLOSED"}
         )
         overlap_days = 0
     else:
         no_target_dates = {
-            str(r.get("date")) for r in skip_rows
+            str(r.get("date"))
+            for r in skip_rows
             if r.get("date") and r.get("reason") == "NO_TARGET"
         }
         market_closed_dates = {
-            str(r.get("date")) for r in skip_rows
+            str(r.get("date"))
+            for r in skip_rows
             if r.get("date") and r.get("reason") == "MARKET_CLOSED"
         }
         all_skip_dates = {str(r.get("date")) for r in skip_rows if r.get("date")}
         no_target_days = len(no_target_dates - trade_dates)
         market_closed_days = len(market_closed_dates)
         operational_skip_n = sum(
-            1 for r in skip_rows
-            if r.get("reason") not in {"NO_TARGET", "MARKET_CLOSED"}
+            1 for r in skip_rows if r.get("reason") not in {"NO_TARGET", "MARKET_CLOSED"}
         )
         overlap_days = len(all_skip_dates & trade_dates)
     trade_days = len(trade_dates) if trade_dates else total
@@ -1254,9 +1301,7 @@ def _improve_from_rows(
             "stop_eval_n": len(trailing_stop_slip),
             "avg_stop_slip_pp": round(max(0.0, stop_slip_avg), 2),
             "max_stop_slip_pp": (
-                round(max(0.0, max(trailing_stop_slip)), 2)
-                if trailing_stop_slip
-                else 0.0
+                round(max(0.0, max(trailing_stop_slip)), 2) if trailing_stop_slip else 0.0
             ),
             "structural_giveback_min_pp": round(STEP_TRAIL * 100, 2),
             "structural_giveback_max_pp": round((STEP_SIZE + STEP_TRAIL) * 100, 2),
@@ -1301,6 +1346,7 @@ def _improve_from_rows(
         },
     }
 
+
 @app.get("/api/improve")
 async def api_improve() -> JSONResponse:
     try:
@@ -1320,23 +1366,20 @@ async def api_improve() -> JSONResponse:
                  AND COALESCE(t.close_reason, '') != 'MANUAL'"""
         ) as cur:
             orders = [dict(r) for r in await cur.fetchall()]
-        async with conn.execute(
-            "SELECT date, reason FROM daily_skips ORDER BY date, id"
-        ) as cur:
+        async with conn.execute("SELECT date, reason FROM daily_skips ORDER BY date, id") as cur:
             skip_rows = [dict(r) for r in await cur.fetchall()]
         skips: dict[str, int] = {}
         for row in skip_rows:
             reason = row["reason"]
             skips[reason] = skips.get(reason, 0) + 1
-        return JSONResponse(
-            _improve_from_rows(trades, orders, skips, skip_rows=skip_rows)
-        )
+        return JSONResponse(_improve_from_rows(trades, orders, skips, skip_rows=skip_rows))
     except Exception as exc:
         log("API_IMPROVE_FAILED", level="WARN", error=repr(exc))
         return JSONResponse(_improve_from_rows([], [], {}))
 
 
 # ─── /api/stream (SSE) ────────────────────────────────────────────────
+
 
 @app.get("/api/stream")
 async def api_stream(request: Request) -> StreamingResponse:

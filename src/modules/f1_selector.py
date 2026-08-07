@@ -57,8 +57,6 @@ HIGH_GAP_MIN_EXPECTED_AMOUNT = _env_float(
     "F1_HIGH_GAP_MIN_EXPECTED_AMOUNT",
     5_000_000_000,
 )
-MIN_VI_GAP = _env_float("F1_MIN_VI_GAP", 0.010)
-SAFE_VI_GAP = _env_float("F1_SAFE_VI_GAP", 0.030)
 MIN_VOLUME_SURGE = _env_float("F1_MIN_VOLUME_SURGE", 0.0)
 
 LIQUIDITY_TOP_PCT = _env_float("F1_SELECTION_TOP_PCT", 0.10)
@@ -68,8 +66,15 @@ GAP_WEIGHT = _env_float("F1_SCORE_GAP_WEIGHT", 25)
 AMOUNT_WEIGHT = _env_float("F1_SCORE_AMOUNT_WEIGHT", 25)
 SURGE_WEIGHT = _env_float("F1_SCORE_SURGE_WEIGHT", 25)
 BUY_PRESSURE_WEIGHT = _env_float("F1_SCORE_BUY_PRESSURE_WEIGHT", 0)
-VI_WEIGHT = _env_float("F1_SCORE_VI_WEIGHT", 10)
 OVERHEAT_PENALTY = _env_float("F1_SCORE_OVERHEAT_PENALTY", 30)
+# VI 배점 10점을 제거하기 전의 점수 상한을 유지한다. 남은 배점의 상대 비율은
+# 그대로 두고 제거된 10점만 보정해 과열 페널티 30점의 상대 강도가 의도치
+# 않게 커지지 않도록 한다. 사용자 지정 배점의 절대 크기도 보존한다.
+REMOVED_VI_WEIGHT = 10.0
+SCORE_TARGET_MAX = sum(
+    max(0.0, weight)
+    for weight in (GAP_WEIGHT, AMOUNT_WEIGHT, SURGE_WEIGHT, BUY_PRESSURE_WEIGHT)
+) + REMOVED_VI_WEIGHT
 
 
 def gap_allowed(candidate: dict) -> bool:
@@ -124,28 +129,24 @@ def _score_buy_pressure(ratio: float) -> float:
     return min(1.0, (ratio - 1.0) / 2.0)
 
 
-def _score_vi(vi_gap: float | None) -> float:
-    if vi_gap is None:
-        return 0.35
-    if vi_gap < MIN_VI_GAP:
-        return 0.0
-    return min(1.0, vi_gap / max(0.0001, SAFE_VI_GAP))
-
-
 def f1_score(candidate: dict) -> float:
     gap = float(candidate.get("gap_pct") or 0.0)
     amount = expected_amount(candidate)
     surge = volume_surge(candidate)
-    vi_gap = candidate.get("vi_gap")
     buy_sell_ratio = float(candidate.get("buy_sell_ratio") or 0.0)
 
-    score = (
+    raw_score = (
         _score_gap(gap) * GAP_WEIGHT
         + _score_amount(amount) * AMOUNT_WEIGHT
         + _score_surge(surge) * SURGE_WEIGHT
         + _score_buy_pressure(buy_sell_ratio) * BUY_PRESSURE_WEIGHT
-        + _score_vi(vi_gap) * VI_WEIGHT
     )
+    configured_max = sum(
+        max(0.0, weight)
+        for weight in (GAP_WEIGHT, AMOUNT_WEIGHT, SURGE_WEIGHT, BUY_PRESSURE_WEIGHT)
+    )
+    target_max = configured_max + REMOVED_VI_WEIGHT
+    score = raw_score * target_max / configured_max if configured_max else 0.0
     if GAP_CORE_MAX <= gap < GAP_HARD_MAX:
         score -= OVERHEAT_PENALTY * max(
             0.0,
@@ -159,16 +160,12 @@ def selection_rejection_reason(candidate: dict) -> str | None:
     gap = float(candidate.get("gap_pct") or 0.0)
     amount = expected_amount(candidate)
     surge = volume_surge(candidate)
-    vi_gap = candidate.get("vi_gap")
-
     if not gap_allowed(candidate):
         return "GAP"
     if amount < MIN_EXPECTED_AMOUNT:
         return "EXPECTED_AMOUNT"
     if surge < MIN_VOLUME_SURGE:
         return "VOLUME_SURGE"
-    if vi_gap is not None and vi_gap < MIN_VI_GAP:
-        return "VI_GAP"
     if gap >= GAP_CORE_MAX and not high_gap_allowed(candidate):
         return "HIGH_GAP"
     return None
@@ -182,7 +179,8 @@ def selection_stats(candidates: list[dict]) -> dict[str, int]:
         "filter_gap_rejected_count": reasons.count("GAP"),
         "filter_amount_rejected_count": reasons.count("EXPECTED_AMOUNT"),
         "filter_volume_rejected_count": reasons.count("VOLUME_SURGE"),
-        "filter_vi_rejected_count": reasons.count("VI_GAP"),
+        # 정적 VI 이격은 관측값일 뿐 후보 제외 조건이 아니다.
+        "filter_vi_rejected_count": 0,
         "filter_high_gap_rejected_count": reasons.count("HIGH_GAP"),
     }
 
@@ -192,12 +190,7 @@ def _passes_selection_floor(candidate: dict) -> bool:
 
 
 def high_gap_allowed(candidate: dict) -> bool:
-    vi_gap = candidate.get("vi_gap")
-    return (
-        expected_amount(candidate) >= HIGH_GAP_MIN_EXPECTED_AMOUNT
-        and vi_gap is not None
-        and vi_gap >= MIN_VI_GAP
-    )
+    return expected_amount(candidate) >= HIGH_GAP_MIN_EXPECTED_AMOUNT
 
 
 def rank_candidates(candidates: list[dict]) -> list[dict]:

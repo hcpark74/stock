@@ -36,9 +36,6 @@ from src.scheduler import (  # noqa: E402
     F1_M,
     F3_FILL_DEADLINE_H,
     F3_FILL_DEADLINE_M,
-    F3_H,
-    F3_M,
-    F3_S,
     build,
 )
 from src.utils import logger, time_sync  # noqa: E402
@@ -58,14 +55,6 @@ STATE_DIR = os.getenv("STATE_DIR", "data/state")
 NTP_SERVERS = [s.strip() for s in os.getenv("NTP_SERVER", "pool.ntp.org").split(",")]
 DB_PATH = os.path.join(os.getenv("DB_DIR", "data/db"), "trading.db")
 PID_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.pid")
-F2_RETRY_F1_ON_FAIL = os.getenv(
-    "F2_RETRY_F1_ON_FAIL",
-    "0" if os.getenv("KIS_MODE", "PAPER") == "REAL" else "1",
-) == "1"
-F2_RETRY_F1_INTERVAL_SEC = int(
-    os.getenv("F2_RETRY_F1_INTERVAL_SEC", str(f1_filter.F1_RETRY_INTERVAL_SEC))
-)
-F2_RETRY_F1_MIN_REMAINING_SEC = int(os.getenv("F2_RETRY_F1_MIN_REMAINING_SEC", "2"))
 PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC = max(
     0.1,
     _env_float("PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC", 2.5),
@@ -104,25 +93,6 @@ def _is_market_closed_today() -> bool:
     return _market_closed_date == _today()
 
 
-def _past_f3_schedule() -> bool:
-    return datetime.now(KST) >= _scheduled_at(F3_H, F3_M, F3_S)
-
-
-def _before_f1_retry_deadline() -> bool:
-    return datetime.now(KST) < _scheduled_at(f1_filter.F1_DEADLINE_H, f1_filter.F1_DEADLINE_M)
-
-
-def _f2_retry_sleep_seconds() -> int:
-    deadline = _scheduled_at(f1_filter.F1_DEADLINE_H, f1_filter.F1_DEADLINE_M)
-    remaining = max(1, int((deadline - datetime.now(KST)).total_seconds()))
-    return max(1, min(F2_RETRY_F1_INTERVAL_SEC, remaining))
-
-
-def _f2_retry_remaining_seconds() -> int:
-    deadline = _scheduled_at(f1_filter.F1_DEADLINE_H, f1_filter.F1_DEADLINE_M)
-    return int((deadline - datetime.now(KST)).total_seconds())
-
-
 async def _ensure_trading_day() -> None:
     global _f1_result, _f2_done, _f3_started, _market_closed_date
     today = _today()
@@ -139,11 +109,7 @@ async def _reconcile_runtime_stale_active(today: str) -> bool:
     """Clear a prior-day active state only after KIS confirms zero shares."""
     s = state.get()
     stale_date = s.trading_date
-    if (
-        not stale_date
-        or stale_date == today
-        or s.position_status not in _ACTIVE_POSITION_STATUSES
-    ):
+    if not stale_date or stale_date == today or s.position_status not in _ACTIVE_POSITION_STATUSES:
         return False
 
     stale_status = s.position_status
@@ -198,8 +164,7 @@ async def _reconcile_runtime_stale_active(today: str) -> bool:
         "STALE_ACTIVE_RECONCILED",
         level="WARN",
         message=(
-            f"전일 {stale_status} 잔류 상태를 잔고 0주 확인 후 "
-            f"자동 정리했습니다: {ticker}"
+            f"전일 {stale_status} 잔류 상태를 잔고 0주 확인 후 " f"자동 정리했습니다: {ticker}"
         ),
         ticker=ticker,
     )
@@ -239,9 +204,7 @@ async def _check_market_holiday() -> None:
         return
 
     rows = resp.get("output", [])
-    row = next(
-        (r for r in rows if isinstance(r, dict) and r.get("bass_dt") == today), None
-    )
+    row = next((r for r in rows if isinstance(r, dict) and r.get("bass_dt") == today), None)
     if row is None:
         logger.log("HOLIDAY_CHECK_FAILED", level="WARN", reason="TODAY_NOT_IN_RESPONSE")
         return
@@ -312,11 +275,13 @@ async def _restore_daily_skip_from_db() -> None:
         _market_closed_date = today
         logger.log("MARKET_CLOSED_RESTORED", level="INFO", date=today, source="DAILY_SKIPS")
     else:
-        logger.log("DAY_SKIP_RESTORED", level="INFO", date=today,
-                   reason=reason, source="DAILY_SKIPS")
+        logger.log(
+            "DAY_SKIP_RESTORED", level="INFO", date=today, reason=reason, source="DAILY_SKIPS"
+        )
 
 
 # ── 스케줄 작업 래퍼 ─────────────────────────────────────────────────
+
 
 async def job_token_refresh() -> None:
     await _ensure_trading_day()
@@ -327,7 +292,6 @@ async def job_token_refresh() -> None:
 async def job_ntp_check() -> None:
     await _ensure_trading_day()
     time_sync.check_ntp(NTP_SERVERS)
-
 
 
 async def _today_trade_exists() -> bool:
@@ -349,6 +313,7 @@ async def _skip_entry_pipeline_if_trade_exists(source: str) -> bool:
     state.get().close_reason = state.get().close_reason or "TRADE_ALREADY_EXISTS"
     logger.log("TRADE_ALREADY_EXISTS", level="WARN", source=source, action="SKIP_ENTRY_PIPELINE")
     return True
+
 
 async def job_f1() -> None:
     global _f1_result
@@ -443,7 +408,7 @@ async def job_f1() -> None:
                 error=repr(exc),
             )
     selection_ms = round((time.perf_counter() - selection_started) * 1000)
-    await _run_f2_f3_after_f1(immediate=_past_f3_schedule())
+    await _run_f2_f3_after_f1()
     logger.log(
         "ENTRY_PIPELINE_TIMING",
         level="INFO",
@@ -530,7 +495,7 @@ async def job_f2() -> None:
         return
     if not _f1_result:
         return
-    await _run_f2_f3_after_f1(immediate=_past_f3_schedule())
+    await _run_f2_f3_after_f1()
 
 
 async def job_f3() -> None:
@@ -563,88 +528,28 @@ async def job_f5_exec() -> None:
     await f5_timeout.execute()
 
 
-async def _run_f2_f3_after_f1(*, immediate: bool = False) -> None:
+async def _run_f2_f3_after_f1() -> None:
     """
     Chain F2/F3 after F1 produced candidates.
 
-    Normal F1 calls this right away; if F2 rejects every candidate and the
-    env-controlled F2 retry is enabled, the chain can clear that F2-only
-    day_skip and retry F1 before the F1 deadline. F3 only uses force mode if
-    the scheduled F3 time has already passed. Catch-up calls it only inside the
-    missed-run window and can force F3 when explicitly catching up after the
-    scheduled F3 time.
+    F1 자체가 deadline까지 데이터 재시도를 책임진다. F2는 필터가 없는 순위·락업
+    단계이므로 같은 결과를 다시 F1에 넣는 별도 재시도 루프를 두지 않는다.
     """
     global _f1_result, _f2_done, _f3_started
     if not _f1_result or state.get().day_skip:
         return
 
-    f2_attempt = 0
-    f2_retry_started = False
-    while not _f2_done and _f1_result and not state.get().day_skip:
-        f2_attempt += 1
-        await f2_lockup.run(_f1_result)
-
-        s = state.get()
-        if s.target_ticker and not s.day_skip:
-            _f2_done = True
-            break
-
-        if not _should_retry_f1_after_f2_fail():
-            _f2_done = True
-            break
-
-        sleep_sec = _f2_retry_sleep_seconds()
-        logger.log(
-            "F2_FAIL_F1_RETRY",
-            level="WARN",
-            attempt=f2_attempt,
-            retry_after_sec=sleep_sec,
-            deadline=f"{f1_filter.F1_DEADLINE_H:02d}:{f1_filter.F1_DEADLINE_M:02d}:00",
-            reason="F2_NO_TARGET",
-        )
-        await notifier.send(
-            "F2_FAIL_F1_RETRY",
-            level="WARN",
-            message=(
-                f"F2 후보가 전부 제외되어 F1을 {sleep_sec}초 후 재시도합니다. "
-                f"deadline={f1_filter.F1_DEADLINE_H:02d}:{f1_filter.F1_DEADLINE_M:02d}:00"
-            ),
-        )
-        f2_retry_started = True
-        s.day_skip = False
-        s.target_ticker = None
-        s.target_name = None
-        s.target_candidates = None
-        await asyncio.sleep(sleep_sec)
-        _f1_result = await f1_filter.run()
-
-    if state.get().day_skip:
-        _f2_done = True
-        if f2_retry_started and not state.get().target_ticker:
-            await notifier.send(
-                "F2_RETRY_EXHAUSTED",
-                level="WARN",
-                message="F2 실패 후 F1 재시도까지 했지만 최종 후보를 확정하지 못했습니다.",
-            )
+    await f2_lockup.run(_f1_result)
+    _f2_done = True
 
     if _f2_done and not _f3_started and state.get().target_ticker and not state.get().day_skip:
         _f3_started = True
-        await f3_entry.run(force=immediate)
-
-
-def _should_retry_f1_after_f2_fail() -> bool:
-    s = state.get()
-    return (
-        F2_RETRY_F1_ON_FAIL
-        and os.getenv("DRY_RUN", "0") != "1"
-        and s.day_skip
-        and not s.target_ticker
-        and _before_f1_retry_deadline()
-        and _f2_retry_remaining_seconds() >= F2_RETRY_F1_MIN_REMAINING_SEC
-    )
+        # 라이브 경로는 즉시 체이닝이어도 진입 마감을 우회하지 않는다.
+        await f3_entry.run()
 
 
 # ── F1 missed 보완 실행 ──────────────────────────────────────────────
+
 
 async def _run_catchup() -> None:
     """
@@ -654,16 +559,25 @@ async def _run_catchup() -> None:
     """
     await _ensure_trading_day()
     dry_run = os.getenv("DRY_RUN", "0") == "1"
-    force = dry_run or os.getenv("FORCE_CATCHUP", "0") == "1"
+    force_catchup_requested = os.getenv("FORCE_CATCHUP", "0") == "1"
+    if force_catchup_requested and not dry_run:
+        logger.log(
+            "FORCE_CATCHUP_BLOCKED",
+            level="WARN",
+            reason="LIVE_ENTRY_DEADLINE_CANNOT_BE_OVERRIDDEN",
+        )
+    force = dry_run
 
     if not force and not _is_trading_weekday():
-        logger.log("CATCHUP_SKIP_WEEKEND", level="INFO",
-                   message="주말(토·일) 기동 — 진입 catchup 생략")
+        logger.log(
+            "CATCHUP_SKIP_WEEKEND", level="INFO", message="주말(토·일) 기동 — 진입 catchup 생략"
+        )
         return
 
     if not force and _is_market_closed_today():
-        logger.log("CATCHUP_SKIP_MARKET_CLOSED", level="INFO",
-                   message="휴장일 기동 — 진입 catchup 생략")
+        logger.log(
+            "CATCHUP_SKIP_MARKET_CLOSED", level="INFO", message="휴장일 기동 — 진입 catchup 생략"
+        )
         return
 
     if await _skip_entry_pipeline_if_trade_exists("CATCHUP"):
@@ -671,7 +585,6 @@ async def _run_catchup() -> None:
 
     now = datetime.now(KST)
     f1_sched = _scheduled_at(F1_H, F1_M)
-    f3_sched = _scheduled_at(F3_H, F3_M, F3_S)
     f3_fill_deadline = _scheduled_at(F3_FILL_DEADLINE_H, F3_FILL_DEADLINE_M)
 
     if not force and not (f1_sched <= now < f3_fill_deadline):
@@ -698,10 +611,11 @@ async def _run_catchup() -> None:
     _f1_result = await f1_filter.run()
 
     now = datetime.now(KST)
-    await _run_f2_f3_after_f1(immediate=force or now >= f3_sched)
+    await _run_f2_f3_after_f1()
 
 
 # ── 재시작 복구 ──────────────────────────────────────────────────────
+
 
 async def _recover_state() -> None:
     """
@@ -713,10 +627,7 @@ async def _recover_state() -> None:
     if data is not None and data.get("date") != today:
         stale_status = data.get("position_status")
         stale_active_reconciled = False
-        if (
-            stale_status in _ACTIVE_POSITION_STATUSES
-            and data.get("ticker")
-        ):
+        if stale_status in _ACTIVE_POSITION_STATUSES and data.get("ticker"):
             actual_qty = await _verified_holding_qty(
                 data.get("ticker"),
                 "STALE_STATE_FILE",
@@ -802,8 +713,7 @@ async def _recover_state() -> None:
         data = None
 
     if data is not None and (
-        data.get("position_status") == "EXITING"
-        or isinstance(data.get("pending_exit"), dict)
+        data.get("position_status") == "EXITING" or isinstance(data.get("pending_exit"), dict)
     ):
         data = await exit_recovery.merge_db_intent(data, today)
 
@@ -995,9 +905,7 @@ async def _recover_state_safely() -> bool:
 def _is_terminal_state(data: dict) -> bool:
     status = data.get("position_status")
     remaining_qty = data.get("remaining_qty")
-    return status == "CLOSED" or (
-        remaining_qty is not None and int(float(remaining_qty)) <= 0
-    )
+    return status == "CLOSED" or (remaining_qty is not None and int(float(remaining_qty)) <= 0)
 
 
 async def _verified_holding_qty(ticker: str | None, recovery_source: str) -> int | None:
@@ -1291,6 +1199,7 @@ async def _recover_open_trade_from_db(today: str) -> None:
         ticker=trade.get("ticker"),
     )
 
+
 # ── PID 파일 관리 ────────────────────────────────────────────────────
 
 _pid_lock_file = None
@@ -1393,6 +1302,7 @@ def _clear_pid() -> None:
 
 # ── 메인 ─────────────────────────────────────────────────────────────
 
+
 async def main() -> None:
     dry_run = os.getenv("DRY_RUN", "0") == "1"
     # 같은 인터프리터에서 main()이 다시 호출돼도 이전 REAL 승인을 재사용하지 않는다.
@@ -1424,8 +1334,11 @@ async def main() -> None:
     await _restore_daily_skip_from_db()
 
     if dry_run:
-        logger.log("DRY_RUN_START", level="WARN",
-                   message="DRY_RUN=1: external auth, NTP, orders, and WebSocket are simulated")
+        logger.log(
+            "DRY_RUN_START",
+            level="WARN",
+            message="DRY_RUN=1: external auth, NTP, orders, and WebSocket are simulated",
+        )
     else:
         await auth.load_or_refresh()
         time_sync.check_ntp(NTP_SERVERS)
@@ -1448,8 +1361,9 @@ async def main() -> None:
     # Web UI exposes account assets; bind to localhost unless explicitly opened.
     ui_port = int(os.getenv("UI_PORT", "8080"))
     ui_host = os.getenv("UI_HOST", "127.0.0.1")
-    config = uvicorn.Config(server.app, host=ui_host, port=ui_port,
-                            log_level="warning", loop="none")
+    config = uvicorn.Config(
+        server.app, host=ui_host, port=ui_port, log_level="warning", loop="none"
+    )
     uvi = uvicorn.Server(config)
     uvi.install_signal_handlers = lambda: None  # uvicorn의 시그널 핸들러 비활성화
     ui_task = asyncio.create_task(uvi.serve(), name="ui_server")
@@ -1480,7 +1394,7 @@ async def main() -> None:
     finally:
         if scheduler is not None:
             scheduler.shutdown(wait=False)
-        uvi.should_exit = True          # uvicorn graceful 종료 신호
+        uvi.should_exit = True  # uvicorn graceful 종료 신호
         if not ui_task.done():
             with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
                 await asyncio.wait_for(ui_task, timeout=2.0)

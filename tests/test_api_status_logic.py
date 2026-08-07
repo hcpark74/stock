@@ -3,8 +3,8 @@
 import src.api.status_logic as status_logic
 
 
-def test_f1_verdict_has_high_gap_vi_unknown_label():
-    assert status_logic.f1_verdict({"gap_reason": "HIGH_GAP_VI_UNKNOWN"}) == "VI미확인"
+def test_f1_verdict_has_current_high_gap_rejection_label():
+    assert status_logic.f1_verdict({"gap_reason": "HIGH_GAP_REJECTED"}) == "고갭조건미달"
 
 
 def test_f1_summary_uses_same_liquidity_selection_as_f1_filter():

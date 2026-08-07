@@ -1378,7 +1378,6 @@ function renderSettings(s) {
       settingBox('F1 선정', [
         ['핵심 갭', pctRange(s.f1?.core_gap_pct)],
         ['고갭 조건', `${pctRange(s.f1?.high_gap_pct)} · 대금 ${fmt((s.f1?.high_gap_min_amount||0)/1e8, 0)}억 이상`],
-        ['VI 여유', `${fmt(s.f1?.high_gap_min_vi_gap_pct, 1)}% 이상`],
         ['최소 후보', `${fmt(s.f1?.min_candidates)}개`],
         ['재시도', `${s.f1?.retry_deadline || '—'}까지 · ${fmt(s.f1?.retry_interval_sec)}초 간격`],
       ]),

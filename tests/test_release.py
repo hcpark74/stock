@@ -6,6 +6,7 @@ from src import release
 
 _REQUIRED_ORDER_DECISION_FILES = {
     "main.py",
+    "src/live.py",
     "src/api/kis_rest.py",
     "src/api/kis_ws.py",
     "src/modules/f3_entry.py",

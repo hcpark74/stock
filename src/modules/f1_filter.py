@@ -21,7 +21,6 @@ GAP_MAX = f1_selector.GAP_CORE_MAX
 HIGH_GAP_MAX = f1_selector.GAP_HARD_MAX
 EXTREME_GAP_MAX = 0.150
 HIGH_GAP_MIN_EXPECTED_AMOUNT = f1_selector.HIGH_GAP_MIN_EXPECTED_AMOUNT
-HIGH_GAP_MIN_VI_GAP = f1_selector.MIN_VI_GAP
 MIN_EXPECTED_AMOUNT = f1_selector.MIN_EXPECTED_AMOUNT
 LIQUIDITY_TOP_PCT = f1_selector.LIQUIDITY_TOP_PCT
 F1_MIN_CANDIDATES = f1_selector.MIN_CANDIDATES
@@ -153,7 +152,6 @@ def select_liquidity_candidates(candidates: list[dict]) -> list[dict]:
 def _classify_gap_candidate(candidate: dict) -> dict:
     gap = candidate.get("gap_pct", 0.0)
     amount = candidate.get("expected_amount", 0.0)
-    vi_gap = candidate.get("vi_gap")
 
     if gap < 0:
         return {"gap_band": "NEGATIVE_GAP", "gap_allowed": False, "gap_reason": "NEGATIVE_GAP"}
@@ -172,10 +170,8 @@ def _classify_gap_candidate(candidate: dict) -> dict:
             }
         if amount < HIGH_GAP_MIN_EXPECTED_AMOUNT:
             reason = "HIGH_GAP_AMOUNT_LOW"
-        elif vi_gap is None:
-            reason = "HIGH_GAP_VI_UNKNOWN"
         else:
-            reason = "HIGH_GAP_VI_NEAR"
+            reason = "HIGH_GAP_REJECTED"
         return {"gap_band": "HIGH_GAP", "gap_allowed": False, "gap_reason": reason}
     if gap < EXTREME_GAP_MAX:
         return {"gap_band": "EXTREME_GAP", "gap_allowed": False, "gap_reason": "EXTREME_GAP_RISK"}

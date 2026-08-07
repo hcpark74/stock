@@ -7,9 +7,10 @@ def test_default_policy_thresholds_are_intentional():
     assert f1_selector.GAP_HARD_MAX == 0.100
     assert f1_selector.MIN_EXPECTED_AMOUNT == 100_000_000
     assert f1_selector.HIGH_GAP_MIN_EXPECTED_AMOUNT == 5_000_000_000
-    assert f1_selector.MIN_VI_GAP == 0.010
-    assert f1_selector.SAFE_VI_GAP == 0.030
+    assert not hasattr(f1_selector, "MIN_VI_GAP")
+    assert not hasattr(f1_selector, "SAFE_VI_GAP")
     assert f1_selector.BUY_PRESSURE_WEIGHT == 0
+    assert f1_selector.SCORE_TARGET_MAX == 85.0
 
 
 def _candidate(
@@ -42,8 +43,8 @@ def test_volume_surge_can_outrank_larger_absolute_amount():
     assert ranked[0]["f1_score"] > ranked[1]["f1_score"]
 
 
-def test_high_gap_requires_amount_and_vi_distance():
-    rejected = f1_selector.select_candidates([
+def test_high_gap_requires_amount_but_not_static_vi_distance():
+    ranked = f1_selector.select_candidates([
         _candidate(
             "LOW_AMOUNT", expected_amount=1_000_000_000,
             avg_amount_5d=100_000_000, gap_pct=0.085,
@@ -53,15 +54,7 @@ def test_high_gap_requires_amount_and_vi_distance():
             gap_pct=0.085, vi_gap=0.005,
         ),
     ])
-    accepted = f1_selector.select_candidates([
-        _candidate(
-            "HIGH_GAP_OK", expected_amount=6_000_000_000, avg_amount_5d=100_000_000,
-            gap_pct=0.085, vi_gap=0.015,
-        ),
-    ])
-
-    assert rejected == []
-    assert accepted[0]["ticker"] == "HIGH_GAP_OK"
+    assert [candidate["ticker"] for candidate in ranked] == ["VI_NEAR"]
 
 
 def test_empty_input_returns_empty_selection():
@@ -80,7 +73,7 @@ def test_illiquid_candidates_rejected_by_default_floor():
     assert [c["ticker"] for c in ranked] == ["LIQUID"]
 
 
-def test_invalid_gap_and_vi_floor_are_rejected():
+def test_invalid_gap_is_rejected_but_vi_near_candidate_is_kept():
     ranked = f1_selector.select_candidates([
         _candidate(
             "LOW_GAP", expected_amount=10_000_000_000,
@@ -92,7 +85,7 @@ def test_invalid_gap_and_vi_floor_are_rejected():
         ),
     ])
 
-    assert ranked == []
+    assert [candidate["ticker"] for candidate in ranked] == ["VI_TOO_NEAR"]
 
 def test_amount_score_is_never_negative():
     assert f1_selector._score_amount(100_000_000) == 0.0
@@ -106,3 +99,14 @@ def test_gap_score_uses_configured_core_max(monkeypatch):
     assert f1_selector._score_gap(0.030) == 0.0
     assert f1_selector._score_gap(0.080) == 1.0
     assert 0.0 < f1_selector._score_gap(0.055) < 1.0
+
+
+def test_removed_vi_score_is_renormalized_to_legacy_maximum():
+    candidate = _candidate(
+        "MAX_SCORE",
+        expected_amount=30_000_000_000,
+        avg_amount_5d=3_000_000_000,
+        gap_pct=f1_selector.GAP_CORE_MAX,
+    )
+
+    assert f1_selector.f1_score(candidate) == 85.0

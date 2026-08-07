@@ -392,6 +392,38 @@ async def test_api_settings_returns_contract(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_api_settings_failure_preserves_runtime_entry_latch(monkeypatch):
+    monkeypatch.setattr(server.live, "real_entry_enabled", True)
+    monkeypatch.setattr(
+        server.kis_rest,
+        "account_no",
+        lambda: (_ for _ in ()).throw(RuntimeError("settings failed")),
+    )
+
+    resp = await server.api_settings()
+    payload = json.loads(resp.body.decode("utf-8"))
+
+    assert payload["valid"] is False
+    assert payload["real_readiness"]["runtime_entry_latch_open"] is True
+
+
+@pytest.mark.asyncio
+async def test_api_readiness_failure_preserves_runtime_entry_latch(monkeypatch):
+    monkeypatch.setattr(server.live, "real_entry_enabled", True)
+    monkeypatch.setattr(
+        server.readiness,
+        "calculate",
+        AsyncMock(side_effect=RuntimeError("readiness failed")),
+    )
+
+    resp = await server.api_real_readiness()
+    payload = json.loads(resp.body.decode("utf-8"))
+
+    assert resp.status_code == 503
+    assert payload["runtime_entry_latch_open"] is True
+
+
+@pytest.mark.asyncio
 async def test_api_settings_reports_empty_priority_account_env(monkeypatch):
     monkeypatch.setenv("KIS_ACCT_NO", "")
     monkeypatch.setenv("KIS_ACCOUNT_NO", "12345678")

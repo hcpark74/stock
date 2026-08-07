@@ -31,7 +31,7 @@ KOSPI/KOSDAQ 장전 갭업 후보를 자동으로 찾고, 09:00 전후 진입부
 
 ```text
 F1 09:00~09:10  후보 스캔: 갭/유동성 필터 + 예상체결가 보강
-F2 09:10        대상 종목 잠금: 유동성, 예상금액, VI 근접 여부 확인
+F2 09:10        대상 종목 잠금: F1 점수와 예상 체결대금 순위 확정
 F3 09:10:10     진입: 갭 재검증, 매수 주문, 미체결 시 짧은 재시도
 F4 진입 후       보유 추적: WebSocket/REST 가격 추적, Step Trailing, Hard Stop
 F5 15:15        마감 청산: 남은 수량 시장가 전량 청산
@@ -53,7 +53,7 @@ F2에서 대상 종목이 잠기면 F3는 기본적으로 매수 실행을 시�
 
 ### 늦게 켜도 이어서 실행 (catch-up)
 
-09:00 이후 F1이 끝나면 F2/F3는 예약 시각만 기다리지 않고 즉시 체인 실행됩니다. 프로세스를 09:00~09:11 사이에 다시 켜는 catch-up 경로도 같은 규칙을 사용하며, F3 예정 시각이 이미 지난 경우에는 `force=True`로 시간 대기 없이 진입 절차를 이어갑니다.
+09:00 이후 F1이 끝나면 F2/F3는 예약 시각만 기다리지 않고 즉시 체인 실행됩니다. 프로세스를 진입 가능 시간 안에 다시 켜는 catch-up 경로도 같은 규칙을 사용합니다. 라이브에서는 `FORCE_CATCHUP=1`을 설정해도 F3 진입 마감을 넘길 수 없으며, 마감 이후에는 신규 주문 없이 차단 로그만 남깁니다.
 
 ## 3. 꼭 알아야 할 주의사항
 
@@ -90,12 +90,11 @@ python scripts/real_readiness.py
 | 4 | `KIS_BASE_URL=https://openapi.koreainvestment.com:9443`<br>`KIS_WS_URL=ws://ops.koreainvestment.com:21000` | 실계좌 API 주소로 교체 (`.env.example` 주석 참조) |
 | 5 | 실전용 `KIS_APP_KEY`/`KIS_APP_SECRET` | 실전 키는 모의투자 키와 별도 발급 |
 | 6 | `KIS_ACCOUNT_NO` 실계좌 번호 | 계좌번호·상품코드 재확인 |
-| 7 | `F2_RETRY_F1_ON_FAIL=0` | PAPER 실험용 재시도 비활성화 |
-| 8 | `F3_ALLOC_RATIO` 하향 검토 | 기본 0.95(주문가능 현금의 95%) — 초기에는 소액 계좌 또는 낮은 비율로 시작 |
-| 9 | Telegram 알림 실제 수신 테스트 | 봇 기동 시 알림이 휴대폰에 도착하는지 확인 |
-| 10 | 시간 동기화 상태 확인 | 오늘 화면의 NTP 표시가 정상인지, `TIME_SYNC_WARN` 로그가 없는지 |
-| 11 | 자산 메뉴에서 예수금·주문가능금액 확인 | 의도한 투입 금액과 일치하는지 |
-| 12 | 첫 1~2주는 장중 직접 모니터링 | 09:00~15:15 화면과 알림을 실시간 확인 |
+| 7 | `F3_ALLOC_RATIO` 하향 검토 | 기본 0.95(주문가능 현금의 95%) — 초기에는 소액 계좌 또는 낮은 비율로 시작 |
+| 8 | Telegram 알림 실제 수신 테스트 | 봇 기동 시 알림이 휴대폰에 도착하는지 확인 |
+| 9 | 시간 동기화 상태 확인 | 오늘 화면의 NTP 표시가 정상인지, `TIME_SYNC_WARN` 로그가 없는지 |
+| 10 | 자산 메뉴에서 예수금·주문가능금액 확인 | 의도한 투입 금액과 일치하는지 |
+| 11 | 첫 1~2주는 장중 직접 모니터링 | 09:00~15:15 화면과 알림을 실시간 확인 |
 
 참고: KIS 모의투자는 장전 예상체결가, KOSDAQ 랭킹 조회 등 일부 응답이 실계좌와 다르므로, REAL 전환 직후 며칠은 F1 후보 선정 결과가 PAPER와 달라질 수 있습니다.
 
@@ -187,10 +186,6 @@ F1_GAP_HARD_MAX=0.100
 F1_MIN_EXPECTED_AMOUNT=100000000
 # 갭이 큰(선호 구간 초과) 종목은 예상 거래대금 50억 원 이상일 때만 허용
 F1_HIGH_GAP_MIN_EXPECTED_AMOUNT=5000000000
-# VI(변동성완화장치) 발동 가격까지의 여유: 1% 미만이면 위험으로 배점 제외,
-# 3% 이상이면 안전으로 간주
-F1_MIN_VI_GAP=0.010
-F1_SAFE_VI_GAP=0.030
 # 유동성(거래대금) 상위 10% 종목만 후보로 사용, 최소 10개는 확보
 F1_SELECTION_TOP_PCT=0.10
 F1_MIN_CANDIDATES=10
@@ -210,28 +205,20 @@ PAPER_FAST_HYBRID=0
 F3_FAST_RECHECK_MAX_AGE_SEC=15
 BALANCE_SNAPSHOT_TTL_SEC=90
 
-# ── F2: 후보 전멸 시 F1 재시도 ─────────────────
-# 1이면 F2에서 후보가 모두 탈락했을 때 F1 스캔을 다시 시도 (PAPER 실험용)
-F2_RETRY_F1_ON_FAIL=1
-# 재시도 간격(초) / 데드라인까지 이 시간(초)보다 적게 남으면 재시도 생략
-F2_RETRY_F1_INTERVAL_SEC=5
-F2_RETRY_F1_MIN_REMAINING_SEC=2
-
 # ── F3: 매수 주문 실행 ─────────────────────────
-# 진입 직전 VI 발동 확인 — 발동 중이면 해당 후보 차단(1=활성, 2026-07-20 미체결 인시던트)
+# 진입 직전 VI 확인 — 대체 후보가 있으면 즉시 교체, 없을 때만 조건부 해제 대기
 F3_VI_CHECK_ENABLED=1
+F3_VI_RELEASE_WAIT_SEC=130.0
+F3_VI_RELEASE_POLL_SEC=2.0
 # 매수 주문 최대 시도 횟수와 재시도 전 대기(초)
 F3_ENTRY_MAX_ATTEMPTS=2
 F3_ENTRY_RETRY_DELAY_SEC=0.5
 # 첫 주문/재시도 주문의 체결 대기 시간(초)
-F3_ENTRY_FIRST_FILL_SEC=12.0
-F3_ENTRY_RETRY_FILL_SEC=8.0
 # 이 시각을 지나면 재시도를 포기하고 당일 진입 종료
 F3_ENTRY_RETRY_DEADLINE=09:11:00
 # 주문 직전 가격 급변이 없는지 확인하는 대기 시간(초)
 F3_PRE_ORDER_QUIET_SEC=1.5
-# 1이면 최종 1호 매도호가를 재조회한 뒤 주문 갭 상한 지정가로만 진입
-F3_LIMIT_BUY_ENABLED=1
+# 최종 1호 매도호가를 재조회한 뒤 주문 갭 상한 지정가로만 진입(강제 불변식)
 # 최종 1호 매도호가 대비 지정가 허용폭(0.01 = 1%)
 F3_ASK_SLIPPAGE_RATIO=0.01
 # 재검증가 대비 최종 호가 변동률이 이 값을 넘으면 WARN 로그 기록(%)
@@ -246,7 +233,6 @@ F3_LIMIT_FILL_TIMEOUT_SEC=2.0
 F3_ENTRY_TOTAL_BUDGET_SEC=45.0
 # 추가 매수(피라미딩) 실행 시각과 체결 대기 시간(초)
 F3_PYRAMID_AT=09:10:40
-F3_PYRAMID_FILL_SEC=10.0
 F4_REST_BACKUP_ENABLED=1
 F4_REST_ONLY_WHEN_WS_STALE=1
 F4_WS_STALE_SEC=2.0
@@ -262,13 +248,11 @@ KIS_LATENCY_SUMMARY_INTERVAL_SEC=60.0
 PAPER Fast Path 관측 범위와 다음 거래일 판정 기준은
 [`docs/PAPER_FAST_PATH_PROBE.md`](docs/PAPER_FAST_PATH_PROBE.md)를 참고하세요.
 
-`F2_RETRY_F1_ON_FAIL`은 모의투자(`PAPER`) 실험용으로 기본 예시에 활성화되어 있습니다. 실계좌(`REAL`) 코드 기본값은 비활성이지만, `.env`에 `F2_RETRY_F1_ON_FAIL=1`이 남아 있으면 명시적으로 켜지므로 REAL 전환 전에는 `0`으로 바꾸세요. F2에서 후보가 모두 제외되면 09:10 전까지만 F1을 다시 시도하며, 데드라인까지 `F2_RETRY_F1_MIN_REMAINING_SEC`보다 적게 남았거나 `DRY_RUN=1`이면 재시도하지 않습니다. 예약된 F2 시각도 09:10이므로 이 재시도는 주로 09:00 F1 직후 체이닝 경로에서 의미가 있습니다.
-
-`F3_LIMIT_BUY_ENABLED`의 코드 기본값은 활성(`1`)입니다. 지정가는 신선한 최종 1호 매도호가에 `F3_ASK_SLIPPAGE_RATIO`를 더한 가격과 전일 종가 대비 주문 갭 상한(6.5% 미만) 중 낮은 값을 사용합니다. 수량은 이 실제 제출 지정가와 주문가능현금을 기준으로 다시 제한합니다. 최종 1호 매도호가의 갭이 2.0~6.5% 범위를 벗어나면 주문하지 않습니다. 정상 지정가 체결은 제출가 이하로 체결되므로 7% 체결 가드는 레거시 시장가 경로나 거래소/API 대조 불변식 위반을 위한 방어 코드입니다. 재검증가 대비 최종 호가 상승률이 `F3_QUOTE_MOVE_WARN_PCT`를 넘으면 `ENTRY_QUOTE_MOVE_HIGH` WARN 로그를 남깁니다. `F3_FINAL_QUOTE_MAX_AGE_MS`를 직접 설정하지 않으면 PAPER는 1500ms, REAL은 500ms를 사용합니다. PAPER에서 1~1499ms를 지정하면 1.1초 REST 호출 간격과 충돌하지 않도록 유효값을 1500ms로 올리며, `0`은 신선도 가드 비활성 의미로 그대로 유지합니다. 공용 `.env` 예시는 PAPER 기준이므로 REAL 전환 시 더 엄격한 500ms를 원하면 명시적으로 변경하세요.
+F3 진입은 설정으로 해제할 수 없는 지정가 전용 경로입니다. 지정가는 신선한 최종 1호 매도호가에 `F3_ASK_SLIPPAGE_RATIO`를 더한 가격과 전일 종가 대비 주문 갭 상한(10% 미만) 중 낮은 값을 사용합니다. 수량은 이 실제 제출 지정가와 주문가능현금을 기준으로 다시 제한합니다. 실제 VI 발동 중이고 다른 후보가 있으면 즉시 후보를 교체하며, 단일 후보이면서 발동가가 갭 상한 미만일 때만 최대 `F3_VI_RELEASE_WAIT_SEC` 동안 기다린 뒤 최종 호가·갭을 다시 검증합니다. `FORCE_CATCHUP`은 라이브 진입 마감을 우회하지 않습니다. `F3_FINAL_QUOTE_MAX_AGE_MS`를 직접 설정하지 않으면 PAPER는 1500ms, REAL은 500ms를 사용합니다.
 
 > **설정 마이그레이션 — `F3_MAX_ENTRY_SLIPPAGE_RATIO` 제거됨**
 >
-> 재검증 기준가(09:00 스냅샷) 대비 슬리피지 상한이던 `F3_MAX_ENTRY_SLIPPAGE_RATIO`는 **이름이 바뀐 것이 아니라 삭제**되었습니다. 개장 직후 정상적인 호가 변동에도 `PRICE_CAP_EXCEEDED`로 진입이 거절되는 문제 때문입니다. 진입 상한은 이제 최종 매도호가 기준 `F3_ASK_SLIPPAGE_RATIO`와 전일 종가 대비 절대 갭 상한(6.5% 미만)이 담당합니다.
+> 재검증 기준가(09:00 스냅샷) 대비 슬리피지 상한이던 `F3_MAX_ENTRY_SLIPPAGE_RATIO`는 **이름이 바뀐 것이 아니라 삭제**되었습니다. 개장 직후 정상적인 호가 변동에도 `PRICE_CAP_EXCEEDED`로 진입이 거절되는 문제 때문입니다. 진입 상한은 이제 최종 매도호가 기준 `F3_ASK_SLIPPAGE_RATIO`와 전일 종가 대비 절대 갭 상한(10% 미만)이 담당합니다.
 >
 > 기존 `.env`에 이 값이 남아 있으면 **조용히 무시**되므로, 기동 시 `F3_ENV_REMOVED` WARN 로그를 남깁니다. 이 경고가 보이면 해당 줄을 삭제하세요.
 

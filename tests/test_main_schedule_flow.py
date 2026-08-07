@@ -220,7 +220,7 @@ async def test_daily_rollover_reconciles_stale_pending_entry_after_zero_balance(
     assert s.day_skip is False
 
 
-async def test_job_f1_runs_f3_without_force_before_f3_schedule(monkeypatch):
+async def test_job_f1_runs_f3_without_force(monkeypatch):
     async def fake_f2_run(candidates):
         assert candidates == [{"ticker": "005930"}]
         state_mod.get().target_ticker = "005930"
@@ -229,28 +229,12 @@ async def test_job_f1_runs_f3_without_force_before_f3_schedule(monkeypatch):
     monkeypatch.setattr(main.f1_filter, "run", AsyncMock(return_value=[{"ticker": "005930"}]))
     monkeypatch.setattr(main.f2_lockup, "run", fake_f2_run)
     monkeypatch.setattr(main.f3_entry, "run", f3_run)
-    monkeypatch.setattr(main, "_past_f3_schedule", lambda: False)
 
     await main.job_f1()
 
-    f3_run.assert_awaited_once_with(force=False)
+    f3_run.assert_awaited_once_with()
     assert main._f2_done is True
     assert main._f3_started is True
-
-
-async def test_job_f1_runs_f3_with_force_after_f3_schedule(monkeypatch):
-    async def fake_f2_run(_candidates):
-        state_mod.get().target_ticker = "005930"
-
-    f3_run = AsyncMock()
-    monkeypatch.setattr(main.f1_filter, "run", AsyncMock(return_value=[{"ticker": "005930"}]))
-    monkeypatch.setattr(main.f2_lockup, "run", fake_f2_run)
-    monkeypatch.setattr(main.f3_entry, "run", f3_run)
-    monkeypatch.setattr(main, "_past_f3_schedule", lambda: True)
-
-    await main.job_f1()
-
-    f3_run.assert_awaited_once_with(force=True)
 
 
 async def test_job_f1_bounds_probe_timeout_and_continues(monkeypatch):
@@ -280,8 +264,7 @@ async def test_job_f1_bounds_probe_timeout_and_continues(monkeypatch):
 
     main.f1_filter.run.assert_awaited_once()
     assert any(
-        event == "PAPER_FAST_PROBE_ERROR"
-        and fields.get("reason") == "TIMEOUT"
+        event == "PAPER_FAST_PROBE_ERROR" and fields.get("reason") == "TIMEOUT"
         for event, fields in events
     )
 
@@ -419,8 +402,7 @@ async def test_paper_fast_balance_prefetch_is_cancelled_before_open_guard(monkey
 
     assert cancelled.is_set()
     assert any(
-        event == "BALANCE_SNAPSHOT_ERROR"
-        and fields.get("reason") == "OPEN_GUARD_TIMEOUT"
+        event == "BALANCE_SNAPSHOT_ERROR" and fields.get("reason") == "OPEN_GUARD_TIMEOUT"
         for event, fields in events
     )
 
@@ -582,8 +564,6 @@ async def test_catchup_chains_f2_f3_before_scheduled_f2(monkeypatch):
         key = (hour, minute, second)
         if key == (main.F1_H, main.F1_M, 0):
             return now - timedelta(minutes=1)
-        if key == (main.F3_H, main.F3_M, main.F3_S):
-            return now + timedelta(minutes=8)
         if key == (main.F3_FILL_DEADLINE_H, main.F3_FILL_DEADLINE_M, 0):
             return now + timedelta(minutes=9)
         return now
@@ -605,7 +585,7 @@ async def test_catchup_chains_f2_f3_before_scheduled_f2(monkeypatch):
     await main._run_catchup()
 
     main.f1_filter.run.assert_awaited_once()
-    f3_run.assert_awaited_once_with(force=False)
+    f3_run.assert_awaited_once_with()
     assert main._f2_done is True
     assert main._f3_started is True
 
@@ -617,10 +597,12 @@ async def test_holiday_check_marks_market_closed_and_skips_jobs(monkeypatch):
     monkeypatch.setattr(
         main.kis_rest,
         "get",
-        AsyncMock(return_value={
-            "rt_cd": "0",
-            "output": [{"bass_dt": today, "opnd_yn": "N"}],
-        }),
+        AsyncMock(
+            return_value={
+                "rt_cd": "0",
+                "output": [{"bass_dt": today, "opnd_yn": "N"}],
+            }
+        ),
     )
     monkeypatch.setattr(main.notifier, "send", send)
     f1_run = AsyncMock()
@@ -682,10 +664,12 @@ async def test_holiday_check_open_day_keeps_jobs_running(monkeypatch):
     monkeypatch.setattr(
         main.kis_rest,
         "get",
-        AsyncMock(return_value={
-            "rt_cd": "0",
-            "output": [{"bass_dt": today, "opnd_yn": "Y"}],
-        }),
+        AsyncMock(
+            return_value={
+                "rt_cd": "0",
+                "output": [{"bass_dt": today, "opnd_yn": "Y"}],
+            }
+        ),
     )
     monkeypatch.setattr(main.notifier, "send", AsyncMock())
 
@@ -702,10 +686,12 @@ async def test_holiday_check_clears_flag_on_open_day_so_f5_runs(monkeypatch):
     monkeypatch.setattr(
         main.kis_rest,
         "get",
-        AsyncMock(return_value={
-            "rt_cd": "0",
-            "output": [{"bass_dt": today, "opnd_yn": "Y"}],
-        }),
+        AsyncMock(
+            return_value={
+                "rt_cd": "0",
+                "output": [{"bass_dt": today, "opnd_yn": "Y"}],
+            }
+        ),
     )
     main._market_closed_date = main._today()
 
@@ -726,10 +712,12 @@ async def test_holiday_check_does_not_duplicate_notification(monkeypatch):
     monkeypatch.setattr(
         main.kis_rest,
         "get",
-        AsyncMock(return_value={
-            "rt_cd": "0",
-            "output": [{"bass_dt": today, "opnd_yn": "N"}],
-        }),
+        AsyncMock(
+            return_value={
+                "rt_cd": "0",
+                "output": [{"bass_dt": today, "opnd_yn": "N"}],
+            }
+        ),
     )
     monkeypatch.setattr(main.notifier, "send", send)
 
@@ -746,10 +734,12 @@ async def test_holiday_check_fails_open_on_unexpected_opnd_yn(monkeypatch):
     monkeypatch.setattr(
         main.kis_rest,
         "get",
-        AsyncMock(return_value={
-            "rt_cd": "0",
-            "output": [{"bass_dt": today, "opnd_yn": None}],
-        }),
+        AsyncMock(
+            return_value={
+                "rt_cd": "0",
+                "output": [{"bass_dt": today, "opnd_yn": None}],
+            }
+        ),
     )
     monkeypatch.setattr(main.notifier, "send", AsyncMock())
 
@@ -825,6 +815,39 @@ async def test_catchup_skips_on_weekend(monkeypatch):
     assert main._f3_started is False
 
 
+async def test_force_catchup_cannot_expand_live_entry_window(monkeypatch):
+    now = main.datetime.now(main.KST)
+    events = []
+
+    def fake_scheduled_at(hour, minute, second=0):
+        if (hour, minute, second) == (main.F1_H, main.F1_M, 0):
+            return now - timedelta(minutes=30)
+        if (hour, minute, second) == (
+            main.F3_FILL_DEADLINE_H,
+            main.F3_FILL_DEADLINE_M,
+            0,
+        ):
+            return now - timedelta(minutes=20)
+        return now
+
+    monkeypatch.delenv("DRY_RUN", raising=False)
+    monkeypatch.setenv("FORCE_CATCHUP", "1")
+    monkeypatch.setattr(main, "_is_trading_weekday", lambda: True)
+    monkeypatch.setattr(main, "_scheduled_at", fake_scheduled_at)
+    monkeypatch.setattr(main.f1_filter, "run", AsyncMock())
+    monkeypatch.setattr(
+        main.logger,
+        "log",
+        lambda event, **kwargs: events.append((event, kwargs)),
+    )
+
+    await main._run_catchup()
+
+    main.f1_filter.run.assert_not_awaited()
+    blocked = [kwargs for event, kwargs in events if event == "FORCE_CATCHUP_BLOCKED"]
+    assert blocked[-1]["reason"] == "LIVE_ENTRY_DEADLINE_CANNOT_BE_OVERRIDDEN"
+
+
 async def test_catchup_with_empty_f1_result_skips_f2_f3(monkeypatch):
     now = main.datetime.now(main.KST)
 
@@ -832,8 +855,6 @@ async def test_catchup_with_empty_f1_result_skips_f2_f3(monkeypatch):
         key = (hour, minute, second)
         if key == (main.F1_H, main.F1_M, 0):
             return now - timedelta(minutes=1)
-        if key == (main.F3_H, main.F3_M, main.F3_S):
-            return now + timedelta(minutes=8)
         if key == (main.F3_FILL_DEADLINE_H, main.F3_FILL_DEADLINE_M, 0):
             return now + timedelta(minutes=9)
         return now
@@ -857,40 +878,21 @@ async def test_catchup_with_empty_f1_result_skips_f2_f3(monkeypatch):
     assert main._f3_started is False
 
 
-async def test_f2_failure_retries_f1_before_deadline(monkeypatch):
+async def test_f2_lockup_failure_is_not_wrapped_in_dead_f1_retry(monkeypatch):
     async def fake_f2_run(_candidates):
-        if fake_f2_run.calls == 0:
-            fake_f2_run.calls += 1
-            state_mod.get().day_skip = True
-            return
-        state_mod.get().target_ticker = "005930"
+        state_mod.get().day_skip = True
 
-    fake_f2_run.calls = 0
-    f3_run = AsyncMock()
-    sleep = AsyncMock()
-    send = AsyncMock()
     main._f1_result = [{"ticker": "VI_NEAR"}]
-
-    monkeypatch.setattr(main, "F2_RETRY_F1_ON_FAIL", True)
-    monkeypatch.setattr(main, "_before_f1_retry_deadline", lambda: True)
-    monkeypatch.setattr(main, "_f2_retry_remaining_seconds", lambda: 30)
-    monkeypatch.setattr(main, "_f2_retry_sleep_seconds", lambda: 1)
-    monkeypatch.setattr(main.asyncio, "sleep", sleep)
-    monkeypatch.setattr(main.f1_filter, "run", AsyncMock(return_value=[{"ticker": "005930"}]))
+    monkeypatch.setattr(main.f1_filter, "run", AsyncMock())
     monkeypatch.setattr(main.f2_lockup, "run", fake_f2_run)
-    monkeypatch.setattr(main.f3_entry, "run", f3_run)
-    monkeypatch.setattr(main.notifier, "send", send)
+    monkeypatch.setattr(main.f3_entry, "run", AsyncMock())
 
     await main._run_f2_f3_after_f1()
 
-    sleep.assert_awaited_once_with(1)
-    main.f1_filter.run.assert_awaited_once()
-    send.assert_awaited_once()
-    assert send.await_args.args[0] == "F2_FAIL_F1_RETRY"
-    f3_run.assert_awaited_once_with(force=False)
+    main.f1_filter.run.assert_not_awaited()
+    main.f3_entry.run.assert_not_awaited()
     assert main._f2_done is True
-    assert main._f3_started is True
-    assert state_mod.get().day_skip is False
+    assert state_mod.get().day_skip is True
 
 
 async def test_f2_f3_chain_executes_real_hybrid_fast_recheck_path(monkeypatch):
@@ -940,137 +942,6 @@ async def test_f2_f3_chain_executes_real_hybrid_fast_recheck_path(monkeypatch):
     assert main._f2_done is True
     assert main._f3_started is True
     assert state_mod.get().day_skip is False
-
-
-async def test_f2_failure_after_deadline_does_not_retry_f1(monkeypatch):
-    async def fake_f2_run(_candidates):
-        state_mod.get().day_skip = True
-
-    f3_run = AsyncMock()
-    main._f1_result = [{"ticker": "VI_NEAR"}]
-
-    monkeypatch.setattr(main, "F2_RETRY_F1_ON_FAIL", True)
-    monkeypatch.setattr(main, "_before_f1_retry_deadline", lambda: False)
-    monkeypatch.setattr(main.f1_filter, "run", AsyncMock())
-    monkeypatch.setattr(main.f2_lockup, "run", fake_f2_run)
-    monkeypatch.setattr(main.f3_entry, "run", f3_run)
-
-    await main._run_f2_f3_after_f1()
-
-    main.f1_filter.run.assert_not_awaited()
-    f3_run.assert_not_awaited()
-    assert main._f2_done is True
-    assert state_mod.get().day_skip is True
-
-
-async def test_f2_retry_marks_done_when_second_f1_finishes_with_day_skip(monkeypatch):
-    async def fake_f2_run(_candidates):
-        state_mod.get().day_skip = True
-
-    async def fake_f1_run():
-        state_mod.get().day_skip = True
-        return []
-
-    f3_run = AsyncMock()
-    sleep = AsyncMock()
-    send = AsyncMock()
-    main._f1_result = [{"ticker": "VI_NEAR"}]
-
-    monkeypatch.setattr(main, "F2_RETRY_F1_ON_FAIL", True)
-    monkeypatch.setattr(main, "_before_f1_retry_deadline", lambda: True)
-    monkeypatch.setattr(main, "_f2_retry_remaining_seconds", lambda: 30)
-    monkeypatch.setattr(main, "_f2_retry_sleep_seconds", lambda: 1)
-    monkeypatch.setattr(main.asyncio, "sleep", sleep)
-    monkeypatch.setattr(main.f1_filter, "run", AsyncMock(side_effect=fake_f1_run))
-    monkeypatch.setattr(main.f2_lockup, "run", fake_f2_run)
-    monkeypatch.setattr(main.f3_entry, "run", f3_run)
-    monkeypatch.setattr(main.notifier, "send", send)
-
-    await main._run_f2_f3_after_f1()
-
-    sleep.assert_awaited_once_with(1)
-    main.f1_filter.run.assert_awaited_once()
-    assert [call.args[0] for call in send.await_args_list] == [
-        "F2_FAIL_F1_RETRY",
-        "F2_RETRY_EXHAUSTED",
-    ]
-    f3_run.assert_not_awaited()
-    assert main._f1_result == []
-    assert main._f2_done is True
-    assert main._f3_started is False
-    assert state_mod.get().day_skip is True
-
-
-async def test_f2_retry_exhausted_sent_when_second_f2_cannot_retry_again(monkeypatch):
-    async def fake_f2_run(_candidates):
-        state_mod.get().day_skip = True
-
-    f3_run = AsyncMock()
-    sleep = AsyncMock()
-    send = AsyncMock()
-    main._f1_result = [{"ticker": "VI_NEAR"}]
-    retry_checks = iter([True, False])
-
-    monkeypatch.setattr(main, "F2_RETRY_F1_ON_FAIL", True)
-    monkeypatch.setattr(main, "_before_f1_retry_deadline", lambda: next(retry_checks))
-    monkeypatch.setattr(main, "_f2_retry_remaining_seconds", lambda: 30)
-    monkeypatch.setattr(main, "_f2_retry_sleep_seconds", lambda: 1)
-    monkeypatch.setattr(main.asyncio, "sleep", sleep)
-    monkeypatch.setattr(main.f1_filter, "run", AsyncMock(return_value=[{"ticker": "STILL_BAD"}]))
-    monkeypatch.setattr(main.f2_lockup, "run", fake_f2_run)
-    monkeypatch.setattr(main.f3_entry, "run", f3_run)
-    monkeypatch.setattr(main.notifier, "send", send)
-
-    await main._run_f2_f3_after_f1()
-
-    sleep.assert_awaited_once_with(1)
-    main.f1_filter.run.assert_awaited_once()
-    assert [call.args[0] for call in send.await_args_list] == [
-        "F2_FAIL_F1_RETRY",
-        "F2_RETRY_EXHAUSTED",
-    ]
-    f3_run.assert_not_awaited()
-    assert main._f2_done is True
-    assert main._f3_started is False
-    assert state_mod.get().day_skip is True
-
-
-async def test_f2_failure_does_not_retry_f1_when_deadline_is_too_close(monkeypatch):
-    async def fake_f2_run(_candidates):
-        state_mod.get().day_skip = True
-
-    main._f1_result = [{"ticker": "VI_NEAR"}]
-    monkeypatch.setattr(main, "F2_RETRY_F1_ON_FAIL", True)
-    monkeypatch.setattr(main, "F2_RETRY_F1_MIN_REMAINING_SEC", 2)
-    monkeypatch.setattr(main, "_before_f1_retry_deadline", lambda: True)
-    monkeypatch.setattr(main, "_f2_retry_remaining_seconds", lambda: 1)
-    monkeypatch.setattr(main.f1_filter, "run", AsyncMock())
-    monkeypatch.setattr(main.f2_lockup, "run", fake_f2_run)
-
-    await main._run_f2_f3_after_f1()
-
-    main.f1_filter.run.assert_not_awaited()
-    assert main._f2_done is True
-    assert state_mod.get().day_skip is True
-
-
-async def test_f2_failure_does_not_retry_f1_in_dry_run(monkeypatch):
-    async def fake_f2_run(_candidates):
-        state_mod.get().day_skip = True
-
-    main._f1_result = [{"ticker": "VI_NEAR"}]
-    monkeypatch.setenv("DRY_RUN", "1")
-    monkeypatch.setattr(main, "F2_RETRY_F1_ON_FAIL", True)
-    monkeypatch.setattr(main, "_before_f1_retry_deadline", lambda: True)
-    monkeypatch.setattr(main, "_f2_retry_remaining_seconds", lambda: 30)
-    monkeypatch.setattr(main.f1_filter, "run", AsyncMock())
-    monkeypatch.setattr(main.f2_lockup, "run", fake_f2_run)
-
-    await main._run_f2_f3_after_f1()
-
-    main.f1_filter.run.assert_not_awaited()
-    assert main._f2_done is True
-    assert state_mod.get().day_skip is True
 
 
 async def test_scheduled_f2_and_f3_do_not_duplicate_completed_chain(monkeypatch):
@@ -1166,18 +1037,20 @@ async def test_recover_state_uses_db_open_trade_when_state_file_missing(monkeypa
     monkeypatch.setattr(
         main.db,
         "get_trade_by_date",
-        AsyncMock(return_value={
-            "id": 77,
-            "date": today,
-            "ticker": "005930",
-            "name": "삼성전자",
-            "entry_price": 75000.0,
-            "entry_qty": 10,
-            "entry_at": "2026-07-02T09:01:00+09:00",
-            "high_price": 78000.0,
-            "highest_step": 0.05,
-            "status": "OPEN",
-        }),
+        AsyncMock(
+            return_value={
+                "id": 77,
+                "date": today,
+                "ticker": "005930",
+                "name": "삼성전자",
+                "entry_price": 75000.0,
+                "entry_qty": 10,
+                "entry_at": "2026-07-02T09:01:00+09:00",
+                "high_price": 78000.0,
+                "highest_step": 0.05,
+                "status": "OPEN",
+            }
+        ),
     )
     monkeypatch.setattr(main.state, "persist", persist)
     monkeypatch.setattr(
@@ -1281,13 +1154,15 @@ async def test_recover_state_exiting_blocks_automatic_rearm(monkeypatch):
 
 async def test_recover_state_terminal_state_file_skips_db_fallback(monkeypatch):
     events = []
-    get_trade = AsyncMock(return_value={
-        "id": 88,
-        "ticker": "005930",
-        "entry_price": 75000.0,
-        "entry_qty": 10,
-        "status": "OPEN",
-    })
+    get_trade = AsyncMock(
+        return_value={
+            "id": 88,
+            "ticker": "005930",
+            "entry_price": 75000.0,
+            "entry_qty": 10,
+            "status": "OPEN",
+        }
+    )
     today = main.datetime.now(main.KST).strftime("%Y%m%d")
     data = {
         "date": today,
@@ -1322,19 +1197,21 @@ async def test_recover_state_restores_closed_trade_when_state_file_missing(monke
     monkeypatch.setattr(
         main.db,
         "get_trade_by_date",
-        AsyncMock(return_value={
-            "id": 22,
-            "date": today,
-            "ticker": "439960",
-            "name": "코스모로보틱스",
-            "entry_price": 19_820.0,
-            "entry_qty": 376,
-            "entry_at": "2026-08-06T09:00:26+09:00",
-            "high_price": 21_350.0,
-            "highest_step": 0.075,
-            "close_reason": "TRAILING",
-            "status": "CLOSED",
-        }),
+        AsyncMock(
+            return_value={
+                "id": 22,
+                "date": today,
+                "ticker": "439960",
+                "name": "코스모로보틱스",
+                "entry_price": 19_820.0,
+                "entry_qty": 376,
+                "entry_at": "2026-08-06T09:00:26+09:00",
+                "high_price": 21_350.0,
+                "highest_step": 0.075,
+                "close_reason": "TRAILING",
+                "status": "CLOSED",
+            }
+        ),
     )
     monkeypatch.setattr(main.state, "persist", persist)
     monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
@@ -1357,18 +1234,20 @@ async def test_recover_state_db_open_trade_without_actual_holding_does_not_resto
     monkeypatch.setattr(
         main.db,
         "get_trade_by_date",
-        AsyncMock(return_value={
-            "id": 77,
-            "date": today,
-            "ticker": "005930",
-            "entry_price": 75000.0,
-            "entry_qty": 10,
-            "entry_at": "2026-07-02T09:01:00+09:00",
-            "high_price": 78000.0,
-            "highest_step": 0.05,
-            "pyramided": 0,
-            "status": "OPEN",
-        }),
+        AsyncMock(
+            return_value={
+                "id": 77,
+                "date": today,
+                "ticker": "005930",
+                "entry_price": 75000.0,
+                "entry_qty": 10,
+                "entry_at": "2026-07-02T09:01:00+09:00",
+                "high_price": 78000.0,
+                "highest_step": 0.05,
+                "pyramided": 0,
+                "status": "OPEN",
+            }
+        ),
     )
     monkeypatch.setattr(
         main.kis_rest,
@@ -1396,18 +1275,20 @@ async def test_recover_state_db_open_trade_uses_actual_holding_qty_for_pyramid(m
     monkeypatch.setattr(
         main.db,
         "get_trade_by_date",
-        AsyncMock(return_value={
-            "id": 77,
-            "date": today,
-            "ticker": "005930",
-            "entry_price": 75000.0,
-            "entry_qty": 70,
-            "entry_at": "2026-07-02T09:01:00+09:00",
-            "high_price": 78000.0,
-            "highest_step": 0.05,
-            "pyramided": 1,
-            "status": "OPEN",
-        }),
+        AsyncMock(
+            return_value={
+                "id": 77,
+                "date": today,
+                "ticker": "005930",
+                "entry_price": 75000.0,
+                "entry_qty": 70,
+                "entry_at": "2026-07-02T09:01:00+09:00",
+                "high_price": 78000.0,
+                "highest_step": 0.05,
+                "pyramided": 1,
+                "status": "OPEN",
+            }
+        ),
     )
     monkeypatch.setattr(
         main.kis_rest,
@@ -1450,27 +1331,31 @@ async def test_recover_state_keeps_total_entry_qty_separate_from_partial_exit_ba
     monkeypatch.setattr(
         main.db,
         "get_trade_by_date",
-        AsyncMock(return_value={
-            "id": 77,
-            "date": today,
-            "ticker": "005930",
-            "entry_price": 75_000.0,
-            "entry_qty": 100,
-            "confirmed_entry_qty": 100,
-            "entry_at": "2026-08-06T09:01:00+09:00",
-            "high_price": 78_000.0,
-            "highest_step": 0.05,
-            "pyramided": 0,
-            "status": "OPEN",
-        }),
+        AsyncMock(
+            return_value={
+                "id": 77,
+                "date": today,
+                "ticker": "005930",
+                "entry_price": 75_000.0,
+                "entry_qty": 100,
+                "confirmed_entry_qty": 100,
+                "entry_at": "2026-08-06T09:01:00+09:00",
+                "high_price": 78_000.0,
+                "highest_step": 0.05,
+                "pyramided": 0,
+                "status": "OPEN",
+            }
+        ),
     )
     monkeypatch.setattr(
         main.kis_rest,
         "get",
-        AsyncMock(return_value={
-            "rt_cd": "0",
-            "output1": [{"pdno": "005930", "hldg_qty": "40"}],
-        }),
+        AsyncMock(
+            return_value={
+                "rt_cd": "0",
+                "output1": [{"pdno": "005930", "hldg_qty": "40"}],
+            }
+        ),
     )
 
     async def merge_pending(data, _date):
@@ -1499,9 +1384,7 @@ async def test_recover_state_partial_exit_end_to_end_keeps_trade_open(
     send = AsyncMock()
     await main.db.init(":memory:")
     try:
-        trade_id = await main.db.open_trade(
-            today, "005930", 10_000.0, 100, "삼성전자"
-        )
+        trade_id = await main.db.open_trade(today, "005930", 10_000.0, 100, "삼성전자")
         buy_db_id = await main.db.record_order(
             trade_id,
             "BUY-E2E",
@@ -1541,25 +1424,29 @@ async def test_recover_state_partial_exit_end_to_end_keeps_trade_open(
         monkeypatch.setattr(
             main.kis_rest,
             "get",
-            AsyncMock(side_effect=[
-                {
-                    "rt_cd": "0",
-                    "output1": [{"pdno": "005930", "hldg_qty": "40"}],
-                },
-                {
-                    "rt_cd": "0",
-                    "output1": [{
-                        "odno": "SELL-E2E",
-                        "pdno": "005930",
-                        "ord_qty": "100",
-                        "ord_tmd": now.strftime("%H%M%S"),
-                        "sll_buy_dvsn_cd": "01",
-                        "tot_ccld_qty": "60",
-                        "rmn_qty": "40",
-                        "tot_ccld_amt": "588000",
-                    }],
-                },
-            ]),
+            AsyncMock(
+                side_effect=[
+                    {
+                        "rt_cd": "0",
+                        "output1": [{"pdno": "005930", "hldg_qty": "40"}],
+                    },
+                    {
+                        "rt_cd": "0",
+                        "output1": [
+                            {
+                                "odno": "SELL-E2E",
+                                "pdno": "005930",
+                                "ord_qty": "100",
+                                "ord_tmd": now.strftime("%H%M%S"),
+                                "sll_buy_dvsn_cd": "01",
+                                "tot_ccld_qty": "60",
+                                "rmn_qty": "40",
+                                "tot_ccld_amt": "588000",
+                            }
+                        ],
+                    },
+                ]
+            ),
         )
         monkeypatch.setattr(main.notifier, "send", send)
         monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
@@ -1574,10 +1461,7 @@ async def test_recover_state_partial_exit_end_to_end_keeps_trade_open(
         assert trade["status"] == "OPEN"
         assert trade["exit_qty"] is None
         assert trade["close_reason"] is None
-        assert any(
-            call.args[0] == "EXIT_ORDER_RECOVERY_PENDING"
-            for call in send.await_args_list
-        )
+        assert any(call.args[0] == "EXIT_ORDER_RECOVERY_PENDING" for call in send.await_args_list)
     finally:
         s = state_mod.get()
         s.position_status = "IDLE"
@@ -1599,18 +1483,20 @@ async def test_recover_state_idle_state_without_qty_allows_db_fallback(monkeypat
     monkeypatch.setattr(
         main.db,
         "get_trade_by_date",
-        AsyncMock(return_value={
-            "id": 77,
-            "date": today,
-            "ticker": "005930",
-            "entry_price": 75000.0,
-            "entry_qty": 10,
-            "entry_at": "2026-07-02T09:01:00+09:00",
-            "high_price": 78000.0,
-            "highest_step": 0.05,
-            "pyramided": 0,
-            "status": "OPEN",
-        }),
+        AsyncMock(
+            return_value={
+                "id": 77,
+                "date": today,
+                "ticker": "005930",
+                "entry_price": 75000.0,
+                "entry_qty": 10,
+                "entry_at": "2026-07-02T09:01:00+09:00",
+                "high_price": 78000.0,
+                "highest_step": 0.05,
+                "pyramided": 0,
+                "status": "OPEN",
+            }
+        ),
     )
     monkeypatch.setattr(
         main.kis_rest,
@@ -1626,6 +1512,7 @@ async def test_recover_state_idle_state_without_qty_allows_db_fallback(monkeypat
     assert state_mod.get().position_status == "HOLDING"
     assert state_mod.get().remaining_qty == 10
     persist.assert_awaited_once()
+
 
 async def test_recover_state_stale_state_file_allows_today_db_fallback(monkeypatch):
     send = AsyncMock()
@@ -1643,18 +1530,20 @@ async def test_recover_state_stale_state_file_allows_today_db_fallback(monkeypat
     monkeypatch.setattr(
         main.db,
         "get_trade_by_date",
-        AsyncMock(return_value={
-            "id": 77,
-            "date": today,
-            "ticker": "005930",
-            "entry_price": 75000.0,
-            "entry_qty": 10,
-            "entry_at": "2026-07-02T09:01:00+09:00",
-            "high_price": 78000.0,
-            "highest_step": 0.05,
-            "pyramided": 0,
-            "status": "OPEN",
-        }),
+        AsyncMock(
+            return_value={
+                "id": 77,
+                "date": today,
+                "ticker": "005930",
+                "entry_price": 75000.0,
+                "entry_qty": 10,
+                "entry_at": "2026-07-02T09:01:00+09:00",
+                "high_price": 78000.0,
+                "highest_step": 0.05,
+                "pyramided": 0,
+                "status": "OPEN",
+            }
+        ),
     )
     monkeypatch.setattr(
         main.kis_rest,
@@ -1673,6 +1562,7 @@ async def test_recover_state_stale_state_file_allows_today_db_fallback(monkeypat
     assert send.await_args_list[0].args[0] == "STALE_ACTIVE_RECONCILED"
     assert send.await_args_list[1].args[0] == "PROCESS_RESTART_DETECTED"
     persist.assert_awaited_once()
+
 
 async def test_recover_state_stale_holding_blocks_todays_entry(monkeypatch):
     """전일 상태가 HOLDING이면 계좌 확인 전까지 당일 자동 진입을 차단한다."""
@@ -1730,20 +1620,22 @@ async def test_recover_state_stale_entering_zero_balance_is_reconciled(monkeypat
 
 
 async def test_verified_holding_qty_follows_balance_continuation(monkeypatch):
-    get = AsyncMock(side_effect=[
-        {
-            "rt_cd": "0",
-            "output1": [{"pdno": "005930", "hldg_qty": "1"}],
-            "ctx_area_fk100": "NEXT_FK",
-            "ctx_area_nk100": "NEXT_NK",
-            "_response_meta": {"tr_cont": "M"},
-        },
-        {
-            "rt_cd": "0",
-            "output1": [{"pdno": "006340", "hldg_qty": "7"}],
-            "_response_meta": {"tr_cont": ""},
-        },
-    ])
+    get = AsyncMock(
+        side_effect=[
+            {
+                "rt_cd": "0",
+                "output1": [{"pdno": "005930", "hldg_qty": "1"}],
+                "ctx_area_fk100": "NEXT_FK",
+                "ctx_area_nk100": "NEXT_NK",
+                "_response_meta": {"tr_cont": "M"},
+            },
+            {
+                "rt_cd": "0",
+                "output1": [{"pdno": "006340", "hldg_qty": "7"}],
+                "_response_meta": {"tr_cont": ""},
+            },
+        ]
+    )
     monkeypatch.setattr(main.kis_rest, "get", get)
     monkeypatch.setattr(main.notifier, "send", AsyncMock())
     monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
@@ -1764,13 +1656,15 @@ async def test_verified_holding_qty_fails_safe_on_invalid_continuation(monkeypat
     monkeypatch.setattr(
         main.kis_rest,
         "get",
-        AsyncMock(return_value={
-            "rt_cd": "0",
-            "output1": [],
-            "ctx_area_fk100": "",
-            "ctx_area_nk100": "",
-            "_response_meta": {"tr_cont": "M"},
-        }),
+        AsyncMock(
+            return_value={
+                "rt_cd": "0",
+                "output1": [],
+                "ctx_area_fk100": "",
+                "ctx_area_nk100": "",
+                "_response_meta": {"tr_cont": "M"},
+            }
+        ),
     )
     monkeypatch.setattr(main.notifier, "send", send)
     monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
@@ -1806,10 +1700,12 @@ async def test_verified_holding_qty_fails_safe_on_invalid_target_qty(
     monkeypatch.setattr(
         main.kis_rest,
         "get",
-        AsyncMock(return_value={
-            "rt_cd": "0",
-            "output1": [{"pdno": "006340", "hldg_qty": invalid_qty}],
-        }),
+        AsyncMock(
+            return_value={
+                "rt_cd": "0",
+                "output1": [{"pdno": "006340", "hldg_qty": invalid_qty}],
+            }
+        ),
     )
     monkeypatch.setattr(main.notifier, "send", send)
     monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
@@ -1835,9 +1731,7 @@ async def test_recover_state_stale_closed_discards_silently(monkeypatch):
     monkeypatch.setattr(main.state, "discard", discard, raising=False)
     monkeypatch.setattr(main.db, "get_trade_by_date", AsyncMock(return_value=None))
     monkeypatch.setattr(main.notifier, "send", send)
-    monkeypatch.setattr(
-        main.logger, "log", lambda event, **kwargs: events.append((event, kwargs))
-    )
+    monkeypatch.setattr(main.logger, "log", lambda event, **kwargs: events.append((event, kwargs)))
 
     await main._recover_state()
 
@@ -1943,15 +1837,12 @@ async def test_recover_state_backup_failure_logs_crit_and_continues(monkeypatch)
     monkeypatch.setattr(main, "_verified_holding_qty", AsyncMock(return_value=None))
     monkeypatch.setattr(main.db, "get_trade_by_date", AsyncMock(return_value=None))
     monkeypatch.setattr(main.notifier, "send", send)
-    monkeypatch.setattr(
-        main.logger, "log", lambda event, **kwargs: events.append((event, kwargs))
-    )
+    monkeypatch.setattr(main.logger, "log", lambda event, **kwargs: events.append((event, kwargs)))
 
     await main._recover_state()
 
     assert any(
-        event == "STALE_BACKUP_FAILED" and kwargs.get("level") == "CRIT"
-        for event, kwargs in events
+        event == "STALE_BACKUP_FAILED" and kwargs.get("level") == "CRIT" for event, kwargs in events
     )
     assert state_mod.get().day_skip is True
     assert send.await_args_list[0].args[0] == "STALE_POSITION_DETECTED"
@@ -1975,18 +1866,20 @@ async def test_recover_state_stale_unknown_with_db_open_backs_up_before_persist(
     monkeypatch.setattr(
         main.db,
         "get_trade_by_date",
-        AsyncMock(return_value={
-            "id": 77,
-            "date": today,
-            "ticker": "005930",
-            "entry_price": 75000.0,
-            "entry_qty": 10,
-            "entry_at": "2026-07-02T09:01:00+09:00",
-            "high_price": 78000.0,
-            "highest_step": 0.05,
-            "pyramided": 0,
-            "status": "OPEN",
-        }),
+        AsyncMock(
+            return_value={
+                "id": 77,
+                "date": today,
+                "ticker": "005930",
+                "entry_price": 75000.0,
+                "entry_qty": 10,
+                "entry_at": "2026-07-02T09:01:00+09:00",
+                "high_price": 78000.0,
+                "highest_step": 0.05,
+                "pyramided": 0,
+                "status": "OPEN",
+            }
+        ),
     )
     monkeypatch.setattr(
         main.kis_rest,
@@ -2040,8 +1933,11 @@ async def test_recover_state_holding_state_rt_cd_error_sends_alert_and_skips_res
     assert state_mod.get().position_status == "IDLE"
     send.assert_awaited_once()
     assert send.await_args.args[0] == "PROCESS_RESTART_DETECTED"
-    statuses = [kwargs.get("recovered_status")
-                for event, kwargs in events if event == "PROCESS_RESTART_DETECTED"]
+    statuses = [
+        kwargs.get("recovered_status")
+        for event, kwargs in events
+        if event == "PROCESS_RESTART_DETECTED"
+    ]
     assert "HOLDING_VERIFY_FAILED" in statuses
     assert "HOLDING_VERIFY_FAILED_SKIP_RESTORE" in statuses
 
@@ -2056,18 +1952,20 @@ async def test_recover_state_db_open_trade_rt_cd_error_sends_alert_and_skips_res
     monkeypatch.setattr(
         main.db,
         "get_trade_by_date",
-        AsyncMock(return_value={
-            "id": 77,
-            "date": today,
-            "ticker": "005930",
-            "entry_price": 75000.0,
-            "entry_qty": 10,
-            "entry_at": "2026-07-02T09:01:00+09:00",
-            "high_price": 78000.0,
-            "highest_step": 0.05,
-            "pyramided": 0,
-            "status": "OPEN",
-        }),
+        AsyncMock(
+            return_value={
+                "id": 77,
+                "date": today,
+                "ticker": "005930",
+                "entry_price": 75000.0,
+                "entry_qty": 10,
+                "entry_at": "2026-07-02T09:01:00+09:00",
+                "high_price": 78000.0,
+                "highest_step": 0.05,
+                "pyramided": 0,
+                "status": "OPEN",
+            }
+        ),
     )
     monkeypatch.setattr(
         main.kis_rest,
@@ -2084,8 +1982,11 @@ async def test_recover_state_db_open_trade_rt_cd_error_sends_alert_and_skips_res
     persist.assert_not_awaited()
     send.assert_awaited()
     assert send.await_args_list[0].args[0] == "PROCESS_RESTART_DETECTED"
-    statuses = [kwargs.get("recovered_status")
-                for event, kwargs in events if event == "PROCESS_RESTART_DETECTED"]
+    statuses = [
+        kwargs.get("recovered_status")
+        for event, kwargs in events
+        if event == "PROCESS_RESTART_DETECTED"
+    ]
     assert "HOLDING_VERIFY_FAILED" in statuses
     assert "DB_OPEN_TRADE_NO_ACTUAL_HOLDING" in statuses
 
@@ -2111,7 +2012,8 @@ async def test_catchup_skips_f1_f2_f3_when_today_trade_exists(monkeypatch):
     monkeypatch.setattr(main, "_is_trading_weekday", lambda: True)
     monkeypatch.setattr(main, "_scheduled_at", fake_scheduled_at)
     monkeypatch.setattr(
-        main.db, "get_trade_by_date", AsyncMock(return_value={"id": 7, "ticker": "365660"}))
+        main.db, "get_trade_by_date", AsyncMock(return_value={"id": 7, "ticker": "365660"})
+    )
     monkeypatch.setattr(main.f1_filter, "run", f1_run)
     monkeypatch.setattr(main.f2_lockup, "run", f2_run)
     monkeypatch.setattr(main.f3_entry, "run", f3_run)
@@ -2131,7 +2033,8 @@ async def test_catchup_skips_f1_f2_f3_when_today_trade_exists(monkeypatch):
 async def test_job_f1_skips_when_today_trade_exists(monkeypatch):
     f1_run = AsyncMock(return_value=[{"ticker": "005930"}])
     monkeypatch.setattr(
-        main.db, "get_trade_by_date", AsyncMock(return_value={"id": 7, "ticker": "365660"}))
+        main.db, "get_trade_by_date", AsyncMock(return_value={"id": 7, "ticker": "365660"})
+    )
     monkeypatch.setattr(main.f1_filter, "run", f1_run)
     monkeypatch.setattr(main.f3_entry, "run", AsyncMock())
 
@@ -2225,14 +2128,18 @@ async def test_main_keeps_runtime_alive_when_restart_reconciliation_fails(monkey
     monkeypatch.setattr(main, "_clear_pid", lambda: None)
     monkeypatch.setattr(main.db, "init", AsyncMock())
     monkeypatch.setattr(main.db, "close", AsyncMock())
-    monkeypatch.setattr(main.state, "load", lambda _state_dir: {
-        "date": main.datetime.now(main.KST).strftime("%Y%m%d"),
-        "ticker": "005930",
-        "entry_price": 75_000.0,
-        "entry_qty": 10,
-        "remaining_qty": 10,
-        "position_status": "HOLDING",
-    })
+    monkeypatch.setattr(
+        main.state,
+        "load",
+        lambda _state_dir: {
+            "date": main.datetime.now(main.KST).strftime("%Y%m%d"),
+            "ticker": "005930",
+            "entry_price": 75_000.0,
+            "entry_qty": 10,
+            "remaining_qty": 10,
+            "position_status": "HOLDING",
+        },
+    )
     monkeypatch.setattr(main, "_recover_state", failing_recovery)
     monkeypatch.setattr(main, "_run_catchup", AsyncMock())
     monkeypatch.setattr(main.f4_tracking, "run_forever", fake_run_forever)
@@ -2269,11 +2176,13 @@ async def test_main_blocks_real_below_readiness_100(monkeypatch):
     monkeypatch.setattr(
         main.readiness,
         "calculate",
-        AsyncMock(return_value={
-            "percent": 99.0,
-            "eligible_for_real": False,
-            "blockers": ["PAPER evidence"],
-        }),
+        AsyncMock(
+            return_value={
+                "percent": 99.0,
+                "eligible_for_real": False,
+                "blockers": ["PAPER evidence"],
+            }
+        ),
     )
     main.live.real_entry_enabled = True
 

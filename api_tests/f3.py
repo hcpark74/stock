@@ -4,8 +4,9 @@
   python api_tests/f3.py              # 예상체결가 + 예수금 조회
 
 실제 주문 포함 (주의):
-  python api_tests/f3.py --confirm    # force=True 모드 — 시장가 매수 발생!
+  python api_tests/f3.py --confirm    # 운영과 동일한 갭 상한 지정가 매수
 """
+
 import asyncio
 import sys
 from pathlib import Path
@@ -13,12 +14,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import api_tests._helper as h
 
-TICKER = "005930"   # 삼성전자
+TICKER = "005930"  # 삼성전자
 
 
 async def run(confirm: bool = False) -> bool:
-    h.header(f"F3. 진입 주문  ticker={TICKER}"
-             + ("  [!] --confirm 활성화" if confirm else ""))
+    h.header(f"F3. 진입 주문  ticker={TICKER}" + ("  [!] --confirm 활성화" if confirm else ""))
 
     import src.modules.f3_entry as mod
     from src import db, state
@@ -36,8 +36,10 @@ async def run(confirm: bool = False) -> bool:
         return False
 
     gap = (expected / prev_close - 1) * 100 if prev_close else 0.0
-    print(f"  [{TICKER}]  expected={expected:>8,.0f}원"
-          f"  prev_close={prev_close:>8,.0f}원  gap={gap:+.2f}%")
+    print(
+        f"  [{TICKER}]  expected={expected:>8,.0f}원"
+        f"  prev_close={prev_close:>8,.0f}원  gap={gap:+.2f}%"
+    )
     if expected <= 0:
         h.fail("_fetch_expected_price", "expected_price=0")
         return False
@@ -54,10 +56,12 @@ async def run(confirm: bool = False) -> bool:
         return False
 
     alloc = int(cash * mod.ALLOC_RATIO)
-    qty   = int(alloc / expected) if expected > 0 else 0
-    print(f"  예수금={cash:>12,.0f}원"
-          f"  배분({mod.ALLOC_RATIO*100:.0f}%)={alloc:>10,.0f}원"
-          f"  가능수량={qty}주")
+    qty = int(alloc / expected) if expected > 0 else 0
+    print(
+        f"  예수금={cash:>12,.0f}원"
+        f"  배분({mod.ALLOC_RATIO*100:.0f}%)={alloc:>10,.0f}원"
+        f"  가능수량={qty}주"
+    )
     if cash < 0:
         h.fail("_fetch_available_cash", "cash<0")
         return False
@@ -68,7 +72,7 @@ async def run(confirm: bool = False) -> bool:
         print("\n  전체 run() 스킵 (--confirm 없음)")
         return True
 
-    print(f"\n  [!] force=True 모드 — {TICKER} 시장가 매수 주문 발생!")
+    print(f"\n  [!] 운영 모드 — {TICKER} 갭 상한 지정가 매수 주문 발생!")
     if qty == 0:
         print("  수량=0 (예수금 부족) — 주문 생략")
         return True
@@ -82,7 +86,7 @@ async def run(confirm: bool = False) -> bool:
     s.position_status = "IDLE"
 
     try:
-        await mod.run(force=True)
+        await mod.run()
     except Exception as e:
         h.fail("f3_entry.run", repr(e))
         return False

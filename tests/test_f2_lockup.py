@@ -1,10 +1,10 @@
-"""F2 VI 필터 + 복합 정렬 유닛 테스트."""
+"""F2 후보 정렬·락업 유닛 테스트."""
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from src import state as _state_mod
-from src.modules.f2_lockup import VI_GAP_MIN, run
+from src.modules.f2_lockup import run
 
 # ── 헬퍼 ──────────────────────────────────────────────────────────────
 
@@ -32,14 +32,6 @@ async def _run(candidates: list[dict]) -> None:
         await run(candidates)
 
 
-# ── VI 이격 계산 근거 ──────────────────────────────────────────────────
-# static_vi_upper = prev_close * 1.10
-# vi_gap = (static_vi_upper - expected_price) / expected_price
-# gap=5%  → vi_gap = (11000-10500)/10500 ≈ 0.0476 ≥ 0.03  ✓
-# gap=6.8%→ vi_gap = (11000-10680)/10680 ≈ 0.0300 ≥ 0.03  ✓ (경계)
-# gap=6.85%→vi_gap = (11000-10685)/10685 ≈ 0.0296 < 0.03  ✗
-
-
 # ── 픽스처 ────────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
@@ -54,52 +46,48 @@ def clean_state():
     s.target_candidates = None
 
 
-# ── VI 이격 필터 ──────────────────────────────────────────────────────
+# ── VI 근접 후보 유지 ─────────────────────────────────────────────────
 
 async def test_vi_safe_candidate_locked():
-    """VI 이격 충분(5% 갭) → 타겟 확정."""
+    """일반 갭 후보를 타겟으로 확정한다."""
     await _run([_candidate("005930", gap_pct=0.05)])
     assert _state_mod.get().target_ticker == "005930"
 
 
-async def test_vi_near_candidate_excluded():
-    """VI 근접(6.85% 갭) → 제외, day_skip=True."""
-    await _run([_candidate("VI_NEAR", gap_pct=0.0685)])
+async def test_vi_near_candidate_is_kept_for_f3_runtime_check():
+    """정적 VI 가격 근접은 F2 탈락 사유가 아니다."""
+    await _run([_candidate("VI_NEAR", gap_pct=0.09)])
     s = _state_mod.get()
-    assert s.day_skip is True
-    assert s.target_ticker is None
+    assert s.day_skip is False
+    assert s.target_ticker == "VI_NEAR"
 
 
-async def test_vi_gap_exactly_at_min():
-    """VI 이격이 정확히 VI_GAP_MIN(3%) → 통과 (>= 조건)."""
-    # gap=6.796...% 일 때 vi_gap ≈ 0.03
-    # (11000 - ep) / ep = 0.03 → ep = 11000/1.03 ≈ 10679.6
-    # gap = (10679.6 - 10000) / 10000 ≈ 0.06796
-    # vi_gap = (11000 - 10679.6) / 10679.6 ≈ 0.030 (통과)
-    prev_close = 10_000.0
-    ep = 11_000.0 / (1 + VI_GAP_MIN)  # 정확히 vi_gap=0.03
-    gap_pct = (ep - prev_close) / prev_close
+async def test_hanwha_20260807_candidate_is_kept_without_static_vi_rejection():
+    """당시 한화솔루션의 1.487% VI 이격은 F2 후보로 유지한다."""
     cand = {
-        "ticker": "VIEDGE",
-        "expected_price": ep,
-        "prev_close": prev_close,
-        "gap_pct": gap_pct,
-        "expected_amount": 1e12,
-        "buy_sell_ratio": 1.0,
-        "avg_amount_5d": 1e12,
+        "ticker": "009830",
+        "name": "한화솔루션",
+        "expected_price": 32_950.0,
+        "prev_close": 30_400.0,
+        "gap_pct": 0.0839,
+        "f1_score": 61.4641,
+        "expected_amount": 6_323_731_050.0,
+        "buy_sell_ratio": 0.0,
     }
+
     await _run([cand])
-    assert _state_mod.get().target_ticker == "VIEDGE"
+
+    assert _state_mod.get().target_ticker == "009830"
 
 
-async def test_all_vi_near_day_skip():
-    """전 종목 VI 근접 → day_skip=True."""
+async def test_vi_near_candidates_preserve_ranking():
+    """VI 근접 후보끼리도 원래 점수·거래대금 순위를 유지한다."""
     candidates = [
-        _candidate("A", gap_pct=0.09),  # 9% — too near VI (10%)
-        _candidate("B", gap_pct=0.085),
+        _candidate("A", gap_pct=0.09, expected_amount=2e12),
+        _candidate("B", gap_pct=0.095, expected_amount=1e12),
     ]
     await _run(candidates)
-    assert _state_mod.get().day_skip is True
+    assert _state_mod.get().target_ticker == "A"
 
 
 # ── 복합 정렬 ─────────────────────────────────────────────────────────
@@ -150,15 +138,15 @@ async def test_f1_score_takes_priority_when_present():
     assert _state_mod.get().target_ticker == "HIGH_SCORE"
 
 
-async def test_vi_filter_then_sort():
-    """VI 필터 후 남은 종목 중 가장 높은 거래대금 선정."""
+async def test_sort_does_not_penalize_near_vi_candidate():
+    """VI 근접이어도 원래 정렬 1위면 그대로 선택한다."""
     candidates = [
-        _candidate("NEAR_VI",  gap_pct=0.09, expected_amount=9e12),   # 제외
+        _candidate("NEAR_VI",  gap_pct=0.09, expected_amount=9e12),
         _candidate("SAFE_LOW",  gap_pct=0.05, expected_amount=1e11),
         _candidate("SAFE_HIGH", gap_pct=0.05, expected_amount=5e11),
     ]
     await _run(candidates)
-    assert _state_mod.get().target_ticker == "SAFE_HIGH"
+    assert _state_mod.get().target_ticker == "NEAR_VI"
 
 
 # ── 엣지 케이스 ───────────────────────────────────────────────────────
@@ -178,9 +166,9 @@ async def test_day_skip_returns_early():
     assert _state_mod.get().target_ticker is None
 
 
-async def test_missing_prev_close_excluded():
-    """prev_close=0 종목 → VI 계산 불가, 제외."""
+async def test_missing_prev_close_is_deferred_to_f3_recheck():
+    """시세 불완전 여부는 최신 데이터를 조회하는 F3가 판단한다."""
     cand = _candidate("BAD", gap_pct=0.05)
     cand["prev_close"] = 0.0
     await _run([cand])
-    assert _state_mod.get().day_skip is True
+    assert _state_mod.get().target_ticker == "BAD"

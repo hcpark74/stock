@@ -48,8 +48,8 @@ def test_improve_empty_rows_returns_zero_structure():
     assert payload["params"]["step_size_pct"] == 2.5
     assert payload["params"]["step_trail_pct"] == 1.5
     assert payload["params"]["hard_stop_pct"] == 2.0
-    assert payload["params"]["gap_max_order_pct"] == 6.5
-    assert payload["params"]["gap_max_fill_pct"] == 7.0
+    assert payload["params"]["gap_max_order_pct"] == 10.0
+    assert payload["params"]["gap_max_fill_pct"] == 10.0
     # 시각은 schedule_times/f4_tracking이 단일 출처 — 리터럴로 고정하지 않는다.
     assert payload["params"]["timeout_time"] == f"{F5_EXEC_H:02d}:{F5_EXEC_M:02d}"
     assert payload["params"]["force_trailing_time"] == (

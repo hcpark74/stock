@@ -84,7 +84,6 @@ HOLDING -> EXITING -> CLOSED
 - `DRY_RUN=0`
 - `KIS_MODE=REAL`
 - 실전 REST/WebSocket URL과 실전 키·계좌번호 사용
-- `F2_RETRY_F1_ON_FAIL=0`
 - 초기에는 `F3_ALLOC_RATIO`를 낮춰 최소 위험금액으로 시작
 - Telegram CRIT 알림 실수신 확인
 - `FIRST_RATIO=1.00` 유지

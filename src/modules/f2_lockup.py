@@ -3,13 +3,15 @@
 from src import notifier, state
 from src.utils.logger import log
 
-VI_GAP_MIN = 0.03   # 정적 VI 상단까지 최소 이격 3%
 F2_MAX_TARGET_CANDIDATES = 3
 
 
 async def run(candidates: list[dict]) -> None:
     """
-    복합 정렬 → VI 필터 → 1위 종목 타겟 락업.
+    복합 정렬 → 상위 종목 타겟 락업.
+
+    F1을 통과한 강한 모멘텀 후보를 정적 VI 가격과 가깝다는 이유로 다시
+    제거하지 않는다. 실제 VI 발동 여부와 주문 가능 시점은 F3가 확인한다.
     candidates: F1 통과 종목 리스트.
     """
     s = state.get()
@@ -30,29 +32,8 @@ async def run(candidates: list[dict]) -> None:
         reverse=True,
     )
 
-    # ── VI 근접 종목 제외 (PRD §F2) ──────────────────────────────────
-    vi_filtered: list[dict] = []
-    for c in sorted_list:
-        expected_price = c.get("expected_price", 0.0)
-        prev_close = c.get("prev_close", 0.0)
-        if not prev_close or not expected_price:
-            continue
-        static_vi_upper = prev_close * 1.10
-        vi_gap = (static_vi_upper - expected_price) / expected_price
-        if vi_gap >= VI_GAP_MIN:
-            vi_filtered.append(c)
-
-    if not vi_filtered:
-        log("VI_FILTER_ALL_EXCLUDED", level="INFO", filter_count=0, reason="ALL_VI_NEAR")
-        await notifier.send(
-            "VI_FILTER_ALL_EXCLUDED", level="WARN",
-            message="VI 필터로 전 종목 제외. 거래 스킵.",
-        )
-        s.day_skip = True
-        return
-
     # ── 락업 ─────────────────────────────────────────────────────────
-    locked_candidates = vi_filtered[:F2_MAX_TARGET_CANDIDATES]
+    locked_candidates = sorted_list[:F2_MAX_TARGET_CANDIDATES]
     target = locked_candidates[0]
     s.target_ticker = target["ticker"]
     s.target_name = target.get("name")

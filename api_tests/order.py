@@ -97,6 +97,8 @@ async def run(confirm: bool = False) -> bool:
         print("  실행: python api_tests/order.py --confirm")
         return True   # skip ≠ fail
 
+    h.setup_logging()
+
     from src.api import auth
 
     if not await auth.load_or_refresh():

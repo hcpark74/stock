@@ -20,6 +20,13 @@ if os.getenv("STOCK_SKIP_DOTENV", "0") != "1":
     load_dotenv(_ROOT / ".env")
 
 
+def setup_logging() -> None:
+    """Standalone API smoke evidence is persisted under the configured log dir."""
+    from src.utils import logger
+
+    logger.setup(os.getenv("LOG_DIR", str(_ROOT / "data" / "logs")))
+
+
 def mode() -> str:
     return os.getenv("KIS_MODE", "PAPER")
 

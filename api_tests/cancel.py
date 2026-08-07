@@ -35,6 +35,8 @@ async def run(confirm: bool = False) -> bool:
         print("  실행: python api_tests/cancel.py --confirm")
         return True
 
+    h.setup_logging()
+
     from src.api import auth, kis_rest
 
     if not await auth.load_or_refresh():

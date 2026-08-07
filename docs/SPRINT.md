@@ -274,7 +274,7 @@ Sprint 5     ████████████████████  완�
 - [x] `/api/status`에 `pipeline_stage`, `pipeline_failed` 추가
 - [x] 하단 파이프라인이 현재 상태뿐 아니라 오늘 로그 기준 진행 단계도 반영
 - [x] `ENTRY_FAIL` 후 `IDLE`로 돌아가도 F3 실패 단계가 유지되도록 수정
-- [x] F1 후보 표에 `HIGH_GAP_VI_UNKNOWN` 표시 추가
+- [x] F1 후보 표에 현재 고갭 제외 사유(`HIGH_GAP_REJECTED`) 표시 추가
 
 ### Telegram 알림
 
@@ -302,7 +302,7 @@ Sprint 5     ████████████████████  완�
 
 - [x] 09:00 이후 F3 체결 확인 마감 전 재시작 시 F1 보완 실행
 - [x] catch-up F1 결과가 나오면 예약 F2 시각을 기다리지 않고 F2/F3 즉시 체인
-- [x] F3 예정 시각 이후 catch-up은 `force=True`로 내부 시각 대기 생략
+- [x] F3 catch-up도 일반 진입 마감과 동일한 제한을 적용
 - [x] F1 결과 없음/즉시 체인 경로 회귀 테스트 추가
 
 ### Web UI

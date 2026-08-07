@@ -10,6 +10,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 _STRATEGY_FILES = (
     "main.py",
     "src/state.py",
+    "src/live.py",
     "src/db.py",
     "src/api/kis_rest.py",
     "src/api/kis_ws.py",

@@ -2,7 +2,7 @@
 
 Flow:
 1. Select a target through F1/F2.
-2. Buy exactly 1 share at market.
+2. Buy exactly 1 share with the production gap-capped limit policy.
 3. Poll fill.
 4. Sell exactly the filled quantity at market.
 
@@ -10,6 +10,7 @@ This script refuses to run outside KIS_MODE=PAPER.
 """
 
 import asyncio
+import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -39,8 +40,10 @@ async def run() -> bool:
         h.fail("mode guard", f"KIS_MODE={h.mode()}")
         return False
 
-    logger.setup("data/logs")
-    await db.init("data/db/trading.db")
+    logger.setup(os.getenv("LOG_DIR", "data/logs"))
+    db_path = Path(os.getenv("DB_DIR", "data/db")) / "trading.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    await db.init(str(db_path))
 
     if not await auth.load_or_refresh():
         h.fail("token")
@@ -65,19 +68,51 @@ async def run() -> bool:
         return False
     h.ok("f2", f"target={ticker}")
 
+    expected_price, prev_close = await f3_entry._fetch_expected_price(ticker)
+    quote = await f3_entry._fetch_final_entry_quote(ticker)
+    if (
+        expected_price <= 0
+        or prev_close <= 0
+        or quote is None
+        or not f3_entry._quote_is_fresh(quote)
+        or not f3_entry._gap_in_order_range(quote.ask_price / prev_close - 1)
+    ):
+        h.fail("buy limit", "신선한 허용 갭 매도호가를 확정하지 못함")
+        await db.close()
+        return False
+    limit_price, _ = f3_entry._entry_limit_price(
+        quote.ask_price,
+        f3_entry._strict_gap_cap(prev_close),
+    )
     qty = 1
-    log("ORDER_SMOKE_BUY_START", level="INFO", ticker=ticker, order_qty=qty)
-    buy_resp = await f3_entry._send_buy(ticker, qty, "PAPER")
+    log(
+        "ORDER_SMOKE_BUY_START",
+        level="INFO",
+        ticker=ticker,
+        order_qty=qty,
+        expected_price=expected_price,
+        limit_price=limit_price,
+    )
+    buy_resp = await f3_entry._send_buy(
+        ticker,
+        qty,
+        "PAPER",
+        limit_price=limit_price,
+        send_guard=lambda: f3_entry._quote_is_fresh(quote),
+    )
     buy_out = buy_resp.get("output", {})
     buy_order_id = buy_out.get("ODNO", "")
     buy_org_no = buy_out.get("KRX_FWDG_ORD_ORGNO", "")
-    print("  buy_resp:", {
-        "rt_cd": buy_resp.get("rt_cd"),
-        "msg_cd": buy_resp.get("msg_cd"),
-        "msg1": buy_resp.get("msg1"),
-        "order_id": buy_order_id,
-        "org_no": buy_org_no,
-    })
+    print(
+        "  buy_resp:",
+        {
+            "rt_cd": buy_resp.get("rt_cd"),
+            "msg_cd": buy_resp.get("msg_cd"),
+            "msg1": buy_resp.get("msg1"),
+            "order_id": buy_order_id,
+            "org_no": buy_org_no,
+        },
+    )
 
     if not buy_order_id or buy_resp.get("rt_cd") not in (None, "0"):
         h.fail("buy order", buy_resp.get("msg1", "주문 실패"))
@@ -94,8 +129,11 @@ async def run() -> bool:
 
     h.ok("buy fill", f"{buy_fill['fill_qty']}주 @ {buy_fill['fill_price']:,}")
     log(
-        "ORDER_SMOKE_BUY_FILLED", level="INFO", ticker=ticker,
-        order_id=buy_order_id, fill_qty=buy_fill["fill_qty"],
+        "ORDER_SMOKE_BUY_FILLED",
+        level="INFO",
+        ticker=ticker,
+        order_id=buy_order_id,
+        fill_qty=buy_fill["fill_qty"],
         fill_price=buy_fill["fill_price"],
     )
 
@@ -110,13 +148,16 @@ async def run() -> bool:
         sell_resp = await f3_entry._send_sell(ticker, sell_qty, "PAPER")
         sell_out = sell_resp.get("output", {})
         sell_order_id = sell_out.get("ODNO", "")
-        print("  sell_resp:", {
-            "attempt": attempt,
-            "rt_cd": sell_resp.get("rt_cd"),
-            "msg_cd": sell_resp.get("msg_cd"),
-            "msg1": sell_resp.get("msg1"),
-            "order_id": sell_order_id,
-        })
+        print(
+            "  sell_resp:",
+            {
+                "attempt": attempt,
+                "rt_cd": sell_resp.get("rt_cd"),
+                "msg_cd": sell_resp.get("msg_cd"),
+                "msg1": sell_resp.get("msg1"),
+                "order_id": sell_order_id,
+            },
+        )
         if sell_order_id and sell_resp.get("rt_cd") in (None, "0"):
             break
 
@@ -133,8 +174,11 @@ async def run() -> bool:
 
     h.ok("sell fill", f"{sell_fill['fill_qty']}주 @ {sell_fill['fill_price']:,}")
     log(
-        "ORDER_SMOKE_SELL_FILLED", level="INFO", ticker=ticker,
-        order_id=sell_order_id, fill_qty=sell_fill["fill_qty"],
+        "ORDER_SMOKE_SELL_FILLED",
+        level="INFO",
+        ticker=ticker,
+        order_id=sell_order_id,
+        fill_qty=sell_fill["fill_qty"],
         fill_price=sell_fill["fill_price"],
     )
 

@@ -74,6 +74,12 @@ def test_f3_operational_events_have_human_readable_labels():
     assert event_label("F4_ENTRY_AT_INVALID") != (
         "F4_ENTRY_AT_INVALID(F4_ENTRY_AT_INVALID)"
     )
+    for event in (
+        "VI_ENTRY_WAIT_STARTED",
+        "VI_ENTRY_RELEASED",
+        "VI_ENTRY_WAIT_TIMEOUT",
+    ):
+        assert event_label(event) != f"{event}({event})"
 
 
 def test_startup_and_real_gate_events_have_human_readable_labels():

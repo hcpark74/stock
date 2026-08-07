@@ -105,20 +105,18 @@ async def test_high_gap_excluded_when_amount_low():
     assert result == []
 
 
-async def test_high_gap_excluded_when_vi_near():
-    """7~10% high gap is excluded when it is too close to static VI."""
+async def test_high_gap_kept_when_static_vi_is_near():
+    """정적 VI 근접은 실제 발동이 아니므로 고유동성 high-gap 후보를 유지한다."""
     result = await _run([_classified_candidate(GAP_MAX + 0.001, amount=6e9, vi_gap=0.005)])
-    assert result == []
+    assert len(result) == 1
+    assert result[0]["gap_reason"] == "HIGH_GAP_ALLOWED"
 
 
-async def test_high_gap_excluded_when_vi_unknown():
-    """7~10% high gap is excluded when VI proximity cannot be calculated."""
+async def test_high_gap_kept_when_static_vi_distance_is_unknown():
+    """정적 VI 계산 불가는 후보 제외 사유가 아니며 실제 VI는 F3가 확인한다."""
     result = await _run([_classified_candidate(GAP_MAX + 0.001, amount=6e9, vi_gap=None)])
-    assert result == []
-    assert (
-        _classified_candidate(GAP_MAX + 0.001, amount=6e9, vi_gap=None)["gap_reason"]
-        == "HIGH_GAP_VI_UNKNOWN"
-    )
+    assert len(result) == 1
+    assert result[0]["gap_reason"] == "HIGH_GAP_ALLOWED"
 
 
 async def test_extreme_gap_excluded():

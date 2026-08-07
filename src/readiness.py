@@ -111,8 +111,7 @@ async def calculate() -> dict[str, Any]:
         _check(
             "paper_experiments_off",
             "REAL 비호환 PAPER 실험 기능 비활성",
-            not _flag("F2_RETRY_F1_ON_FAIL")
-            and not _flag("PAPER_FAST_PROBE")
+            not _flag("PAPER_FAST_PROBE")
             and not _flag("PAPER_FAST_HYBRID"),
             4,
         ),
