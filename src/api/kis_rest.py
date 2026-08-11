@@ -47,13 +47,95 @@ _LATENCY_SUMMARY_INTERVAL_SEC = max(
     0.0,
     float(os.getenv("KIS_LATENCY_SUMMARY_INTERVAL_SEC", "60.0")),
 )
-_rate_lock = asyncio.Lock()
+REQUEST_PRIORITY_CRITICAL = 0
+REQUEST_PRIORITY_ORDER_STATUS = 5
+REQUEST_PRIORITY_PRICE = 10
+REQUEST_PRIORITY_DEFAULT = 20
+REQUEST_PRIORITY_VI = 30
+_LOW_PRIORITY_MAX_WAIT_SLOTS = max(
+    1.0,
+    float(os.getenv("KIS_LOW_PRIORITY_MAX_WAIT_SLOTS", "25")),
+)
 _client_lock = asyncio.Lock()
 _client: httpx.AsyncClient | None = None
 _client_factory: object | None = None
 _latency_windows: dict[tuple[str, str], dict] = {}
+_rate_waiters: list[dict] = []
+_rate_waiter_seq = 0
 SEND_GUARD_BLOCKED_MSG_CD = "LOCAL_SEND_GUARD_BLOCKED"
 RATE_LIMIT_CODES = frozenset({"EGW00201"})
+
+
+def _low_priority_max_wait_sec() -> float:
+    """Keep starvation behavior equivalent across PAPER and REAL rate caps."""
+    return _RATE_INTERVAL * _LOW_PRIORITY_MAX_WAIT_SLOTS
+
+
+def _next_rate_waiter(now: float) -> dict | None:
+    if not _rate_waiters:
+        return None
+    critical = [
+        item for item in _rate_waiters
+        if item["priority"] <= REQUEST_PRIORITY_CRITICAL
+    ]
+    if critical:
+        return min(critical, key=lambda item: item["seq"])
+    starved = [
+        item for item in _rate_waiters
+        if now - item["queued_at"] >= _low_priority_max_wait_sec()
+    ]
+    if starved:
+        return min(starved, key=lambda item: item["seq"])
+    return min(_rate_waiters, key=lambda item: (item["priority"], item["seq"]))
+
+
+def _wake_rate_waiters() -> None:
+    for item in _rate_waiters:
+        item["wake"].set()
+
+
+async def _wait_for_rate_slot(priority: int) -> None:
+    """Wait for a priority-ordered slot without a fallible central dispatcher.
+
+    Every requester owns its wait. Cancellation removes the waiter synchronously,
+    and every wake-up rechecks both priority and the elapsed rate budget.
+    """
+    global _last_call_at, _rate_waiter_seq
+    _rate_waiter_seq += 1
+    waiter = {
+        "priority": int(priority),
+        "seq": _rate_waiter_seq,
+        "queued_at": time.monotonic(),
+        "wake": asyncio.Event(),
+    }
+    _rate_waiters.append(waiter)
+    _wake_rate_waiters()
+    try:
+        while True:
+            waiter["wake"].clear()
+            now = time.monotonic()
+            selected = _next_rate_waiter(now)
+            if selected is waiter:
+                wait = _RATE_INTERVAL - (now - _last_call_at)
+                if wait <= 0:
+                    _rate_waiters.remove(waiter)
+                    _last_call_at = now
+                    _wake_rate_waiters()
+                    return
+                await asyncio.sleep(wait)
+                continue
+            try:
+                await asyncio.wait_for(
+                    waiter["wake"].wait(),
+                    timeout=max(0.1, _RATE_INTERVAL),
+                )
+            except TimeoutError:
+                # Defensive self-heal if a wake signal is ever missed.
+                pass
+    finally:
+        if waiter in _rate_waiters:
+            _rate_waiters.remove(waiter)
+            _wake_rate_waiters()
 
 
 def account_no() -> str:
@@ -210,6 +292,7 @@ async def _request(
     include_response_meta: bool = False,
     latency_context: str | None = None,
     aggregate_latency: bool = False,
+    request_priority: int = REQUEST_PRIORITY_DEFAULT,
     allow_real_smoke_buy: bool = False,
     **kwargs,
 ) -> dict:
@@ -217,8 +300,6 @@ async def _request(
 
     조사 모드는 429/EGW00201에서 즉시 중단하며, 401 토큰 갱신은 항상 수행한다.
     """
-    global _last_call_at
-
     base_url = os.getenv("KIS_BASE_URL", "")
     url = base_url + path
 
@@ -249,14 +330,7 @@ async def _request(
         )
 
     total_start = time.monotonic()
-    await _rate_lock.acquire()
-    try:
-        wait = _RATE_INTERVAL - (time.monotonic() - _last_call_at)
-        if wait > 0:
-            await asyncio.sleep(wait)
-        _last_call_at = time.monotonic()
-    finally:
-        _rate_lock.release()
+    await _wait_for_rate_slot(request_priority)
     request_ready_at = time.monotonic()
     rate_wait_ms = int((request_ready_at - total_start) * 1000)
 
@@ -316,6 +390,7 @@ async def _request(
                 include_response_meta=include_response_meta,
                 latency_context=latency_context,
                 aggregate_latency=aggregate_latency,
+                request_priority=request_priority,
                 allow_real_smoke_buy=allow_real_smoke_buy,
                 **kwargs,
             )
@@ -393,6 +468,7 @@ async def _request(
             include_response_meta=include_response_meta,
             latency_context=latency_context,
             aggregate_latency=aggregate_latency,
+            request_priority=request_priority,
             allow_real_smoke_buy=allow_real_smoke_buy,
             **kwargs,
         )
@@ -423,6 +499,7 @@ async def _request(
                 include_response_meta=include_response_meta,
                 latency_context=latency_context,
                 aggregate_latency=aggregate_latency,
+                request_priority=request_priority,
                 allow_real_smoke_buy=allow_real_smoke_buy,
                 **kwargs,
             )
@@ -451,6 +528,7 @@ async def _request(
                 include_response_meta=include_response_meta,
                 latency_context=latency_context,
                 aggregate_latency=aggregate_latency,
+                request_priority=request_priority,
                 allow_real_smoke_buy=allow_real_smoke_buy,
                 **kwargs,
             )
@@ -489,6 +567,7 @@ async def _request(
             include_response_meta=include_response_meta,
             latency_context=latency_context,
             aggregate_latency=aggregate_latency,
+            request_priority=request_priority,
             allow_real_smoke_buy=allow_real_smoke_buy,
             **kwargs,
         )
@@ -522,6 +601,7 @@ async def get(
     include_response_meta: bool = False,
     latency_context: str | None = None,
     aggregate_latency: bool = False,
+    request_priority: int = REQUEST_PRIORITY_DEFAULT,
 ) -> dict:
     return await _request(
         "GET",
@@ -534,6 +614,7 @@ async def get(
         include_response_meta=include_response_meta,
         latency_context=latency_context,
         aggregate_latency=aggregate_latency,
+        request_priority=request_priority,
     )
 
 
@@ -547,6 +628,7 @@ async def post(
     aggregate_latency: bool = False,
     include_response_meta: bool = False,
     allow_real_smoke_buy: bool = False,
+    request_priority: int = REQUEST_PRIORITY_CRITICAL,
 ) -> dict:
     return await _request(
         "POST",
@@ -558,5 +640,6 @@ async def post(
         aggregate_latency=aggregate_latency,
         include_response_meta=include_response_meta,
         allow_real_smoke_buy=allow_real_smoke_buy,
+        request_priority=request_priority,
         json=body,
     )

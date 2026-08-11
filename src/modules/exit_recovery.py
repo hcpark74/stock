@@ -425,6 +425,7 @@ async def find_matching_order(
                     "CTX_AREA_FK100": "",
                     "CTX_AREA_NK100": "",
                 },
+                request_priority=kis_rest.REQUEST_PRIORITY_ORDER_STATUS,
             )
             if str(resp.get("rt_cd", "0")) != "0":
                 raise RuntimeError(
@@ -488,6 +489,7 @@ async def fetch_order_status(
             "CTX_AREA_FK100": "",
             "CTX_AREA_NK100": "",
         },
+        request_priority=kis_rest.REQUEST_PRIORITY_ORDER_STATUS,
     )
     rows = resp.get("output1") or []
     if isinstance(rows, dict):

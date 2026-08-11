@@ -161,7 +161,11 @@ async def test_rest_backup_feeds_vi_watch(monkeypatch):
 
     notify = AsyncMock()
     monkeypatch.setattr(f4, "F4_REST_POLL_INTERVAL_SEC", 0.01)
-    monkeypatch.setattr(f4, "_fetch_current_price", AsyncMock(side_effect=lambda t: prices.pop(0)))
+    monkeypatch.setattr(
+        f4,
+        "_fetch_current_price",
+        AsyncMock(side_effect=lambda _ticker, **_kwargs: prices.pop(0)),
+    )
     monkeypatch.setattr(f4, "_process_tick", AsyncMock())
     monkeypatch.setattr(f4.notifier, "send", notify)
     monkeypatch.setattr(f4, "log", lambda *a, **kw: None)
@@ -184,7 +188,7 @@ async def test_rest_backup_keeps_polling_while_vi_check_hangs(monkeypatch):
         await gate.wait()
         return {}
 
-    async def fake_fetch(_ticker):
+    async def fake_fetch(_ticker, **_kwargs):
         nonlocal fetch_count
         fetch_count += 1
         if fetch_count >= 5:
@@ -218,7 +222,9 @@ async def test_run_feeds_ws_ticks_to_vi_watch(monkeypatch):
             seen.set()
             return []
 
-    async def fake_subscribe(_ticker, on_tick, *, stop_if=None):
+    async def fake_subscribe(
+        _ticker, on_tick, *, stop_if=None, on_connection_change=None,
+    ):
         await on_tick({"price": 7000.0})
         while not (stop_if and stop_if()):
             await asyncio.sleep(0.01)

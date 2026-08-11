@@ -54,6 +54,7 @@ async def _fetch_holding_qty(ticker: str, mode: str) -> int | None:
                 "CTX_AREA_FK100": "",
                 "CTX_AREA_NK100": "",
             },
+            request_priority=kis_rest.REQUEST_PRIORITY_ORDER_STATUS,
         )
     except Exception as e:
         log("F5_BALANCE_QUERY_FAIL", level="WARN", ticker=ticker, error=str(e))
@@ -70,6 +71,7 @@ async def _fetch_current_price(ticker: str) -> float:
         "/uapi/domestic-stock/v1/quotations/inquire-price",
         tr_id="FHKST01010100",
         params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker},
+        request_priority=kis_rest.REQUEST_PRIORITY_PRICE,
     )
     out = resp.get("output", {}) if isinstance(resp.get("output"), dict) else {}
     return float(out.get("stck_prpr") or out.get("antc_cnpr") or 0)
@@ -450,6 +452,7 @@ async def _fetch_order_status(order_id: str, mode: str) -> dict | None:
             "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
             tr_id=_CCLD_TR[mode],
             params=_ccld_params(order_id, today),
+            request_priority=kis_rest.REQUEST_PRIORITY_ORDER_STATUS,
         )
     except Exception as e:
         log("F5_ORDER_STATUS_QUERY_FAIL", level="WARN", order_id=order_id, error=str(e))
@@ -485,6 +488,7 @@ async def _fetch_cancelable_qty(order_id: str, mode: str) -> int | None:
                 "CTX_AREA_FK100": "",
                 "CTX_AREA_NK100": "",
             },
+            request_priority=kis_rest.REQUEST_PRIORITY_ORDER_STATUS,
         )
     except Exception as e:
         log("F5_PSBL_CANCEL_QUERY_FAIL", level="WARN", order_id=order_id, error=str(e))
@@ -560,6 +564,7 @@ async def _poll_fill(order_id: str, timeout_sec: int = 30, expect_qty: int = 0) 
                 "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
                 tr_id=_CCLD_TR[mode],
                 params=_ccld_params(order_id, today),
+                request_priority=kis_rest.REQUEST_PRIORITY_ORDER_STATUS,
             )
             for item in resp.get("output1", []):
                 if item.get("odno") == order_id:

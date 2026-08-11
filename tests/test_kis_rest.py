@@ -9,6 +9,15 @@ import src.api.kis_rest as kis_rest
 from src import live
 
 
+@pytest.fixture(autouse=True)
+def reset_rate_scheduler_state(monkeypatch):
+    monkeypatch.setattr(kis_rest, "_rate_waiters", [])
+    monkeypatch.setattr(kis_rest, "_rate_waiter_seq", 0)
+    monkeypatch.setattr(kis_rest, "_last_call_at", 0.0)
+    yield
+    kis_rest._rate_waiters.clear()
+
+
 def test_default_rate_interval_follows_kis_mode(monkeypatch):
     monkeypatch.setenv("KIS_MODE", "PAPER")
     assert kis_rest.default_rate_interval() == 1.1
@@ -379,6 +388,203 @@ async def test_kis_rest_rate_limiter_serializes_concurrent_requests(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_rate_limiter_prioritizes_f4_price_over_vi(monkeypatch):
+    starts = []
+
+    class RecordingClient(_FakeAsyncClient):
+        async def request(self, _method, url, **_kwargs):
+            starts.append(url.rsplit("/", 1)[-1])
+            return _FakeResponse()
+
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 0.05)
+    monkeypatch.setattr(kis_rest, "_last_call_at", time.monotonic())
+    monkeypatch.setattr(kis_rest, "_rate_waiters", [])
+    monkeypatch.setattr(kis_rest, "_LOW_PRIORITY_MAX_WAIT_SLOTS", 25.0)
+    monkeypatch.setattr(kis_rest, "_get_client", AsyncMock(return_value=RecordingClient()))
+
+    vi = asyncio.create_task(kis_rest.get(
+        "/vi",
+        request_priority=kis_rest.REQUEST_PRIORITY_VI,
+    ))
+    await asyncio.sleep(0.005)
+    price = asyncio.create_task(kis_rest.get(
+        "/price",
+        request_priority=kis_rest.REQUEST_PRIORITY_PRICE,
+    ))
+    await asyncio.gather(vi, price)
+
+    assert starts == ["price", "vi"]
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_eventually_serves_starved_vi(monkeypatch):
+    now = 100.0
+    vi = {
+        "priority": kis_rest.REQUEST_PRIORITY_VI,
+        "seq": 1,
+        "queued_at": 90.0,
+        "wake": asyncio.Event(),
+    }
+    price = {
+        "priority": kis_rest.REQUEST_PRIORITY_PRICE,
+        "seq": 2,
+        "queued_at": 99.9,
+        "wake": asyncio.Event(),
+    }
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 0.2)
+    monkeypatch.setattr(kis_rest, "_LOW_PRIORITY_MAX_WAIT_SLOTS", 25.0)
+    monkeypatch.setattr(kis_rest, "_rate_waiters", [vi, price])
+
+    assert kis_rest._next_rate_waiter(now) is vi
+
+
+@pytest.mark.asyncio
+async def test_critical_order_outranks_starved_vi(monkeypatch):
+    vi = {
+        "priority": kis_rest.REQUEST_PRIORITY_VI,
+        "seq": 1,
+        "queued_at": 90.0,
+        "wake": asyncio.Event(),
+    }
+    order = {
+        "priority": kis_rest.REQUEST_PRIORITY_CRITICAL,
+        "seq": 2,
+        "queued_at": 99.9,
+        "wake": asyncio.Event(),
+    }
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 0.2)
+    monkeypatch.setattr(kis_rest, "_LOW_PRIORITY_MAX_WAIT_SLOTS", 25.0)
+    monkeypatch.setattr(kis_rest, "_rate_waiters", [vi, order])
+
+    assert kis_rest._next_rate_waiter(100.0) is order
+
+
+@pytest.mark.asyncio
+async def test_starved_price_outranks_fresh_order_status(monkeypatch):
+    price = {
+        "priority": kis_rest.REQUEST_PRIORITY_PRICE,
+        "seq": 1,
+        "queued_at": 90.0,
+        "wake": asyncio.Event(),
+    }
+    order_status = {
+        "priority": kis_rest.REQUEST_PRIORITY_ORDER_STATUS,
+        "seq": 2,
+        "queued_at": 99.9,
+        "wake": asyncio.Event(),
+    }
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 0.2)
+    monkeypatch.setattr(kis_rest, "_LOW_PRIORITY_MAX_WAIT_SLOTS", 25.0)
+    monkeypatch.setattr(kis_rest, "_rate_waiters", [price, order_status])
+
+    assert kis_rest._next_rate_waiter(100.0) is price
+
+
+def test_low_priority_starvation_budget_scales_by_rate_slots(monkeypatch):
+    monkeypatch.setattr(kis_rest, "_LOW_PRIORITY_MAX_WAIT_SLOTS", 25.0)
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 1.1)
+    assert kis_rest._low_priority_max_wait_sec() == pytest.approx(27.5)
+
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 0.2)
+    assert kis_rest._low_priority_max_wait_sec() == pytest.approx(5.0)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_rate_waiter_is_removed(monkeypatch):
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 10.0)
+    monkeypatch.setattr(kis_rest, "_last_call_at", time.monotonic())
+    monkeypatch.setattr(kis_rest, "_rate_waiters", [])
+
+    task = asyncio.create_task(
+        kis_rest._wait_for_rate_slot(kis_rest.REQUEST_PRIORITY_DEFAULT)
+    )
+    await asyncio.sleep(0)
+    assert len(kis_rest._rate_waiters) == 1
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert kis_rest._rate_waiters == []
+
+
+@pytest.mark.asyncio
+async def test_many_cancelled_rate_waiters_do_not_leak(monkeypatch):
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 10.0)
+    monkeypatch.setattr(kis_rest, "_last_call_at", time.monotonic())
+    monkeypatch.setattr(kis_rest, "_rate_waiters", [])
+
+    tasks = [
+        asyncio.create_task(
+            kis_rest._wait_for_rate_slot(kis_rest.REQUEST_PRIORITY_DEFAULT)
+        )
+        for _ in range(50)
+    ]
+    await asyncio.sleep(0)
+    assert len(kis_rest._rate_waiters) == 50
+
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert kis_rest._rate_waiters == []
+
+
+@pytest.mark.asyncio
+async def test_cancelling_selected_waiter_wakes_next_waiter(monkeypatch):
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 0.05)
+    monkeypatch.setattr(kis_rest, "_last_call_at", time.monotonic())
+    monkeypatch.setattr(kis_rest, "_rate_waiters", [])
+
+    vi = asyncio.create_task(
+        kis_rest._wait_for_rate_slot(kis_rest.REQUEST_PRIORITY_VI)
+    )
+    await asyncio.sleep(0)
+    critical = asyncio.create_task(
+        kis_rest._wait_for_rate_slot(kis_rest.REQUEST_PRIORITY_CRITICAL)
+    )
+    await asyncio.sleep(0)
+
+    critical.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await critical
+
+    await asyncio.wait_for(vi, timeout=0.25)
+    assert kis_rest._rate_waiters == []
+
+
+@pytest.mark.asyncio
+async def test_mixed_priorities_still_preserve_rate_cap(monkeypatch):
+    starts = []
+
+    class RecordingClient(_FakeAsyncClient):
+        async def request(self, _method, url, **_kwargs):
+            starts.append(time.monotonic())
+            return _FakeResponse()
+
+    monkeypatch.setattr(kis_rest, "_RATE_INTERVAL", 0.03)
+    monkeypatch.setattr(kis_rest, "_last_call_at", time.monotonic())
+    monkeypatch.setattr(kis_rest, "_rate_waiters", [])
+    monkeypatch.setattr(kis_rest, "_get_client", AsyncMock(return_value=RecordingClient()))
+
+    priorities = [
+        kis_rest.REQUEST_PRIORITY_VI,
+        kis_rest.REQUEST_PRIORITY_PRICE,
+        kis_rest.REQUEST_PRIORITY_ORDER_STATUS,
+        kis_rest.REQUEST_PRIORITY_DEFAULT,
+        kis_rest.REQUEST_PRIORITY_CRITICAL,
+    ]
+    await asyncio.gather(*(
+        kis_rest.get(f"/mixed-{index}", request_priority=priority)
+        for index, priority in enumerate(priorities)
+    ))
+
+    gaps = [b - a for a, b in zip(starts, starts[1:])]
+    assert len(starts) == len(priorities)
+    assert min(gaps) >= 0.025
+
+
+@pytest.mark.asyncio
 async def test_post_send_guard_runs_after_rate_limit_wait(monkeypatch):
     """A deadline that passes during rate-limit sleep must block HTTP dispatch."""
     allowed = True
@@ -743,6 +949,28 @@ class _BodyRateLimitThenOkClient:
                 return {"rt_cd": "0", "output": {"ok": True}}
 
         return Response()
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_retry_preserves_request_priority(monkeypatch):
+    slot = AsyncMock()
+    client = _BodyRateLimitThenOkClient()
+    monkeypatch.setattr(kis_rest, "_wait_for_rate_slot", slot)
+    monkeypatch.setattr(kis_rest, "_get_client", AsyncMock(return_value=client))
+    monkeypatch.setattr(kis_rest, "_rate_limit_sleep_seconds", lambda *_: 0.0)
+    monkeypatch.setattr(_BodyRateLimitThenOkClient, "code", "EGW00201")
+    _BodyRateLimitThenOkClient.calls = 0
+
+    resp = await kis_rest.get(
+        "/price",
+        request_priority=kis_rest.REQUEST_PRIORITY_PRICE,
+    )
+
+    assert resp["rt_cd"] == "0"
+    assert [item.args[0] for item in slot.await_args_list] == [
+        kis_rest.REQUEST_PRIORITY_PRICE,
+        kis_rest.REQUEST_PRIORITY_PRICE,
+    ]
 
 
 @pytest.mark.asyncio

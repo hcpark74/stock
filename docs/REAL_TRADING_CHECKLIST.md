@@ -1,15 +1,15 @@
 # 실전투자 전환 점검표
 
-최종 코드 점검일: 2026-08-07
+최종 코드 점검일: 2026-08-11
 
 이 문서는 PAPER에서 정상 동작했다는 사실만으로 REAL을 활성화하지 않도록 코드 수준의 차이와 승인 조건을 기록한다. `python scripts/real_readiness.py`의 `eligible_for_real`이 `false`이거나 아래 미완료 항목이 하나라도 남아 있으면 상주 프로세스를 `KIS_MODE=REAL`로 시작하지 않는다.
 
-## 현재 판정 (2026-08-07)
+## 현재 판정 (2026-08-11)
 
 ```text
-준비도                  39/100
+준비도                  51/100
 REAL 진입 가능          아니오
-현재 전략 fingerprint   20e1be68b17c
+현재 전략 fingerprint   4e34b3d9b787
 동일 fingerprint PAPER  0/20
 ```
 
@@ -23,14 +23,21 @@ python scripts/real_readiness.py
 
 | 차단 항목 | 현재값 | 해제 조건 |
 |---|---|---|
-| 동일 버전 PAPER 정상 청산 | `0/20` | fingerprint `20e1be68b17c`로 진입·전량 청산이 정상 대사된 PAPER 거래 20회 |
-| 초기 투입비율 | `F3_ALLOC_RATIO=0.95` | REAL 상주 프로세스 시작 전에 `0 < F3_ALLOC_RATIO <= 0.20` |
-| PAPER 실험 기능 | `PAPER_FAST_PROBE=1`, `PAPER_FAST_HYBRID=1` | REAL에서는 둘 다 `0` |
-| 최종 호가 신선도 | `F3_FINAL_QUOTE_MAX_AGE_MS=1500` | REAL에서는 명시적으로 `500` 이하로 설정하거나 변수를 제거해 REAL 기본값 500ms 사용 |
+| 동일 버전 PAPER 정상 청산 | `0/20` | fingerprint `4e34b3d9b787`로 진입·전량 청산이 정상 대사된 PAPER 거래 20회. 카운트 시작 전 "0. 전략 코드 동결" 선행 |
 | 실전 접속 설정 검증 | 미승인 | 실전 키·계좌·REST/WS URL을 실제 조회로 확인한 뒤 `REAL_CONFIG_VERIFIED=1` |
 | REAL 최소수량 스모크 | 미승인 | 아래 스모크 절차의 주문·취소·체결·잔고 대사를 완료한 뒤 `REAL_SMOKE_TEST_APPROVED=1` |
 | CRIT 알림 실수신 | 미승인 | 휴대폰에서 CRIT 메시지를 확인한 뒤 `REAL_ALERT_TEST_APPROVED=1` |
 | 운영자 장애 대응 훈련 | 미승인 | MTS 수동청산·프로세스 중지·잔고 대사를 실제로 수행한 뒤 `REAL_OPERATOR_DRILL_APPROVED=1` |
+
+### 현재 통과 중인 REAL 안전 설정
+
+아래 항목은 차단 목록에서 빠졌지만 `src/readiness.py`의 준비도 게이트에는 계속 포함된다. 설정이 바뀌면 즉시 다시 REAL-BLOCKER가 된다.
+
+| 게이트 항목 | 현재값 | 통과 조건 |
+|---|---|---|
+| 초기 투입비율 | `F3_ALLOC_RATIO=0.20` | `0 < F3_ALLOC_RATIO <= 0.20` |
+| PAPER 실험 기능 | `PAPER_FAST_PROBE=0`, `PAPER_FAST_HYBRID=0` | 둘 다 `0` |
+| 최종 호가 신선도 | `F3_FINAL_QUOTE_MAX_AGE_MS=500` | `500ms` 이하 |
 
 오늘 09:00 거래는 fingerprint `58a5a3ba697e`로 실행돼 현재 버전 실적에 포함되지 않는다. 현재 코드로 오늘 F1 스냅샷을 재생하면 한화솔루션이 F1·F2·F3 1순위이고 10% 미만 갭/지정가 안전 검사를 통과하지만, 이는 오프라인 재생 결과이지 현재 fingerprint의 정상 청산 실적이 아니다.
 
@@ -106,7 +113,7 @@ HOLDING -> EXITING -> CLOSED
 | REAL 안전 설정 | 25 | 초기 투입 20% 이하, 실험 기능 OFF, 신선 호가·REST 백업, 실전 설정 검증 등 |
 | 실전 운영 검증 | 15 | 최소수량 스모크 테스트, CRIT 알림 실수신, MTS 수동청산 훈련 |
 
-코드 지문은 주문·전략·상태 복구 핵심 파일의 내용으로 계산한다. 이 파일들이 변경되면 PAPER 실적은 새 지문으로 다시 쌓아야 한다. `python scripts/real_readiness.py` 또는 웹의 설정 화면에서 현재 점수와 차단 사유를 확인한다.
+코드 지문은 주문·전략·상태 복구 핵심 파일의 내용으로 계산한다. 대상은 `src/release.py`의 `_STRATEGY_FILES` 19개 파일이며, 이 파일들이 변경되면 PAPER 실적은 새 지문으로 다시 쌓아야 한다. 20회 카운트를 시작하기 전에 반드시 "0. 전략 코드 동결"을 먼저 수행한다. `python scripts/real_readiness.py` 또는 웹의 설정 화면에서 현재 점수와 차단 사유를 확인한다.
 
 PAPER 정상 청산 1회로 인정되려면 다음 조건을 모두 만족해야 한다.
 
@@ -126,10 +133,28 @@ PAPER 정상 청산 1회로 인정되려면 다음 조건을 모두 만족해야
 
 ## REAL 전환 실행 순서
 
+### 0. 전략 코드 동결
+
+1단계의 20회 카운트를 시작하기 전에 전략 코드를 동결한다. 이 단계를 건너뛰면 뒤에서 한 줄만 고쳐도 그때까지 쌓은 실적이 전부 무효가 된다.
+
+- 동결 대상은 `src/release.py`의 `_STRATEGY_FILES` 19개 파일이다. 이 목록의 파일이 1바이트라도 바뀌면 fingerprint가 달라지고 PAPER 실적은 0회부터 다시 시작한다.
+- `trades.date`가 `UNIQUE`라 **하루 최대 1거래**다. 20회는 최소 20 거래일이고, F1·F2·F3 게이트를 통과하는 날에만 거래가 생기므로 실제로는 2~3개월을 예상한다. 15거래일째의 사소한 리팩터링 한 건이 그 두 달을 되돌린다.
+- 리팩터링, 주석 정리, 죽은 코드 삭제, 로그 문구 변경도 모두 fingerprint를 바꾼다. 동작이 같아도 예외가 아니다.
+- 알려진 개선 항목과 미완 정리는 **이 단계에서 모두 소진**한다. "나중에 정리하자"로 남긴 항목은 카운트 도중 손대게 되고, 그 시점에 리셋 비용이 발생한다.
+- 동결 대상이 아닌 파일(`docs/`, `tests/`, `api_tests/`, `scripts/`, `src/api/server.py`, `docs/html/`)은 카운트 중에도 자유롭게 수정할 수 있다. 대시보드·문서·테스트 보강은 실적에 영향을 주지 않는다.
+- 동결 시점의 fingerprint를 아래 명령으로 기록하고, 이 문서 상단 "현재 판정"에 반영한다.
+
+```powershell
+python scripts/real_readiness.py
+```
+
+- 카운트 중에는 매 거래일 시작 전 같은 명령으로 fingerprint가 기록값과 동일한지 확인한다. 달라졌다면 그날까지의 실적은 이미 무효이므로, 원인을 확인하고 0단계부터 다시 시작한다.
+- 동결 해제가 불가피하면(실전 안전성에 영향을 주는 결함 발견 등) 리셋을 감수하고 명시적으로 0단계를 다시 수행한다. 카운터를 유지한 채 전략 파일을 고치는 예외는 없다.
+
 ### 1. PAPER 증거 확정
 
 - `KIS_MODE=PAPER`, `DRY_RUN=0`을 유지한다.
-- `python scripts/real_readiness.py`에서 현재 fingerprint를 기록한다.
+- 0단계에서 기록한 fingerprint와 `python scripts/real_readiness.py`의 현재 fingerprint가 같은지 확인한 뒤 시작한다.
 - 같은 fingerprint로 PAPER 정상 청산 20회를 채운다. 전략 파일이 변경돼 fingerprint가 바뀌면 0회부터 다시 시작한다.
 - 부분체결, 주문응답 유실, 취소 미확인, SQLite 장애, 재시작 복구 테스트가 모두 통과하는지 확인한다.
 - 운영 PAPER 로그와 pytest 출력이 섞이지 않았는지 `LOG_DIR`, `DB_DIR`, `STATE_DIR`, `PAPER_FAST_PROBE_DIR`을 확인한다.
@@ -146,12 +171,19 @@ F3_ALLOC_RATIO=0.20
 F3_FINAL_QUOTE_MAX_AGE_MS=500
 PAPER_FAST_PROBE=0
 PAPER_FAST_HYBRID=0
+F4_REST_BACKUP_ENABLED=1
+F4_REST_ONLY_WHEN_WS_STALE=1
+F4_WS_STALE_SEC=2.0
+F4_WS_HEALTH_LOG_COOLDOWN_SEC=60.0
+KIS_LOW_PRIORITY_MAX_WAIT_SLOTS=25
 ```
 
 - 실전용 `KIS_APP_KEY`, `KIS_APP_SECRET`, 계좌번호와 상품코드를 사용한다.
 - `KIS_BASE_URL=https://openapi.koreainvestment.com:9443`, `KIS_WS_URL=ws://ops.koreainvestment.com:21000`인지 확인한다.
 - `STOCK_SKIP_DOTENV`는 테스트 전용이므로 운영 환경에 설정하지 않는다.
 - `F4_REST_BACKUP_ENABLED=1`, `F4_REST_ONLY_WHEN_WS_STALE=1`, 런타임 `FIRST_RATIO=1.00`을 확인한다.
+- `F4_WS_STALE_SEC=2.0`은 정확성을 위해 유지한다. 실제 WS 연결 끊김은 즉시 REST 백업을 깨우고, 연결된 상태의 무틱만 `F4_WS_HEALTH_LOG_COOLDOWN_SEC`로 반복 로그를 집계한다. REST 백업이 꺼져 있으면 무틱도 WARN이다.
+- `KIS_LOW_PRIORITY_MAX_WAIT_SLOTS=25`는 PAPER/REAL의 서로 다른 호출 간격에 같은 슬롯 수 기준을 적용한다. 주문 전송·최종 호가는 CRITICAL, 체결·주문상태 확인은 ORDER_STATUS이며, 오래 기다린 F4 백업 시세에는 starvation 상한이 적용된다.
 - 주문 플래그 없이 `python api_tests/run_all.py`를 실행해 인증·체결조회·잔고·매수가능수량·취소가능수량 조회를 검증한다.
 - 조회 결과의 계좌번호, 예수금, 보유종목이 MTS와 일치할 때만 `REAL_CONFIG_VERIFIED=1`로 승인한다.
 

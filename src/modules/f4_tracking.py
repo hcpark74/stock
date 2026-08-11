@@ -61,6 +61,10 @@ F4_HEARTBEAT_INTERVAL_SEC = max(
     0.0,
     _env_float("F4_HEARTBEAT_INTERVAL_SEC", 30.0),
 )
+F4_WS_HEALTH_LOG_COOLDOWN_SEC = max(
+    0.0,
+    _env_float("F4_WS_HEALTH_LOG_COOLDOWN_SEC", 60.0),
+)
 VI_WATCH_ENABLED = os.getenv("VI_WATCH_ENABLED", "1") == "1"
 VI_FREEZE_SUSPECT_SEC = float(os.getenv("VI_FREEZE_SUSPECT_SEC", "10"))
 VI_CHECK_COOLDOWN_SEC = float(os.getenv("VI_CHECK_COOLDOWN_SEC", "60"))
@@ -276,9 +280,13 @@ async def run() -> None:
     live.ws_connected = False
     last_ws_tick_at = 0.0
     ws_watch_started_at = time.monotonic()
+    ws_transport_known = False
+    rest_wakeup = asyncio.Event()
 
     def is_ws_stale() -> bool:
         now_mono = time.monotonic()
+        if ws_transport_known and not live.ws_connected:
+            return True
         if last_ws_tick_at <= 0:
             return (now_mono - ws_watch_started_at) >= F4_WS_STALE_SEC
         if not live.ws_connected:
@@ -325,9 +333,18 @@ async def run() -> None:
         live.ws_connected = True
         last_ws_tick_at = time.monotonic()
 
+    def on_connection_change(connected: bool) -> None:
+        nonlocal ws_transport_known
+        ws_transport_known = True
+        live.ws_connected = connected
+        # Re-evaluate REST fallback immediately instead of waiting for the
+        # normal polling interval after a transport disconnect.
+        rest_wakeup.set()
+
     ws_task = asyncio.create_task(kis_ws.subscribe(
         ticker, on_tick,
         stop_if=lambda: not _price_observation_active(),
+        on_connection_change=on_connection_change,
     ))
     ws_health_task = asyncio.create_task(
         _run_ws_health_monitor(ticker, is_ws_stale, ws_status_fields)
@@ -340,6 +357,7 @@ async def run() -> None:
                 spike_filter,
                 should_poll_rest,
                 vi_watch=vi_watch,
+                wake_event=rest_wakeup,
             )
         ))
     if F4_HEARTBEAT_INTERVAL_SEC > 0:
@@ -431,6 +449,11 @@ async def _run_ws_health_monitor(
 ) -> None:
     """Detect WS stale/recovery independently from the optional REST backup."""
     stale_reported = False
+    tick_idle_episode = False
+    stale_event_logged = False
+    last_log_at = float("-inf")
+    suppressed_stale = 0
+    suppressed_recovered = 0
     interval_sec = min(
         1.0,
         max(0.1, F4_WS_STALE_SEC / 2),
@@ -445,12 +468,54 @@ async def _run_ws_health_monitor(
             continue
         stale = bool(is_ws_stale())
         fields = {**ws_status_fields(), "ws_stale": stale}
+        if not bool(fields.get("ws_connected", True)):
+            # kis_ws emits WS_DISCONNECTED/WS_CONNECTED for transport state.
+            # Avoid duplicating that warning as a no-tick health transition.
+            stale_reported = stale
+            await asyncio.sleep(interval_sec)
+            continue
+        event = None
         if stale and not stale_reported:
-            log("WS_STALE", level="WARN", ticker=ticker, **fields)
+            event = "WS_STALE"
             stale_reported = True
+            tick_idle_episode = True
         elif not stale and stale_reported:
-            log("WS_RECOVERED", level="INFO", ticker=ticker, **fields)
+            if tick_idle_episode:
+                event = "WS_RECOVERED"
             stale_reported = False
+            tick_idle_episode = False
+        if event is not None:
+            now_mono = time.monotonic()
+            if event == "WS_STALE" and (
+                now_mono - last_log_at >= F4_WS_HEALTH_LOG_COOLDOWN_SEC
+            ):
+                log(
+                    event,
+                    level="INFO" if F4_REST_BACKUP_ENABLED else "WARN",
+                    ticker=ticker,
+                    suppressed_stale=suppressed_stale,
+                    suppressed_recovered=suppressed_recovered,
+                    **fields,
+                )
+                last_log_at = now_mono
+                stale_event_logged = True
+            elif event == "WS_STALE":
+                suppressed_stale += 1
+                stale_event_logged = False
+            elif stale_event_logged:
+                log(
+                    event,
+                    level="INFO",
+                    ticker=ticker,
+                    suppressed_stale=suppressed_stale,
+                    suppressed_recovered=suppressed_recovered,
+                    **fields,
+                )
+                stale_event_logged = False
+                suppressed_stale = 0
+                suppressed_recovered = 0
+            else:
+                suppressed_recovered += 1
         await asyncio.sleep(interval_sec)
 
 
@@ -459,6 +524,7 @@ async def _run_rest_price_backup(
     spike_filter: SpikeFilter,
     should_poll_rest=None,
     vi_watch: ViWatch | None = None,
+    wake_event: asyncio.Event | None = None,
 ) -> None:
     """REST backup while holding or during the short post-close observation."""
     log(
@@ -486,7 +552,7 @@ async def _run_rest_price_backup(
             else F4_REST_POLL_INTERVAL_SEC
         )
         if not should_poll:
-            await asyncio.sleep(interval_sec)
+            await _wait_for_rest_wakeup(interval_sec, wake_event)
             continue
         try:
             if is_post_close:
@@ -496,7 +562,11 @@ async def _run_rest_price_backup(
                     aggregate_latency=True,
                 )
             else:
-                price = await _fetch_current_price(ticker)
+                price = await _fetch_current_price(
+                    ticker,
+                    latency_context="F4_HOLDING",
+                    aggregate_latency=True,
+                )
             if price > 0:
                 await _handle_price_tick(
                     price,
@@ -510,7 +580,25 @@ async def _run_rest_price_backup(
         except Exception as e:
             # 백업 폴러가 죽으면 WS까지 함께 취소되므로 절대 전파하지 않는다
             log("F4_REST_BACKUP_ERROR", level="WARN", ticker=ticker, error=repr(e))
+        await _wait_for_rest_wakeup(interval_sec, wake_event)
+
+
+async def _wait_for_rest_wakeup(
+    interval_sec: float,
+    wake_event: asyncio.Event | None,
+) -> None:
+    if wake_event is None:
         await asyncio.sleep(interval_sec)
+        return
+    if wake_event.is_set():
+        wake_event.clear()
+        return
+    try:
+        await asyncio.wait_for(wake_event.wait(), timeout=interval_sec)
+    except TimeoutError:
+        pass
+    finally:
+        wake_event.clear()
 
 
 async def _handle_price_tick(
@@ -1138,6 +1226,7 @@ async def _fetch_current_price(
         params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker},
         latency_context=latency_context,
         aggregate_latency=aggregate_latency,
+        request_priority=kis_rest.REQUEST_PRIORITY_PRICE,
     )
     out = resp.get("output", {}) if isinstance(resp.get("output"), dict) else {}
     return float(out.get("stck_prpr") or out.get("antc_cnpr") or 0)
@@ -1201,6 +1290,7 @@ async def _poll_fill(
                     "CTX_AREA_FK100": "",
                     "CTX_AREA_NK100": "",
                 },
+                request_priority=kis_rest.REQUEST_PRIORITY_ORDER_STATUS,
             )
             for item in resp.get("output1", []):
                 if item.get("odno") == order_id:

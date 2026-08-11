@@ -12,6 +12,7 @@ from src import state
 
 _REAL_FETCH_BUYABLE_QTY = f3._fetch_buyable_qty
 _REAL_FETCH_ORDER_FILL_SNAPSHOT = f3._fetch_order_fill_snapshot
+_REAL_FETCH_FINAL_ENTRY_QUOTE = f3._fetch_final_entry_quote
 
 
 def _entry_quote(ask_price: float) -> f3.EntryQuote:
@@ -2841,6 +2842,20 @@ async def test_entry_fail_uses_last_run_attempt_when_retry_skipped(monkeypatch):
 async def test_poll_fill_updates_summary_from_kis_response(monkeypatch):
     events = []
     deadline = f3.datetime.now(f3.KST) + f3.timedelta(seconds=30)
+    get = AsyncMock(
+        return_value={
+            "rt_cd": "0",
+            "msg_cd": "MCA00000",
+            "msg1": "OK",
+            "output1": [
+                {
+                    "odno": "0000000937",
+                    "tot_ccld_qty": "67",
+                    "tot_ccld_amt": "690770",
+                }
+            ],
+        }
+    )
 
     monkeypatch.setattr(
         f3,
@@ -2851,20 +2866,7 @@ async def test_poll_fill_updates_summary_from_kis_response(monkeypatch):
     monkeypatch.setattr(
         f3.kis_rest,
         "get",
-        AsyncMock(
-            return_value={
-                "rt_cd": "0",
-                "msg_cd": "MCA00000",
-                "msg1": "OK",
-                "output1": [
-                    {
-                        "odno": "0000000937",
-                        "tot_ccld_qty": "67",
-                        "tot_ccld_amt": "690770",
-                    }
-                ],
-            }
-        ),
+        get,
     )
 
     fill = await f3._poll_fill("0000000937", deadline=deadline, ticker="006340")
@@ -2874,7 +2876,28 @@ async def test_poll_fill_updates_summary_from_kis_response(monkeypatch):
     assert f3._last_fill_poll_summary["poll_last_matched"] is True
     assert f3._last_fill_poll_summary["poll_last_ccld_qty"] == 67
     assert f3._last_fill_poll_summary["poll_last_output_count"] == 1
+    assert (
+        get.await_args.kwargs["request_priority"]
+        == f3.kis_rest.REQUEST_PRIORITY_ORDER_STATUS
+    )
     assert not events
+
+
+@pytest.mark.asyncio
+async def test_final_entry_quote_uses_critical_priority(monkeypatch):
+    get = AsyncMock(return_value={
+        "rt_cd": "0",
+        "output1": {"askp1": "10310", "askp_rsqn1": "100"},
+        "output2": {"antc_cnpr": "10300"},
+    })
+    monkeypatch.setattr(f3.kis_rest, "get", get)
+
+    quote = await _REAL_FETCH_FINAL_ENTRY_QUOTE("006340")
+
+    assert quote is not None
+    assert get.await_args.kwargs["request_priority"] == (
+        f3.kis_rest.REQUEST_PRIORITY_CRITICAL
+    )
 
 
 @pytest.mark.asyncio

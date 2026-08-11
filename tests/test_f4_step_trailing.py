@@ -446,7 +446,11 @@ async def test_rest_backup_polls_when_websocket_is_stale(monkeypatch):
 
     await _run_rest_price_backup("005930", _spike_always_pass(), lambda: True)
 
-    fetch.assert_awaited_once_with("005930")
+    fetch.assert_awaited_once_with(
+        "005930",
+        latency_context="F4_HOLDING",
+        aggregate_latency=True,
+    )
     process_tick.assert_awaited_once()
 
 
@@ -531,6 +535,7 @@ async def test_ws_health_monitor_detects_stale_and_recovery_independent_of_rest(
             _state_mod.get().position_status = "CLOSED"
 
     monkeypatch.setattr(f4.asyncio, "sleep", AsyncMock(side_effect=advance))
+    monkeypatch.setattr(f4, "F4_WS_HEALTH_LOG_COOLDOWN_SEC", 0.0)
     monkeypatch.setattr(
         f4,
         "log",
@@ -546,6 +551,229 @@ async def test_ws_health_monitor_detects_stale_and_recovery_independent_of_rest(
     event_names = [event for event, _ in events]
     assert "WS_STALE" in event_names
     assert "WS_RECOVERED" in event_names
+    assert all(fields["level"] == "INFO" for _, fields in events)
+
+
+@pytest.mark.asyncio
+async def test_ws_health_monitor_cools_down_repeated_tick_idle_logs(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    events = []
+    stale_values = iter([True, False, True, False])
+    sleep_count = 0
+
+    async def advance(_seconds):
+        nonlocal sleep_count
+        sleep_count += 1
+        if sleep_count >= 4:
+            _state_mod.get().position_status = "CLOSED"
+
+    monkeypatch.setattr(f4, "F4_WS_HEALTH_LOG_COOLDOWN_SEC", 60.0)
+    monkeypatch.setattr(f4.asyncio, "sleep", AsyncMock(side_effect=advance))
+    monkeypatch.setattr(
+        f4,
+        "log",
+        lambda event, **fields: events.append((event, fields)),
+    )
+
+    await f4._run_ws_health_monitor(
+        "005930",
+        lambda: next(stale_values),
+        lambda: {"ws_connected": True, "last_ws_tick_age_ms": 2_100},
+    )
+
+    assert [event for event, _ in events] == ["WS_STALE", "WS_RECOVERED"]
+
+
+@pytest.mark.asyncio
+async def test_ws_health_suppression_counts_reset_after_logged_recovery(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    events = []
+    stale_values = iter([True, False, True, False, True, False, True, False])
+    event_times = iter([0.0, 1.0, 2.0, 3.0, 70.0, 71.0, 140.0, 141.0])
+    sleep_count = 0
+
+    async def advance(_seconds):
+        nonlocal sleep_count
+        sleep_count += 1
+        if sleep_count >= 8:
+            _state_mod.get().position_status = "CLOSED"
+
+    monkeypatch.setattr(f4, "F4_WS_HEALTH_LOG_COOLDOWN_SEC", 60.0)
+    fake_time = MagicMock()
+    fake_time.monotonic.side_effect = event_times
+    monkeypatch.setattr(f4, "time", fake_time)
+    monkeypatch.setattr(f4.asyncio, "sleep", AsyncMock(side_effect=advance))
+    monkeypatch.setattr(
+        f4,
+        "log",
+        lambda event, **fields: events.append((event, fields)),
+    )
+
+    await f4._run_ws_health_monitor(
+        "005930",
+        lambda: next(stale_values),
+        lambda: {"ws_connected": True, "last_ws_tick_age_ms": 2_100},
+    )
+
+    assert [event for event, _ in events] == [
+        "WS_STALE",
+        "WS_RECOVERED",
+        "WS_STALE",
+        "WS_RECOVERED",
+        "WS_STALE",
+        "WS_RECOVERED",
+    ]
+    assert events[2][1]["suppressed_stale"] == 1
+    assert events[2][1]["suppressed_recovered"] == 1
+    assert events[3][1]["suppressed_stale"] == 1
+    assert events[3][1]["suppressed_recovered"] == 1
+    assert events[4][1]["suppressed_stale"] == 0
+    assert events[4][1]["suppressed_recovered"] == 0
+
+
+@pytest.mark.asyncio
+async def test_ws_tick_idle_is_warn_when_rest_backup_is_disabled(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    events = []
+
+    async def stop_after_sleep(_seconds):
+        _state_mod.get().position_status = "CLOSED"
+
+    monkeypatch.setattr(f4, "F4_REST_BACKUP_ENABLED", False)
+    monkeypatch.setattr(f4.asyncio, "sleep", AsyncMock(side_effect=stop_after_sleep))
+    monkeypatch.setattr(
+        f4,
+        "log",
+        lambda event, **fields: events.append((event, fields)),
+    )
+
+    await f4._run_ws_health_monitor(
+        "005930",
+        lambda: True,
+        lambda: {"ws_connected": True, "last_ws_tick_age_ms": 2_100},
+    )
+
+    assert events[0][0] == "WS_STALE"
+    assert events[0][1]["level"] == "WARN"
+
+
+@pytest.mark.asyncio
+async def test_ws_stale_recovery_pair_survives_disconnect(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    events = []
+    stale_values = iter([True, True, False])
+    connected_values = iter([True, False, True])
+    sleep_count = 0
+
+    async def advance(_seconds):
+        nonlocal sleep_count
+        sleep_count += 1
+        if sleep_count >= 3:
+            _state_mod.get().position_status = "CLOSED"
+
+    monkeypatch.setattr(f4, "F4_REST_BACKUP_ENABLED", True)
+    monkeypatch.setattr(f4.asyncio, "sleep", AsyncMock(side_effect=advance))
+    monkeypatch.setattr(
+        f4,
+        "log",
+        lambda event, **fields: events.append((event, fields)),
+    )
+
+    await f4._run_ws_health_monitor(
+        "005930",
+        lambda: next(stale_values),
+        lambda: {
+            "ws_connected": next(connected_values),
+            "last_ws_tick_age_ms": 2_100,
+        },
+    )
+
+    assert [event for event, _ in events] == ["WS_STALE", "WS_RECOVERED"]
+
+
+@pytest.mark.asyncio
+async def test_ws_health_monitor_does_not_duplicate_disconnect_warning(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    events = []
+
+    async def stop_after_sleep(_seconds):
+        _state_mod.get().position_status = "CLOSED"
+
+    monkeypatch.setattr(f4.asyncio, "sleep", AsyncMock(side_effect=stop_after_sleep))
+    monkeypatch.setattr(
+        f4,
+        "log",
+        lambda event, **fields: events.append((event, fields)),
+    )
+
+    await f4._run_ws_health_monitor(
+        "005930",
+        lambda: True,
+        lambda: {"ws_connected": False, "last_ws_tick_age_ms": 2_100},
+    )
+
+    assert events == []
+
+
+@pytest.mark.asyncio
+async def test_rest_wakeup_skips_poll_interval_sleep(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    wake_event = asyncio.Event()
+    wake_event.set()
+    sleep = AsyncMock()
+    monkeypatch.setattr(f4.asyncio, "sleep", sleep)
+
+    await f4._wait_for_rest_wakeup(1.0, wake_event)
+
+    sleep.assert_not_awaited()
+    assert not wake_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_run_starts_rest_backup_immediately_on_ws_disconnect(monkeypatch):
+    import src.modules.f4_tracking as f4
+
+    observed = asyncio.Event()
+    s = _state_mod.get()
+    s.target_ticker = "005930"
+    s.position_status = "HOLDING"
+
+    async def fake_subscribe(
+        _ticker, _on_tick, *, stop_if=None, on_connection_change=None,
+    ):
+        assert on_connection_change is not None
+        on_connection_change(False)
+        await observed.wait()
+
+    async def fake_rest_backup(
+        _ticker, _spike_filter, should_poll_rest, *, vi_watch=None, wake_event=None,
+    ):
+        assert wake_event is not None
+        await wake_event.wait()
+        assert should_poll_rest() is True
+        observed.set()
+        s.position_status = "CLOSED"
+
+    async def wait_forever(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setattr(f4, "F4_WS_STALE_SEC", 999.0)
+    monkeypatch.setattr(f4, "F4_REST_BACKUP_ENABLED", True)
+    monkeypatch.setattr(f4, "F4_HEARTBEAT_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(f4.kis_ws, "subscribe", fake_subscribe)
+    monkeypatch.setattr(f4, "_run_rest_price_backup", fake_rest_backup)
+    monkeypatch.setattr(f4, "_run_ws_health_monitor", wait_forever)
+
+    await asyncio.wait_for(f4.run(), 1)
+
+    assert observed.is_set()
 
 
 @pytest.mark.asyncio
@@ -589,7 +817,9 @@ async def test_run_starts_ws_health_monitor_when_rest_backup_is_disabled(monkeyp
         health_started.set()
         await asyncio.Event().wait()
 
-    async def fake_subscribe(_ticker, _on_tick, *, stop_if=None):
+    async def fake_subscribe(
+        _ticker, _on_tick, *, stop_if=None, on_connection_change=None,
+    ):
         await health_started.wait()
         _state_mod.get().position_status = "CLOSED"
 
@@ -621,7 +851,9 @@ async def test_run_waits_for_close_before_cancelling_triggering_monitor(monkeypa
         assert await f4.state.set_closed(reason) is True
         return True
 
-    async def fake_subscribe(_ticker, _on_tick, *, stop_if=None):
+    async def fake_subscribe(
+        _ticker, _on_tick, *, stop_if=None, on_connection_change=None,
+    ):
         await exiting.wait()
 
     async def fake_rest_backup(*_args, **_kwargs):
@@ -662,7 +894,9 @@ async def test_run_does_not_log_ws_stale_before_first_tick_grace(monkeypatch):
     s.target_ticker = "005930"
     s.position_status = "HOLDING"
 
-    async def fake_subscribe(_ticker, on_tick, *, stop_if=None):
+    async def fake_subscribe(
+        _ticker, on_tick, *, stop_if=None, on_connection_change=None,
+    ):
         await asyncio.sleep(0)
         await on_tick({"price": ENTRY})
         s.position_status = "CLOSED"
@@ -845,7 +1079,9 @@ async def test_run_routes_websocket_ticks_through_shared_handler(monkeypatch):
 
     handle_tick = AsyncMock(return_value=True)
 
-    async def fake_subscribe(ticker, on_tick, *, stop_if=None):
+    async def fake_subscribe(
+        ticker, on_tick, *, stop_if=None, on_connection_change=None,
+    ):
         assert ticker == "005930"
         assert stop_if is not None
         await on_tick({"price": ENTRY + 50})
@@ -962,7 +1198,9 @@ async def test_run_waits_for_close_task_when_sibling_monitor_finishes(monkeypatc
         await _state_mod.set_closed(reason)
         return True
 
-    async def fake_subscribe(_ticker, on_tick, *, stop_if=None):
+    async def fake_subscribe(
+        _ticker, on_tick, *, stop_if=None, on_connection_change=None,
+    ):
         stop = ENTRY * (1 + STEP_SIZE - STEP_TRAIL)
         await on_tick({"price": stop})
 
@@ -1060,7 +1298,9 @@ async def test_run_keeps_monitoring_and_alerts_when_backup_crashes(monkeypatch):
     notify = AsyncMock()
     ws_started = real_asyncio.Event()
 
-    async def fake_subscribe(ticker, on_tick, *, stop_if=None):
+    async def fake_subscribe(
+        ticker, on_tick, *, stop_if=None, on_connection_change=None,
+    ):
         ws_started.set()
         while not (stop_if and stop_if()):
             await real_asyncio.sleep(0.01)
@@ -1105,6 +1345,11 @@ async def test_poll_fill_attempts_cover_timeout_window(monkeypatch):
     assert result is None
     # 3초 창을 0.5초 간격으로 커버 → 6회 조회 (기존 버그: timeout_sec회 = 창 절반)
     assert get.await_count == 6
+    assert all(
+        call.kwargs["request_priority"]
+        == f4.kis_rest.REQUEST_PRIORITY_ORDER_STATUS
+        for call in get.await_args_list
+    )
 
 
 @pytest.mark.asyncio
@@ -1487,7 +1732,9 @@ async def test_run_forever_tracks_new_day_after_restart_with_closed_state(monkey
 
     subscribed = real_asyncio.Event()
 
-    async def fake_subscribe(_ticker, on_tick, *, stop_if=None):
+    async def fake_subscribe(
+        _ticker, on_tick, *, stop_if=None, on_connection_change=None,
+    ):
         subscribed.set()
         while not (stop_if and stop_if()):
             await real_asyncio.sleep(0.01)
@@ -1530,7 +1777,9 @@ async def test_run_forever_rearms_for_next_trading_day_after_close(monkeypatch):
     subscribe_count = 0
     subscribed = real_asyncio.Event()
 
-    async def fake_subscribe(_ticker, on_tick, *, stop_if=None):
+    async def fake_subscribe(
+        _ticker, on_tick, *, stop_if=None, on_connection_change=None,
+    ):
         nonlocal subscribe_count
         subscribe_count += 1
         subscribed.set()

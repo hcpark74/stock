@@ -44,6 +44,7 @@ async def fetch_vi_status(ticker: str) -> dict:
             "FID_TRGT_CLS_CODE": "",
             "FID_TRGT_EXLS_CLS_CODE": "",
         },
+        request_priority=kis_rest.REQUEST_PRIORITY_VI,
     )
     if str(resp.get("rt_cd", "")) != "0":
         raise RuntimeError(

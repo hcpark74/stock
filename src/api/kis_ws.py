@@ -19,6 +19,7 @@ async def subscribe(
     on_tick: Callable[[dict], Awaitable[None]],
     *,
     stop_if: Callable[[], bool] | None = None,
+    on_connection_change: Callable[[bool], None] | None = None,
 ) -> None:
     """
     KIS WebSocket 실시간 체결 구독 (PRD §F4, §6-3).
@@ -33,6 +34,7 @@ async def subscribe(
         if stop_if and stop_if():
             return
 
+        connected = False
         try:
             if not ws_key_ready:
                 # OAuth token과 별개인 WS 전용 접속키 1회 발급.
@@ -41,11 +43,13 @@ async def subscribe(
                 await auth.refresh_ws_key()
                 ws_key_ready = True
             async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10) as ws:
+                await _send_subscribe(ws, ticker)
+                connected = True
+                if on_connection_change is not None:
+                    on_connection_change(True)
                 log("WS_CONNECTED", level="INFO", ticker=ticker, consec_failures=consec)
                 consec = 0
                 interval = _RETRY_INTERVAL_BASE
-
-                await _send_subscribe(ws, ticker)
 
                 while True:
                     if stop_if and stop_if():
@@ -59,6 +63,9 @@ async def subscribe(
                         await on_tick(tick)
 
         except Exception as e:
+            if on_connection_change is not None:
+                on_connection_change(False)
+            connected = False
             consec += 1
             level = "CRIT" if consec >= _CRIT_THRESHOLD else "WARN"
             log("WS_DISCONNECTED", level=level,
@@ -67,6 +74,9 @@ async def subscribe(
                 return
             await asyncio.sleep(interval)
             interval = min(interval * 2, _RETRY_INTERVAL_MAX)
+        finally:
+            if connected and on_connection_change is not None:
+                on_connection_change(False)
 
 
 async def _send_subscribe(ws: websockets.WebSocketClientProtocol, ticker: str) -> None:

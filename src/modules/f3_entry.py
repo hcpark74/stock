@@ -3238,6 +3238,7 @@ async def _fetch_expected_price(
             "/uapi/domestic-stock/v1/quotations/inquire-price",
             tr_id="FHKST01010100",
             params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker},
+            request_priority=kis_rest.REQUEST_PRIORITY_CRITICAL,
         )
         try:
             if remaining is not None:
@@ -3335,6 +3336,7 @@ async def _fetch_current_price(ticker: str) -> float:
         "/uapi/domestic-stock/v1/quotations/inquire-price",
         tr_id="FHKST01010100",
         params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker},
+        request_priority=kis_rest.REQUEST_PRIORITY_CRITICAL,
     )
     return float(resp.get("output", {}).get("stck_prpr") or 0)
 
@@ -3347,6 +3349,7 @@ async def _fetch_final_entry_quote(ticker: str) -> EntryQuote | None:
             "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn",
             tr_id="FHKST01010200",
             params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker},
+            request_priority=kis_rest.REQUEST_PRIORITY_CRITICAL,
         )
     except Exception as exc:
         log(
@@ -3417,6 +3420,7 @@ async def _fetch_available_cash() -> float | None:
                 "/uapi/domestic-stock/v1/trading/inquire-balance",
                 tr_id=_BAL_TR[mode],
                 params=kis_rest.balance_inquiry_params(),
+                request_priority=kis_rest.REQUEST_PRIORITY_CRITICAL,
             )
         except Exception as exc:
             error = exc
@@ -3490,6 +3494,7 @@ async def _fetch_buyable_qty(ticker: str, mode: str) -> dict:
             "CMA_EVLU_AMT_ICLD_YN": "N",
             "OVRS_ICLD_YN": "N",
         },
+        request_priority=kis_rest.REQUEST_PRIORITY_CRITICAL,
     )
     if str(resp.get("rt_cd", "0")) != "0":
         log(
@@ -3722,6 +3727,7 @@ async def _fetch_order_fill_snapshot(
             "CTX_AREA_FK100": "",
             "CTX_AREA_NK100": "",
         },
+        request_priority=kis_rest.REQUEST_PRIORITY_ORDER_STATUS,
     )
     rows = resp.get("output1", []) or []
     if isinstance(rows, dict):

@@ -8,6 +8,7 @@ from src import db, state
 from src.modules import f5_timeout
 
 _CLEAN_ORDER = {"ccld_qty": 0, "ccld_amt": 0.0, "rmn_qty": 0}
+_REAL_FETCH_CURRENT_PRICE = f5_timeout._fetch_current_price
 
 
 @pytest.fixture(autouse=True)
@@ -50,6 +51,19 @@ def _wire_db(monkeypatch):
     monkeypatch.setattr(f5_timeout.db, "update_order_status", AsyncMock())
     monkeypatch.setattr(f5_timeout.db, "update_order_submission", AsyncMock())
     return record_order, update_fill, close_trade
+
+
+async def test_fetch_current_price_uses_price_priority(monkeypatch):
+    get = AsyncMock(return_value={"output": {"stck_prpr": "10100"}})
+    monkeypatch.setattr(f5_timeout.kis_rest, "get", get)
+
+    price = await _REAL_FETCH_CURRENT_PRICE("005930")
+
+    assert price == 10_100
+    assert (
+        get.await_args.kwargs["request_priority"]
+        == f5_timeout.kis_rest.REQUEST_PRIORITY_PRICE
+    )
 
 
 async def test_unconfirmed_fill_retries_only_with_verified_state(monkeypatch):
@@ -240,6 +254,10 @@ async def test_fetch_cancelable_qty_uses_official_tr_on_real(monkeypatch):
     assert qty == 7
     kwargs = kis_get.await_args.kwargs
     assert kwargs["tr_id"] == "TTTC0084R"        # 최신 공식 샘플 TR
+    assert (
+        kwargs["request_priority"]
+        == f5_timeout.kis_rest.REQUEST_PRIORITY_ORDER_STATUS
+    )
     assert kis_get.await_args.args[0] == "/uapi/domestic-stock/v1/trading/inquire-psbl-rvsecncl"
 
 
@@ -509,6 +527,11 @@ async def test_poll_fill_waits_for_full_quantity(monkeypatch):
 
     assert fill == {"fill_price": 10_100, "fill_qty": 10, "fill_amt": 101_000.0}
     assert kis_get.await_count == 2
+    assert all(
+        call.kwargs["request_priority"]
+        == f5_timeout.kis_rest.REQUEST_PRIORITY_ORDER_STATUS
+        for call in kis_get.await_args_list
+    )
 
 
 async def test_poll_fill_returns_partial_after_timeout(monkeypatch):

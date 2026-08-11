@@ -1,5 +1,7 @@
 .venv/
 .env
+.env.paper
+.env.real
 __pycache__/
 *.pyc
 *.pyo
