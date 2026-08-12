@@ -2,7 +2,7 @@ from src.modules import f1_selector
 
 
 def test_default_policy_thresholds_are_intentional():
-    assert f1_selector.GAP_MIN == 0.030
+    assert f1_selector.GAP_MIN == 0.025
     assert f1_selector.GAP_CORE_MAX == 0.080
     assert f1_selector.GAP_HARD_MAX == 0.100
     assert f1_selector.MIN_EXPECTED_AMOUNT == 100_000_000

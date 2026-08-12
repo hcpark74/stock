@@ -31,8 +31,13 @@ FORCE_TRAILING_HOUR = 15
 FORCE_TRAILING_MINUTE = 5
 
 STEP_SIZE      = 0.025   # 스텝 간격 +2.5% (params.json 로드 예정)
-STEP_TRAIL     = 0.015   # 스텝 기준 하락폭 -1.5%
+STEP_TRAIL     = 0.020   # 스텝 기준 하락폭 -2.0%
 HARD_STOP_RATIO = 0.020  # Hard Stop -2.0% (trailing 미활성 구간 전용)
+TRAILING_SHADOW_ENABLED = os.getenv("TRAILING_SHADOW_ENABLED", "1") == "1"
+TRAILING_SHADOW_BASELINE_TRAIL = _env_float(
+    "TRAILING_SHADOW_BASELINE_TRAIL",
+    0.015,
+)
 F4_REST_BACKUP_ENABLED = os.getenv("F4_REST_BACKUP_ENABLED", "1") == "1"
 F4_REST_ONLY_WHEN_WS_STALE = os.getenv("F4_REST_ONLY_WHEN_WS_STALE", "1") == "1"
 F4_WS_STALE_SEC = max(0.0, _env_float("F4_WS_STALE_SEC", 2.0))
@@ -101,6 +106,7 @@ _close_in_progress = False
 _close_in_progress_warned = False
 _closing_task: asyncio.Task | None = None
 _active_monitor_tasks: set[asyncio.Task] = set()
+_shadow_baseline_recorded_trade_id: int | None = None
 
 _REARM_INTERVAL_SEC = 0.5
 _REARM_HOLDING_INTERVAL_SEC = 5.0
@@ -735,13 +741,167 @@ async def _process_tick(price: float, spike_filter: SpikeFilter) -> None:
 
     # [우선순위 2] Step Trailing
     if s.trailing_active:
-        stop = entry * (1 + s.highest_step - STEP_TRAIL)
-        if price <= stop:
+        baseline_stop, recommended_stop = _trailing_shadow_stop_prices(
+            entry,
+            s.highest_step,
+        )
+        recommended_hit = price <= recommended_stop
+        # 기존 1.5% 선만 먼저 맞은 경우를 저장한다. 현재 2.0% 선도 같은
+        # 틱에 맞았다면 청산을 지연시키지 않고 최종화 단계에서 동일 틱으로
+        # 비교 행을 만든다.
+        if price <= baseline_stop and not recommended_hit:
+            await _record_trailing_shadow_baseline(
+                price,
+                baseline_stop=baseline_stop,
+                recommended_stop=recommended_stop,
+            )
+        if recommended_hit:
             await _trigger_close(price, "TRAILING")
             return
 
     if high_changed or step_changed or trailing_activated:
         await _persist_tracking_state(force=step_changed or trailing_activated)
+
+
+def _trailing_shadow_stop_prices(
+    entry_price: float,
+    highest_step: float,
+) -> tuple[float, float]:
+    return (
+        entry_price * (1 + highest_step - TRAILING_SHADOW_BASELINE_TRAIL),
+        entry_price * (1 + highest_step - STEP_TRAIL),
+    )
+
+
+def _trailing_shadow_config_valid() -> bool:
+    return (
+        TRAILING_SHADOW_ENABLED
+        and 0 < TRAILING_SHADOW_BASELINE_TRAIL < STEP_TRAIL
+    )
+
+
+async def _record_trailing_shadow_baseline(
+    price: float,
+    *,
+    baseline_stop: float,
+    recommended_stop: float,
+) -> None:
+    """Record the first legacy-rule exit without affecting the live rule."""
+    global _shadow_baseline_recorded_trade_id
+    s = state.get()
+    if (
+        not _trailing_shadow_config_valid()
+        or not s.trade_id
+        or _shadow_baseline_recorded_trade_id == s.trade_id
+    ):
+        return
+    try:
+        inserted = await db.record_trailing_shadow_baseline(
+            s.trade_id,
+            baseline_step_trail=TRAILING_SHADOW_BASELINE_TRAIL,
+            recommended_step_trail=STEP_TRAIL,
+            entry_price=float(s.entry_price or 0),
+            highest_step=s.highest_step,
+            baseline_stop_price=baseline_stop,
+            recommended_stop_price=recommended_stop,
+            baseline_exit_price=price,
+        )
+        _shadow_baseline_recorded_trade_id = s.trade_id
+        if inserted:
+            entry = float(s.entry_price or price)
+            log(
+                "TRAILING_SHADOW_BASELINE_EXIT",
+                level="INFO",
+                ticker=s.target_ticker,
+                trade_id=s.trade_id,
+                baseline_step_trail_pct=round(
+                    TRAILING_SHADOW_BASELINE_TRAIL * 100,
+                    2,
+                ),
+                recommended_step_trail_pct=round(STEP_TRAIL * 100, 2),
+                highest_step=s.highest_step,
+                baseline_stop_price=round(baseline_stop, 0),
+                recommended_stop_price=round(recommended_stop, 0),
+                baseline_exit_price=price,
+                baseline_pnl_pct=round((price / entry - 1) * 100, 4),
+            )
+    except Exception as exc:
+        # 보고 전용 shadow가 현재 청산 판단을 흔들면 안 된다.
+        log(
+            "TRAILING_SHADOW_BASELINE_RECORD_ERROR",
+            level="WARN",
+            ticker=s.target_ticker,
+            trade_id=s.trade_id,
+            error=repr(exc),
+        )
+
+
+async def finalize_trailing_shadow(
+    *,
+    trigger_price: float,
+    actual_exit_price: float,
+    exit_qty: int,
+    actual_pnl_pct: float,
+    close_reason: str,
+) -> dict | None:
+    """Finalize and log the per-trade legacy-vs-current exit comparison."""
+    s = state.get()
+    if not _trailing_shadow_config_valid() or not s.trade_id:
+        return None
+    entry = float(s.entry_price or 0)
+    decision_exit = trigger_price if trigger_price > 0 else actual_exit_price
+    if entry <= 0 or decision_exit <= 0 or actual_exit_price <= 0 or exit_qty <= 0:
+        return None
+
+    baseline_stop: float | None = None
+    recommended_stop: float | None = None
+    if s.trailing_active:
+        baseline_stop, recommended_stop = _trailing_shadow_stop_prices(
+            entry,
+            s.highest_step,
+        )
+    try:
+        comparison = await db.finalize_trailing_shadow_comparison(
+            s.trade_id,
+            baseline_step_trail=TRAILING_SHADOW_BASELINE_TRAIL,
+            recommended_step_trail=STEP_TRAIL,
+            entry_price=entry,
+            exit_qty=exit_qty,
+            highest_step=s.highest_step,
+            baseline_stop_price=baseline_stop,
+            recommended_stop_price=recommended_stop,
+            recommended_exit_price=decision_exit,
+            actual_exit_price=actual_exit_price,
+            actual_pnl_pct=actual_pnl_pct,
+            close_reason=close_reason,
+        )
+        log(
+            "TRAILING_SHADOW_FINAL",
+            level="INFO",
+            ticker=s.target_ticker,
+            trade_id=s.trade_id,
+            close_reason=close_reason,
+            baseline_stop_price=comparison.get("baseline_stop_price"),
+            recommended_stop_price=comparison.get("recommended_stop_price"),
+            baseline_exit_price=comparison.get("baseline_exit_price"),
+            recommended_exit_price=comparison.get("recommended_exit_price"),
+            actual_exit_price=comparison.get("actual_exit_price"),
+            baseline_pnl_pct=comparison.get("baseline_pnl_pct"),
+            recommended_pnl_pct=comparison.get("recommended_pnl_pct"),
+            actual_pnl_pct=comparison.get("actual_pnl_pct"),
+            pnl_delta_pct=comparison.get("pnl_delta_pct"),
+            pnl_delta_amount=comparison.get("pnl_delta_amount"),
+        )
+        return comparison
+    except Exception as exc:
+        log(
+            "TRAILING_SHADOW_FINALIZE_ERROR",
+            level="WARN",
+            ticker=s.target_ticker,
+            trade_id=s.trade_id,
+            error=repr(exc),
+        )
+        return None
 
 async def _trigger_close(price: float, reason: str) -> None:
     """Run a close once; state becomes CLOSED only after sell/DB/persist succeeds."""
@@ -1160,6 +1320,14 @@ async def _execute_close_impl(price: float, reason: str) -> bool:
         )
         return True
 
+    await finalize_trailing_shadow(
+        trigger_price=price,
+        actual_exit_price=exit_price,
+        exit_qty=qty,
+        actual_pnl_pct=pnl_pct,
+        close_reason=reason,
+    )
+
     event_name = "TRAILING_STOP" if reason == "TRAILING" else reason
     level = "INFO" if reason == "TRAILING" else "WARN"
 
@@ -1190,9 +1358,9 @@ async def _run_dry_ticks(ticker: str, spike_filter: SpikeFilter) -> None:
         entry,
         round(entry * 1.026),
         round(entry * 1.032),
-        # After the first step, trailing stop is entry * 1.010. Use a value
-        # slightly below it so DRY_RUN deterministically closes.
-        round(entry * 1.009),
+        # Use a value slightly below the configured first-step stop so DRY_RUN
+        # deterministically closes when STEP_TRAIL changes.
+        round(entry * (1 + STEP_SIZE - STEP_TRAIL)) - 1,
     ]
 
     live.ws_connected = True

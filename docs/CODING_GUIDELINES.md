@@ -111,7 +111,7 @@ PRD §3-F4 기준. 아래 수식을 그대로 코드로 옮긴다.
 ```python
 # Python / f4_tracking.py → Step Trailing 핵심 로직
 STEP_SIZE  = 0.025   # params에서 로드
-STEP_TRAIL = 0.015   # params에서 로드
+STEP_TRAIL = 0.020   # params에서 로드
 HARD_STOP  = 0.020   # params에서 로드
 
 def on_tick(price: float) -> None:
@@ -305,7 +305,7 @@ def test_step_trailing_triggers_at_stop():
     state["entry_price"]  = 100_000
     state["highest_step"] = 0.075   # +7.5% 스텝 달성 상태
     state["trailing_active"] = True
-    # stop = 100_000 × (1 + 0.075 - 0.015) = 106_000
+    # stop = 100_000 × (1 + 0.075 - 0.020) = 105_500
     on_tick(106_001)   # 발동 안 됨
     on_tick(105_999)   # 발동
     assert state["close_reason"] == "TRAILING"

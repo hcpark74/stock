@@ -46,7 +46,7 @@ def test_improve_empty_rows_returns_zero_structure():
     assert payload["mfe_rows"] == []
     assert payload["hold_time"] == {}
     assert payload["params"]["step_size_pct"] == 2.5
-    assert payload["params"]["step_trail_pct"] == 1.5
+    assert payload["params"]["step_trail_pct"] == 2.0
     assert payload["params"]["hard_stop_pct"] == 2.0
     assert payload["params"]["gap_max_order_pct"] == 10.0
     assert payload["params"]["gap_max_fill_pct"] == 10.0
@@ -313,9 +313,9 @@ def test_improve_trailing_diagnostic_compares_exit_with_active_step_stop():
     assert diag["giveback_n"] == 2
     assert diag["stop_eval_n"] == 2
     assert diag["avg_stop_slip_pp"] == 0.0
-    assert diag["max_stop_slip_pp"] == 0.05
-    assert diag["structural_giveback_min_pp"] == 1.5
-    assert diag["structural_giveback_max_pp"] == 4.0
+    assert diag["max_stop_slip_pp"] == 0.0
+    assert diag["structural_giveback_min_pp"] == 2.0
+    assert diag["structural_giveback_max_pp"] == 4.5
 
 
 def test_improve_candidate_supply_uses_no_target_only_and_deduplicates_dates():

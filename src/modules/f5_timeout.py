@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 from src import db, notifier, state
 from src.api import kis_rest
-from src.modules import exit_recovery
+from src.modules import exit_recovery, f4_tracking
 from src.utils.logger import log
 
 KST = ZoneInfo("Asia/Seoul")
@@ -153,6 +153,7 @@ async def execute() -> None:
     order_recorded_amt = 0.0
     order_started_at: float | None = None
     liquidation_started_at: float | None = None
+    last_ref_price = 0.0
 
     async def _apply_order_fill(cum_qty: int, cum_amt: float) -> None:
         """현재 주문의 누적 체결을 총계와 DB에 델타 반영한다."""
@@ -254,6 +255,7 @@ async def execute() -> None:
             except Exception as e:
                 log("F5_PRICE_QUERY_FAIL", level="WARN",
                     ticker=ticker, error=str(e))
+        last_ref_price = ref_price
 
         try:
             send_started_at = time.perf_counter()
@@ -333,6 +335,7 @@ async def execute() -> None:
                 exit_avg,
                 filled_qty_total,
                 fill_latency_ms=fill_latency_ms,
+                trigger_price=last_ref_price,
             )
             return
         # 잔고는 0인데 체결가를 한 번도 확인하지 못한 경우 — 거래를 임의 가격으로
@@ -370,6 +373,7 @@ async def _finalize_close(
     exit_qty: int,
     *,
     fill_latency_ms: int | None = None,
+    trigger_price: float = 0.0,
 ) -> None:
     """전량 체결 확인 후 거래 종료 기록. DB 실패는 재매도 사유가 아니므로 격리한다."""
     if not await state.set_closed("TIMEOUT"):
@@ -397,6 +401,14 @@ async def _finalize_close(
                 "TIMEOUT_CLOSE_DB_FAILED", level="CRIT",
                 message=f"마감 청산 완료 후 DB 기록 실패: {ticker}. 거래 이력을 수동 확인하세요.",
                 ticker=ticker,
+            )
+        else:
+            await f4_tracking.finalize_trailing_shadow(
+                trigger_price=trigger_price,
+                actual_exit_price=exit_price,
+                exit_qty=exit_qty,
+                actual_pnl_pct=pnl_pct,
+                close_reason="TIMEOUT",
             )
     log("TIMEOUT_CLOSE", level="INFO", ticker=ticker,
         entry_price=entry, exit_price=exit_price, exit_qty=exit_qty,

@@ -445,6 +445,86 @@ async def test_update_trade_progress_ignores_closed_trade(mem):
     assert row["highest_step"] == pytest.approx(0.025)
     assert row["status"] == "CLOSED"
 
+
+# ── trailing shadow comparison ────────────────────────────────────────
+
+async def test_trailing_shadow_preserves_first_baseline_exit_and_finalizes(mem):
+    trade_id = await db.open_trade("20260623", "005930", 10_000.0, 100)
+
+    inserted = await db.record_trailing_shadow_baseline(
+        trade_id,
+        baseline_step_trail=0.015,
+        recommended_step_trail=0.020,
+        entry_price=10_000.0,
+        highest_step=0.025,
+        baseline_stop_price=10_100.0,
+        recommended_stop_price=10_050.0,
+        baseline_exit_price=10_090.0,
+    )
+    repeated = await db.record_trailing_shadow_baseline(
+        trade_id,
+        baseline_step_trail=0.015,
+        recommended_step_trail=0.020,
+        entry_price=10_000.0,
+        highest_step=0.025,
+        baseline_stop_price=10_100.0,
+        recommended_stop_price=10_050.0,
+        baseline_exit_price=10_080.0,
+    )
+
+    assert inserted is True
+    assert repeated is False
+
+    comparison = await db.finalize_trailing_shadow_comparison(
+        trade_id,
+        baseline_step_trail=0.015,
+        recommended_step_trail=0.020,
+        entry_price=10_000.0,
+        exit_qty=100,
+        highest_step=0.025,
+        baseline_stop_price=10_100.0,
+        recommended_stop_price=10_050.0,
+        recommended_exit_price=10_040.0,
+        actual_exit_price=10_030.0,
+        actual_pnl_pct=0.3,
+        close_reason="TRAILING",
+    )
+
+    assert comparison["finalized"] == 1
+    assert comparison["baseline_exit_price"] == pytest.approx(10_090.0)
+    assert comparison["recommended_exit_price"] == pytest.approx(10_040.0)
+    assert comparison["actual_exit_price"] == pytest.approx(10_030.0)
+    assert comparison["baseline_pnl_pct"] == pytest.approx(0.9)
+    assert comparison["recommended_pnl_pct"] == pytest.approx(0.4)
+    assert comparison["pnl_delta_pct"] == pytest.approx(-0.5)
+    assert comparison["baseline_pnl_amount"] == pytest.approx(9_000.0)
+    assert comparison["recommended_pnl_amount"] == pytest.approx(4_000.0)
+    assert comparison["pnl_delta_amount"] == pytest.approx(-5_000.0)
+
+
+async def test_trailing_shadow_without_earlier_baseline_uses_same_exit(mem):
+    trade_id = await db.open_trade("20260623", "005930", 10_000.0, 100)
+
+    comparison = await db.finalize_trailing_shadow_comparison(
+        trade_id,
+        baseline_step_trail=0.015,
+        recommended_step_trail=0.020,
+        entry_price=10_000.0,
+        exit_qty=100,
+        highest_step=0.0,
+        baseline_stop_price=None,
+        recommended_stop_price=None,
+        recommended_exit_price=9_800.0,
+        actual_exit_price=9_790.0,
+        actual_pnl_pct=-2.1,
+        close_reason="HARD_STOP",
+    )
+
+    assert comparison["baseline_exit_price"] == pytest.approx(9_800.0)
+    assert comparison["recommended_exit_price"] == pytest.approx(9_800.0)
+    assert comparison["pnl_delta_pct"] == pytest.approx(0.0)
+    assert comparison["pnl_delta_amount"] == pytest.approx(0.0)
+
 # ── close_trade ───────────────────────────────────────────────────────
 
 async def test_close_trade_status_is_closed(mem):

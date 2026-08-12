@@ -34,6 +34,11 @@ def holding_state(monkeypatch):
     monkeypatch.setattr(
         f5_timeout, "_fetch_current_price",
         AsyncMock(return_value=10_000.0), raising=False)
+    monkeypatch.setattr(
+        f5_timeout.f4_tracking,
+        "finalize_trailing_shadow",
+        AsyncMock(),
+    )
     yield
     s.position_status = "IDLE"
     s.close_reason = None
@@ -108,6 +113,13 @@ async def test_recovers_actual_fill_from_order_status(monkeypatch):
     close_trade.assert_awaited_once_with(
         7, 10_100, "TIMEOUT", 1.0, 0.0,
         exit_qty=10, high_price=10_400.0,
+    )
+    f5_timeout.f4_tracking.finalize_trailing_shadow.assert_awaited_once_with(
+        trigger_price=10_000.0,
+        actual_exit_price=10_100,
+        exit_qty=10,
+        actual_pnl_pct=1.0,
+        close_reason="TIMEOUT",
     )
     codes = [c.args[0] for c in send.await_args_list]
     assert "TIMEOUT_ORDER_FAILED" not in codes

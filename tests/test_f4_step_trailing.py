@@ -76,6 +76,17 @@ def holding_state(monkeypatch):
     s.entry_at = None
     s.post_close_tracking_stopped = False
     monkeypatch.setattr(f4.db, "update_order_submission", AsyncMock())
+    monkeypatch.setattr(
+        f4.db,
+        "record_trailing_shadow_baseline",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        f4.db,
+        "finalize_trailing_shadow_comparison",
+        AsyncMock(return_value={}),
+    )
+    monkeypatch.setattr(f4, "_shadow_baseline_recorded_trade_id", None)
 
 
 # ── 스텝 갱신 정확성 ──────────────────────────────────────────────────
@@ -255,7 +266,7 @@ async def test_hard_stop_skipped_when_trailing_active():
     s.trailing_active = True
     s.highest_step = STEP_SIZE  # 1스텝 달성 후 하락 시나리오
     price = ENTRY * (1 - HARD_STOP_RATIO)  # 9800 — Hard Stop 조건이지만 trailing 우선
-    # stop = ENTRY * (1 + 0.025 - 0.015) = 10100 → 9800 <= 10100 → TRAILING 발동
+    # stop = ENTRY * (1 + 0.025 - 0.020) = 10050 → 9800 <= 10050 → TRAILING 발동
     mock_close = await _run_tick(price, set_closed_return=True)
     # TRAILING으로 닫혀야 함, HARD_STOP이 아님
     mock_close.assert_awaited_once_with(price, "TRAILING")
@@ -289,7 +300,7 @@ async def test_step_trailing_triggers_at_stop():
     s = _state_mod.get()
     s.trailing_active = True
     s.highest_step = STEP_SIZE  # 0.025
-    # stop = ENTRY * (1 + 0.025 - 0.015) = 10100
+    # stop = ENTRY * (1 + 0.025 - 0.020) = 10050
     stop = ENTRY * (1 + STEP_SIZE - STEP_TRAIL)
     price = stop  # 정확히 stop (<=)
     mock_close = await _run_tick(price, set_closed_return=True)
@@ -302,9 +313,50 @@ async def test_step_trailing_not_triggered_above_stop():
     s.trailing_active = True
     s.highest_step = STEP_SIZE
     stop = ENTRY * (1 + STEP_SIZE - STEP_TRAIL)
-    price = stop + 1  # 10101
+    price = stop + 1  # 10051
     mock_close = await _run_tick(price, set_closed_return=True)
     mock_close.assert_not_awaited()
+
+
+async def test_shadow_records_legacy_exit_before_wider_current_stop():
+    import src.modules.f4_tracking as f4
+
+    s = _state_mod.get()
+    s.trade_id = 123
+    s.trailing_active = True
+    s.highest_step = STEP_SIZE
+    baseline_stop = ENTRY * (1 + STEP_SIZE - f4.TRAILING_SHADOW_BASELINE_TRAIL)
+    recommended_stop = ENTRY * (1 + STEP_SIZE - STEP_TRAIL)
+    price = (baseline_stop + recommended_stop) / 2
+
+    mock_close = await _run_tick(price)
+
+    mock_close.assert_not_awaited()
+    f4.db.record_trailing_shadow_baseline.assert_awaited_once_with(
+        123,
+        baseline_step_trail=f4.TRAILING_SHADOW_BASELINE_TRAIL,
+        recommended_step_trail=STEP_TRAIL,
+        entry_price=ENTRY,
+        highest_step=STEP_SIZE,
+        baseline_stop_price=baseline_stop,
+        recommended_stop_price=recommended_stop,
+        baseline_exit_price=price,
+    )
+
+
+async def test_shadow_does_not_delay_current_stop_with_baseline_write():
+    import src.modules.f4_tracking as f4
+
+    s = _state_mod.get()
+    s.trade_id = 123
+    s.trailing_active = True
+    s.highest_step = STEP_SIZE
+    recommended_stop = ENTRY * (1 + STEP_SIZE - STEP_TRAIL)
+
+    mock_close = await _run_tick(recommended_stop)
+
+    mock_close.assert_awaited_once_with(recommended_stop, "TRAILING")
+    f4.db.record_trailing_shadow_baseline.assert_not_awaited()
 
 
 # ── 청산 10분 전 강제 발동 ────────────────────────────────────────────
@@ -325,8 +377,8 @@ async def test_late_force_trailing_active():
 
 
 async def test_late_triggers_if_below_zero_step_stop():
-    """강제 활성 후 stop(entry×0.985) 이하 → 청산 발동."""
-    price = ENTRY * 0.984  # stop = ENTRY*(1+0-0.015)=9850, 9840 < 9850
+    """강제 활성 후 stop(entry×0.980) 이하 → 청산 발동."""
+    price = ENTRY * (1 - STEP_TRAIL) - 1
     mock_close = await _run_tick(
         price, hour=_LATE_H, minute=_LATE_M, set_closed_return=True
     )
@@ -348,7 +400,7 @@ async def test_highest_step_does_not_decrease():
     s.trailing_active = True
     s.highest_step = STEP_SIZE * 2  # 0.05
     # 4% 가격(current_step = 0.025) — stop보다 위라서 청산 없음
-    # stop = ENTRY*(1+0.05-0.015) = 10350, price=10400 > 10350 → no close
+    # stop = ENTRY*(1+0.05-0.020) = 10300, price=10400 > 10300 → no close
     price = ENTRY * 1.04  # 10400
     await _run_tick(price)
     assert _state_mod.get().highest_step == pytest.approx(STEP_SIZE * 2)
@@ -1497,6 +1549,8 @@ async def test_execute_close_sends_critical_alert_on_sell_error(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_execute_close_separates_trigger_price_and_measures_latency(monkeypatch):
+    import src.modules.f4_tracking as f4
+
     _state_mod.get().trade_id = 123
     record_order = AsyncMock(return_value=9)
     update_order_fill = AsyncMock()
@@ -1540,6 +1594,20 @@ async def test_execute_close_separates_trigger_price_and_measures_latency(monkey
         0.0,
         exit_qty=100,
         high_price=ENTRY,
+    )
+    f4.db.finalize_trailing_shadow_comparison.assert_awaited_once_with(
+        123,
+        baseline_step_trail=f4.TRAILING_SHADOW_BASELINE_TRAIL,
+        recommended_step_trail=STEP_TRAIL,
+        entry_price=ENTRY,
+        exit_qty=100,
+        highest_step=0.0,
+        baseline_stop_price=None,
+        recommended_stop_price=None,
+        recommended_exit_price=ENTRY * 0.98,
+        actual_exit_price=9_750.0,
+        actual_pnl_pct=-2.5,
+        close_reason="HARD_STOP",
     )
 
 

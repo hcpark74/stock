@@ -163,6 +163,35 @@ async def init(db_path: str) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_asset_snapshots_captured_at
             ON asset_snapshots(captured_at);
+
+        CREATE TABLE IF NOT EXISTS trailing_shadow_comparisons (
+            trade_id                    INTEGER PRIMARY KEY
+                                                REFERENCES trades(id) ON DELETE CASCADE,
+            baseline_step_trail         REAL NOT NULL,
+            recommended_step_trail      REAL NOT NULL,
+            entry_price                 REAL NOT NULL,
+            exit_qty                    INTEGER,
+            baseline_highest_step       REAL,
+            recommended_highest_step    REAL,
+            baseline_stop_price         REAL,
+            recommended_stop_price      REAL,
+            baseline_exit_price         REAL,
+            recommended_exit_price      REAL,
+            actual_exit_price           REAL,
+            baseline_exit_at            TEXT,
+            recommended_exit_at         TEXT,
+            close_reason                TEXT,
+            baseline_pnl_pct            REAL,
+            recommended_pnl_pct         REAL,
+            actual_pnl_pct              REAL,
+            pnl_delta_pct               REAL,
+            baseline_pnl_amount         REAL,
+            recommended_pnl_amount      REAL,
+            pnl_delta_amount            REAL,
+            finalized                   INTEGER NOT NULL DEFAULT 0,
+            created_at                  TEXT NOT NULL,
+            updated_at                  TEXT NOT NULL
+        );
     """)
     # 기존 DB 마이그레이션: highest_step 컬럼 추가
     try:
@@ -752,6 +781,190 @@ async def update_trade_progress(
         (high_price, highest_step, now, trade_id),
     )
     await conn.commit()
+
+
+async def record_trailing_shadow_baseline(
+    trade_id: int,
+    *,
+    baseline_step_trail: float,
+    recommended_step_trail: float,
+    entry_price: float,
+    highest_step: float,
+    baseline_stop_price: float,
+    recommended_stop_price: float,
+    baseline_exit_price: float,
+) -> bool:
+    """Persist the first tick where the legacy trailing rule would exit.
+
+    Returns ``True`` only for the first observation. Repeated ticks and process
+    restarts are idempotent because ``trade_id`` is the primary key.
+    """
+    now = _now()
+    conn = get()
+    cursor = await conn.execute(
+        """INSERT OR IGNORE INTO trailing_shadow_comparisons (
+               trade_id, baseline_step_trail, recommended_step_trail,
+               entry_price, baseline_highest_step, baseline_stop_price,
+               recommended_stop_price, baseline_exit_price, baseline_exit_at,
+               finalized, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)""",
+        (
+            trade_id,
+            baseline_step_trail,
+            recommended_step_trail,
+            entry_price,
+            highest_step,
+            baseline_stop_price,
+            recommended_stop_price,
+            baseline_exit_price,
+            now,
+            now,
+            now,
+        ),
+    )
+    await conn.commit()
+    return cursor.rowcount == 1
+
+
+async def finalize_trailing_shadow_comparison(
+    trade_id: int,
+    *,
+    baseline_step_trail: float,
+    recommended_step_trail: float,
+    entry_price: float,
+    exit_qty: int,
+    highest_step: float,
+    baseline_stop_price: float | None,
+    recommended_stop_price: float | None,
+    recommended_exit_price: float,
+    actual_exit_price: float,
+    actual_pnl_pct: float,
+    close_reason: str,
+) -> dict:
+    """Finalize a legacy-vs-recommended trailing comparison for one trade.
+
+    Exit prices are decision-tick prices, so the strategy delta is not polluted
+    by fill latency. ``actual_exit_price`` and ``actual_pnl_pct`` retain the
+    confirmed execution result alongside that counterfactual comparison.
+    """
+    if exit_qty <= 0:
+        raise ValueError("exit_qty must be positive when finalizing trailing shadow")
+    if entry_price <= 0 or recommended_exit_price <= 0 or actual_exit_price <= 0:
+        raise ValueError("shadow comparison prices must be positive")
+
+    now = _now()
+    conn = get()
+    async with conn.execute(
+        "SELECT * FROM trailing_shadow_comparisons WHERE trade_id=?",
+        (trade_id,),
+    ) as cur:
+        existing_row = await cur.fetchone()
+    existing = dict(existing_row) if existing_row else {}
+
+    baseline_exit_price = float(
+        existing.get("baseline_exit_price") or recommended_exit_price
+    )
+    baseline_exit_at = existing.get("baseline_exit_at") or now
+    baseline_highest_step = float(
+        existing.get("baseline_highest_step")
+        if existing.get("baseline_highest_step") is not None
+        else highest_step
+    )
+    stored_baseline_stop = existing.get("baseline_stop_price")
+    if stored_baseline_stop is None:
+        stored_baseline_stop = baseline_stop_price
+
+    baseline_pnl_pct = round((baseline_exit_price / entry_price - 1) * 100, 4)
+    recommended_pnl_pct = round(
+        (recommended_exit_price / entry_price - 1) * 100,
+        4,
+    )
+    pnl_delta_pct = round(recommended_pnl_pct - baseline_pnl_pct, 4)
+    baseline_pnl_amount = round(
+        (baseline_exit_price - entry_price) * exit_qty,
+        2,
+    )
+    recommended_pnl_amount = round(
+        (recommended_exit_price - entry_price) * exit_qty,
+        2,
+    )
+    pnl_delta_amount = round(recommended_pnl_amount - baseline_pnl_amount, 2)
+
+    await conn.execute(
+        """INSERT INTO trailing_shadow_comparisons (
+               trade_id, baseline_step_trail, recommended_step_trail,
+               entry_price, exit_qty, baseline_highest_step,
+               recommended_highest_step, baseline_stop_price,
+               recommended_stop_price, baseline_exit_price,
+               recommended_exit_price, actual_exit_price, baseline_exit_at,
+               recommended_exit_at, close_reason, baseline_pnl_pct,
+               recommended_pnl_pct, actual_pnl_pct, pnl_delta_pct,
+               baseline_pnl_amount, recommended_pnl_amount, pnl_delta_amount,
+               finalized, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+           ON CONFLICT(trade_id) DO UPDATE SET
+               baseline_step_trail=excluded.baseline_step_trail,
+               recommended_step_trail=excluded.recommended_step_trail,
+               entry_price=excluded.entry_price,
+               exit_qty=excluded.exit_qty,
+               baseline_highest_step=excluded.baseline_highest_step,
+               recommended_highest_step=excluded.recommended_highest_step,
+               baseline_stop_price=excluded.baseline_stop_price,
+               recommended_stop_price=excluded.recommended_stop_price,
+               baseline_exit_price=excluded.baseline_exit_price,
+               recommended_exit_price=excluded.recommended_exit_price,
+               actual_exit_price=excluded.actual_exit_price,
+               baseline_exit_at=excluded.baseline_exit_at,
+               recommended_exit_at=excluded.recommended_exit_at,
+               close_reason=excluded.close_reason,
+               baseline_pnl_pct=excluded.baseline_pnl_pct,
+               recommended_pnl_pct=excluded.recommended_pnl_pct,
+               actual_pnl_pct=excluded.actual_pnl_pct,
+               pnl_delta_pct=excluded.pnl_delta_pct,
+               baseline_pnl_amount=excluded.baseline_pnl_amount,
+               recommended_pnl_amount=excluded.recommended_pnl_amount,
+               pnl_delta_amount=excluded.pnl_delta_amount,
+               finalized=1,
+               updated_at=excluded.updated_at""",
+        (
+            trade_id,
+            baseline_step_trail,
+            recommended_step_trail,
+            entry_price,
+            exit_qty,
+            baseline_highest_step,
+            highest_step,
+            stored_baseline_stop,
+            recommended_stop_price,
+            baseline_exit_price,
+            recommended_exit_price,
+            actual_exit_price,
+            baseline_exit_at,
+            now,
+            close_reason,
+            baseline_pnl_pct,
+            recommended_pnl_pct,
+            actual_pnl_pct,
+            pnl_delta_pct,
+            baseline_pnl_amount,
+            recommended_pnl_amount,
+            pnl_delta_amount,
+            existing.get("created_at") or now,
+            now,
+        ),
+    )
+    await conn.commit()
+    return await get_trailing_shadow_comparison(trade_id)
+
+
+async def get_trailing_shadow_comparison(trade_id: int) -> dict:
+    conn = get()
+    async with conn.execute(
+        "SELECT * FROM trailing_shadow_comparisons WHERE trade_id=?",
+        (trade_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    return dict(row) if row else {}
 
 async def close_trade(
     trade_id: int,

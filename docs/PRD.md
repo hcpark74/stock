@@ -265,7 +265,7 @@ F4. 장중 추적 스탑 모듈 (09:00:00 ~ F5 청산 직전)
         state["trailing_active"] = True
 
   stop_price 계산:
-    stop_price = state["entry_price"] × (1 + state["highest_step"] - 0.015)
+    stop_price = state["entry_price"] × (1 + state["highest_step"] - 0.020)
 
   발동:
     09:00 ~ 10:49: trailing_active == True  AND  체결가 <= stop_price
@@ -928,7 +928,7 @@ Telegram Bot 구현 요건
   자본 배분 비율 (alloc)    | 10%    | 5% ~ 20%          | 5%
   Hard Stop (hs)           | -2.0%  | -1.5% ~ -3.0%     | 0.5%
   Step 크기 (ss)           | +2.5%  | +1.5% ~ +4.0%     | 0.5%
-  Step Trail 폭 (st)       | -1.5%  | -1.0% ~ -2.5%     | 0.5%
+  Step Trail 폭 (st)       | -2.0%  | -1.0% ~ -2.5%     | 0.5%
   VIX Severe (vix_severe)  | 30.0   | 27.5 ~ 35.0       | 2.5
   VIX Score (vix_score)    | 25.0   | 22.5 ~ 30.0       | 2.5
   NASDAQ Severe            | -2.5%  | -2.0% ~ -3.5%     | 0.5%
@@ -1077,8 +1077,8 @@ Walk-Forward 방식을 필수 적용한다.
   08:58:00      | F2 시작 — 복합 정렬, 타겟 후보 락업
   진입 가능 시간 | F3 — 갭·실제 VI·최종 호가 재검증 후 100% 상한 지정가 주문
   체결 직후      | F3 체결 확인 / 슬리피지 가드 적용 / F4 WebSocket 추적 시작
-  09:00~10:49   | F4 — Hard Stop(-2%) / Step Trailing(스텝-1.5%) 감시
-  15:05~15:14   | F4 — Step Trailing 강제 활성화 (스텝 미달성 시 진입가-1.5% 발동)
+  09:00~10:49   | F4 — Hard Stop(-2%) / Step Trailing(스텝-2.0%) 감시
+  15:05~15:14   | F4 — Step Trailing 강제 활성화 (스텝 미달성 시 진입가-2.0% 발동)
   15:14:50      | F5 Pre-Check — 잔고 조회 및 prefetch_qty 저장
   15:15:00      | F5 Execute — 미청산 물량 시장가 청산 (Retry 최대 3회)
   15:15:00+     | 로그 최종 기록, today_state.json CLOSED 갱신, daily_pnl_pct 갱신, 알림 발송

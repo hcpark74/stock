@@ -47,7 +47,7 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-GAP_MIN = _env_float("F1_GAP_MIN", 0.030)
+GAP_MIN = _env_float("F1_GAP_MIN", 0.025)
 GAP_CORE_MAX = _env_float("F1_GAP_CORE_MAX", 0.080)
 GAP_HARD_MAX = _env_float("F1_GAP_HARD_MAX", 0.100)
 # 2026-07-20: 예상 체결대금 수백만원짜리 후보가 통과해 미체결(VI)·유동성 제로

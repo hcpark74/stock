@@ -17,7 +17,7 @@
 | 수량 | `INTEGER` |
 | Enum 값 | `TEXT` CHECK 제약으로 강제 |
 | 운영 상태 | `today_state.json` 유지 — crash recovery 전용 |
-| 분석/이력 | SQLite (`trades`, `orders`, `entry_order_attempts`, `partial_exits`, `daily_skips`, `asset_snapshots`) |
+| 분석/이력 | SQLite (`trades`, `orders`, `entry_order_attempts`, `partial_exits`, `daily_skips`, `asset_snapshots`, `trailing_shadow_comparisons`) |
 
 ---
 
@@ -26,6 +26,7 @@
 ```
 trades (1) ──< orders       (N)
 trades (1) ──< partial_exits(N)
+trades (1) ──  trailing_shadow_comparisons(0..1)
 trades (1) ──  daily_skips  (date 기준 선택적)
 entry_order_attempts        (체결 전 진입 주문 감사, trade와 독립)
 asset_snapshots             (KIS 자산 조회 이력)
@@ -288,6 +289,26 @@ CREATE TABLE IF NOT EXISTS asset_snapshots (
 CREATE INDEX IF NOT EXISTS idx_asset_snapshots_captured_at
     ON asset_snapshots(captured_at);
 ```
+
+---
+
+### 3-2-3. `trailing_shadow_comparisons` — 기존/추천 트레일 청산 비교
+
+거래당 최대 1행이다. 기존 1.5% 선이 먼저 맞은 최초 틱을 보존하고, 실제 전략이
+종료되면 현재 2.0% 결정 틱·실제 체결가·수수료 제외 손익 차이를 최종화한다.
+`baseline_exit_price`와 `recommended_exit_price`는 주문 체결가가 아니라 동일한
+틱 기준의 전략 비교값이며, 확인 체결가는 `actual_exit_price`에 별도로 둔다.
+
+주요 필드는 다음과 같다.
+
+- 설정: `baseline_step_trail`, `recommended_step_trail`
+- 청산선: `baseline_stop_price`, `recommended_stop_price`
+- 비교 청산가: `baseline_exit_price`, `recommended_exit_price`
+- 실제 결과: `actual_exit_price`, `actual_pnl_pct`, `close_reason`
+- 차이: `pnl_delta_pct`, `pnl_delta_amount` (추천 - 기존)
+- 완료 여부: `finalized`
+
+`trade_id`는 `trades(id)`에 대한 PK/FK이며 거래 삭제 시 함께 삭제한다.
 
 ---
 

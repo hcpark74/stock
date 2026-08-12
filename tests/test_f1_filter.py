@@ -65,15 +65,15 @@ def clean_state():
 
 # ── 갭 경계값 ─────────────────────────────────────────────────────────
 
-async def test_gap_3_0_pct_passes():
-    """정확히 3.0%(GAP_MIN) → 필터 통과."""
+async def test_gap_2_5_pct_passes():
+    """정확히 2.5%(GAP_MIN) → 필터 통과."""
     result = await _run([_classified_candidate(GAP_MIN)])
     assert len(result) == 1
 
 
-async def test_gap_2_9_pct_excluded():
-    """2.9%(GAP_MIN 미만) → 필터 제외, day_skip=True."""
-    result = await _run([_classified_candidate(0.029)])
+async def test_gap_2_4_pct_excluded():
+    """2.4%(GAP_MIN 미만) → 필터 제외, day_skip=True."""
+    result = await _run([_classified_candidate(0.024)])
     assert result == []
     assert _state_mod.get().day_skip is True
 
