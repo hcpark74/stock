@@ -386,6 +386,162 @@ def test_shadow_compare_records_top_three_overlap_without_mutating_candidates(
     assert records[-1]["event"] == "PAPER_FAST_SHADOW_COMPARE"
 
 
+def test_shadow_validation_summary_counts_only_timely_complete_days(monkeypatch, tmp_path):
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    monkeypatch.setenv("PAPER_FAST_SHADOW_REQUIRED_DAYS", "10")
+    valid = [
+        {
+            "ts": "2026-08-12T09:00:00.300000+09:00",
+            "event": "PAPER_FAST_PROBE_OPEN_DONE",
+            "quality": {"ok": True},
+        },
+        {
+            "ts": "2026-08-12T09:01:07+09:00",
+            "event": "PAPER_FAST_SHADOW_COMPARE",
+            "rank1_match": True,
+            "top3_overlap_count": 2,
+        },
+    ]
+    delayed = [
+        {
+            "ts": "2026-08-13T09:00:00.300000+09:00",
+            "event": "PAPER_FAST_PROBE_OPEN_DONE",
+            "quality": {"ok": True},
+        },
+        {
+            "ts": "2026-08-13T09:05:01+09:00",
+            "event": "PAPER_FAST_SHADOW_COMPARE",
+            "rank1_match": False,
+            "top3_overlap_count": 0,
+        },
+    ]
+    for name, records in (("20260812.jsonl", valid), ("20260813.jsonl", delayed)):
+        (tmp_path / name).write_text(
+            "\n".join(json.dumps(record) for record in records) + "\n",
+            encoding="utf-8",
+        )
+
+    summary = probe.shadow_validation_summary()
+
+    assert summary == {
+        "observed_days": 1,
+        "required_days": 10,
+        "remaining_days": 9,
+        "validation_complete": False,
+        "observed_dates": ["20260812"],
+        "rank1_match_days": 1,
+        "top3_overlap_total": 2,
+        "scanned_files": 2,
+        "scan_file_limit": 32,
+        "skipped_untimely_days": ["20260813"],
+        "skipped_incomplete_days": [],
+        "parse_error_lines": 0,
+    }
+
+
+def test_shadow_validation_summary_handles_missing_directory(monkeypatch, tmp_path):
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path / "missing"))
+
+    summary = probe.shadow_validation_summary()
+
+    assert summary["observed_days"] == 0
+    assert summary["scanned_files"] == 0
+    assert summary["skipped_untimely_days"] == []
+    assert summary["parse_error_lines"] == 0
+
+
+def test_shadow_validation_summary_tolerates_broken_and_mixed_timezone_lines(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    path = tmp_path / "20260814.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                '{"event":"UNRELATED","bad":',
+                '{"event":"PAPER_FAST_PROBE_OPEN_DONE",',
+                json.dumps(
+                    {
+                        "ts": "2026-08-14T09:00:00.300000",
+                        "event": "PAPER_FAST_PROBE_OPEN_DONE",
+                        "quality": {"ok": True},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": "2026-08-14T09:01:00+09:00",
+                        "event": "PAPER_FAST_SHADOW_COMPARE",
+                        "rank1_match": False,
+                        "top3_overlap_count": 1,
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    summary = probe.shadow_validation_summary()
+
+    assert summary["observed_days"] == 1
+    assert summary["parse_error_lines"] == 1
+
+
+def test_shadow_validation_summary_caps_files_and_reports_complete(monkeypatch, tmp_path):
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    monkeypatch.setenv("PAPER_FAST_SHADOW_REQUIRED_DAYS", "10")
+    monkeypatch.setenv("PAPER_FAST_SHADOW_SCAN_FILE_LIMIT", "10")
+    for day in range(1, 12):
+        date = f"202609{day:02d}"
+        records = [
+            {
+                "ts": f"2026-09-{day:02d}T09:00:00.300000+09:00",
+                "event": "PAPER_FAST_PROBE_OPEN_DONE",
+                "quality": {"ok": True},
+            },
+            {
+                "ts": f"2026-09-{day:02d}T09:01:00+09:00",
+                "event": "PAPER_FAST_SHADOW_COMPARE",
+                "rank1_match": True,
+                "top3_overlap_count": 3,
+            },
+        ]
+        (tmp_path / f"{date}.jsonl").write_text(
+            "\n".join(json.dumps(record) for record in records) + "\n",
+            encoding="utf-8",
+        )
+
+    summary = probe.shadow_validation_summary()
+
+    assert summary["observed_days"] == 10
+    assert summary["validation_complete"] is True
+    assert summary["remaining_days"] == 0
+    assert summary["rank1_match_days"] == 10
+    assert summary["top3_overlap_total"] == 30
+    assert summary["scanned_files"] == 10
+    assert summary["observed_dates"] == [f"202609{day:02d}" for day in range(2, 12)]
+
+
+def test_shadow_progress_logging_is_exception_isolated(monkeypatch):
+    events = []
+    monkeypatch.setattr(probe, "shadow_enabled", lambda: True)
+    monkeypatch.setattr(
+        probe,
+        "shadow_validation_summary",
+        lambda: (_ for _ in ()).throw(RuntimeError("broken history")),
+    )
+    monkeypatch.setattr(
+        probe,
+        "log",
+        lambda event, **fields: events.append((event, fields)),
+    )
+
+    probe.log_shadow_validation_progress()
+
+    assert events[0][0] == "PAPER_FAST_SHADOW_PROGRESS_ERROR"
+
+
 @pytest.mark.asyncio
 async def test_open_boundary_skips_when_scheduler_is_too_late(monkeypatch, tmp_path):
     class FixedDateTime(real_datetime):

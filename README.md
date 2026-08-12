@@ -229,9 +229,12 @@ PAPER_FAST_PROBE_OPEN_MAX_LATENESS_MS=2500
 PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC=2.5
 PAPER_FAST_SHADOW=1
 PAPER_FAST_SHADOW_TOP_N=30
+PAPER_FAST_SHADOW_REQUIRED_DAYS=10
+PAPER_FAST_SHADOW_SCAN_FILE_LIMIT=32
 PAPER_FAST_HYBRID=0
 F3_FAST_RECHECK_MAX_AGE_SEC=15
 BALANCE_SNAPSHOT_TTL_SEC=90
+BALANCE_SNAPSHOT_PREFETCH=1
 
 # ── F3: 매수 주문 실행 ─────────────────────────
 # 진입 직전 VI 확인 — 대체 후보가 있으면 즉시 교체, 없을 때만 조건부 해제 대기
@@ -281,6 +284,8 @@ KIS_LOW_PRIORITY_MAX_WAIT_SLOTS=25
 
 PAPER Fast Path 관측 범위와 다음 거래일 판정 기준은
 [`docs/PAPER_FAST_PATH_PROBE.md`](docs/PAPER_FAST_PATH_PROBE.md)를 참고하세요.
+`BALANCE_SNAPSHOT_PREFETCH`는 Fast Path와 독립적인 PAPER 전용 최적화입니다.
+장전 잔고를 캐시하더라도 주문 직전 종목별 매수가능수량 검증은 항상 유지됩니다.
 
 F3 진입은 설정으로 해제할 수 없는 지정가 전용 경로입니다. 지정가는 신선한 최종 1호 매도호가에 `F3_ASK_SLIPPAGE_RATIO`를 더한 가격과 전일 종가 대비 주문 갭 상한(10% 미만) 중 낮은 값을 사용합니다. 수량은 이 실제 제출 지정가와 주문가능현금을 기준으로 다시 제한합니다. 실제 VI 발동 중이고 다른 후보가 있으면 즉시 후보를 교체하며, 단일 후보이면서 발동가가 갭 상한 미만일 때만 최대 `F3_VI_RELEASE_WAIT_SEC` 동안 기다린 뒤 최종 호가·갭을 다시 검증합니다. `FORCE_CATCHUP`은 라이브 진입 마감을 우회하지 않습니다. `F3_FINAL_QUOTE_MAX_AGE_MS`를 직접 설정하지 않으면 PAPER는 1500ms, REAL은 500ms를 사용합니다.
 

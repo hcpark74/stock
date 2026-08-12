@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
+from starlette.requests import Request
 
 pytest.importorskip("fastapi")
 
@@ -20,6 +21,30 @@ from src.schedule_times import (  # noqa: E402
     F5_PRECHECK_M,
     F5_PRECHECK_S,
 )
+
+
+def _tracking_stop_request(
+    *,
+    source: str | None = "dashboard",
+    referer: str | None = "http://127.0.0.1:8899/",
+) -> Request:
+    headers = [(b"user-agent", b"pytest-browser")]
+    if source is not None:
+        headers.append((b"x-tracking-source", source.encode()))
+    if referer is not None:
+        headers.append((b"referer", referer.encode()))
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/tracking/stop",
+            "headers": headers,
+            "client": ("127.0.0.1", 54321),
+            "server": ("127.0.0.1", 8899),
+            "scheme": "http",
+            "query_string": b"",
+        }
+    )
 
 
 def test_server_uses_f1_snapshot_dir_constant():
@@ -252,13 +277,35 @@ async def test_status_exposes_post_close_tracking_state(monkeypatch):
 @pytest.mark.asyncio
 async def test_stop_post_close_tracking_api_returns_result(monkeypatch):
     stop = AsyncMock(return_value={"ok": True, "persisted": True})
+    events = []
     monkeypatch.setattr(server.f4_tracking, "stop_post_close_observation", stop)
+    monkeypatch.setattr(
+        server,
+        "log",
+        lambda event, **fields: events.append((event, fields)),
+    )
 
-    response = await server.api_stop_post_close_tracking()
+    response = await server.api_stop_post_close_tracking(_tracking_stop_request())
 
     assert response.status_code == 200
     assert json.loads(response.body.decode("utf-8"))["ok"] is True
     stop.assert_awaited_once()
+    assert events == [
+        (
+            "F4_POST_CLOSE_TRACKING_STOP_REQUESTED",
+            {
+                "level": "INFO",
+                "request_source": "dashboard",
+                "request_source_trusted": False,
+                "client_host": "127.0.0.1",
+                "client_port": 54321,
+                "user_agent": "pytest-browser",
+                "origin": "",
+                "referer": "http://127.0.0.1:8899/",
+                "sec_fetch_site": "",
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -269,9 +316,45 @@ async def test_stop_post_close_tracking_api_rejects_non_closed(monkeypatch):
         AsyncMock(return_value={"ok": False, "reason": "POSITION_NOT_CLOSED"}),
     )
 
-    response = await server.api_stop_post_close_tracking()
+    response = await server.api_stop_post_close_tracking(_tracking_stop_request())
 
     assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "referer", "expected"),
+    [
+        (None, "http://127.0.0.1:8899/", "dashboard"),
+        (None, None, "direct_api"),
+        ("DaShBoArD", None, "dashboard"),
+    ],
+)
+async def test_stop_post_close_tracking_classifies_request_source(
+    monkeypatch,
+    source,
+    referer,
+    expected,
+):
+    events = []
+    monkeypatch.setattr(
+        server.f4_tracking,
+        "stop_post_close_observation",
+        AsyncMock(return_value={"ok": True}),
+    )
+    monkeypatch.setattr(
+        server,
+        "log",
+        lambda event, **fields: events.append((event, fields)),
+    )
+
+    response = await server.api_stop_post_close_tracking(
+        _tracking_stop_request(source=source, referer=referer)
+    )
+
+    assert response.status_code == 200
+    assert events[0][1]["request_source"] == expected
+    assert events[0][1]["request_source_trusted"] is False
 
 
 @pytest.mark.asyncio

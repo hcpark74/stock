@@ -419,6 +419,7 @@ async def job_f1() -> None:
         candidate_count=len(_f1_result or []),
         position_status=state.get().position_status,
     )
+    await asyncio.to_thread(paper_fast_probe.log_shadow_validation_progress)
 
 
 async def job_paper_fast_probe() -> None:
@@ -435,7 +436,12 @@ async def job_paper_fast_probe() -> None:
             reason="UNHANDLED",
             error=repr(exc),
         )
-    if not paper_fast_probe.hybrid_enabled():
+
+
+async def job_balance_snapshot_prefetch() -> None:
+    """Prepare PAPER entry cash independently from the Fast Path probe."""
+    await _ensure_trading_day()
+    if _is_market_closed_today():
         return
     budget_sec = _paper_fast_balance_prefetch_budget_seconds()
     if budget_sec <= 0:
@@ -1379,6 +1385,7 @@ async def main() -> None:
                 token_refresh=job_token_refresh,
                 ntp_check=job_ntp_check,
                 paper_fast_probe=job_paper_fast_probe,
+                balance_snapshot_prefetch=job_balance_snapshot_prefetch,
                 f1=job_f1,
                 f2=job_f2,
                 f3=job_f3,

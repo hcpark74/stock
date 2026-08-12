@@ -314,23 +314,42 @@ async def test_job_f1_shadow_compare_failure_does_not_block_f2_f3(monkeypatch):
     assert main._f3_started is True
 
 
+async def test_job_f1_logs_shadow_progress_only_after_f3(monkeypatch):
+    calls = []
+
+    async def lock_target(_candidates):
+        state_mod.get().target_ticker = "005930"
+
+    async def run_f3():
+        calls.append("f3")
+
+    def log_progress():
+        calls.append("progress")
+
+    monkeypatch.setattr(
+        main,
+        "_skip_entry_pipeline_if_trade_exists",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(main.paper_fast_probe, "observe_open_boundary", AsyncMock(return_value=[]))
+    monkeypatch.setattr(main.paper_fast_probe, "hybrid_enabled", lambda: False)
+    monkeypatch.setattr(main.paper_fast_probe, "compare_with_legacy", MagicMock(return_value={}))
+    monkeypatch.setattr(main.paper_fast_probe, "log_shadow_validation_progress", log_progress)
+    monkeypatch.setattr(main.f1_filter, "run", AsyncMock(return_value=[{"ticker": "005930"}]))
+    monkeypatch.setattr(main.f2_lockup, "run", lock_target)
+    monkeypatch.setattr(main.f3_entry, "run", run_f3)
+
+    await main.job_f1()
+
+    assert calls == ["f3", "progress"]
+
+
 async def test_paper_fast_probe_job_isolates_prepare_exception(monkeypatch):
     events = []
-    monkeypatch.setattr(
-        main.f3_entry,
-        "prepare_available_cash_snapshot",
-        AsyncMock(return_value=1_000_000.0),
-    )
     monkeypatch.setattr(
         main.paper_fast_probe,
         "prepare",
         AsyncMock(side_effect=RuntimeError("probe failed")),
-    )
-    monkeypatch.setattr(main.paper_fast_probe, "hybrid_enabled", lambda: True)
-    monkeypatch.setattr(
-        main,
-        "_paper_fast_balance_prefetch_budget_seconds",
-        lambda: 1.0,
     )
     monkeypatch.setattr(
         main.logger,
@@ -348,7 +367,7 @@ async def test_paper_fast_probe_job_isolates_prepare_exception(monkeypatch):
     )
 
 
-async def test_paper_fast_probe_runs_before_failing_balance_prefetch(monkeypatch):
+async def test_probe_and_balance_prefetch_are_independent_jobs(monkeypatch):
     calls = []
 
     async def prepare_probe():
@@ -360,7 +379,6 @@ async def test_paper_fast_probe_runs_before_failing_balance_prefetch(monkeypatch
         raise RuntimeError("balance failed")
 
     monkeypatch.setattr(main.paper_fast_probe, "prepare", prepare_probe)
-    monkeypatch.setattr(main.paper_fast_probe, "hybrid_enabled", lambda: True)
     monkeypatch.setattr(
         main,
         "_paper_fast_balance_prefetch_budget_seconds",
@@ -370,8 +388,24 @@ async def test_paper_fast_probe_runs_before_failing_balance_prefetch(monkeypatch
     monkeypatch.setattr(main.logger, "log", lambda *args, **kwargs: None)
 
     await main.job_paper_fast_probe()
+    await main.job_balance_snapshot_prefetch()
 
     assert calls == ["probe", "balance"]
+
+
+async def test_balance_prefetch_runs_when_fast_hybrid_is_disabled(monkeypatch):
+    prepare_balance = AsyncMock(return_value=1_000_000.0)
+    monkeypatch.setattr(main.paper_fast_probe, "hybrid_enabled", lambda: False)
+    monkeypatch.setattr(
+        main,
+        "_paper_fast_balance_prefetch_budget_seconds",
+        lambda: 1.0,
+    )
+    monkeypatch.setattr(main.f3_entry, "prepare_available_cash_snapshot", prepare_balance)
+
+    await main.job_balance_snapshot_prefetch()
+
+    prepare_balance.assert_awaited_once()
 
 
 async def test_paper_fast_balance_prefetch_is_cancelled_before_open_guard(monkeypatch):
@@ -384,8 +418,6 @@ async def test_paper_fast_balance_prefetch_is_cancelled_before_open_guard(monkey
         finally:
             cancelled.set()
 
-    monkeypatch.setattr(main.paper_fast_probe, "prepare", AsyncMock(return_value=[]))
-    monkeypatch.setattr(main.paper_fast_probe, "hybrid_enabled", lambda: True)
     monkeypatch.setattr(
         main,
         "_paper_fast_balance_prefetch_budget_seconds",
@@ -398,7 +430,7 @@ async def test_paper_fast_balance_prefetch_is_cancelled_before_open_guard(monkey
         lambda event, **fields: events.append((event, fields)),
     )
 
-    await asyncio.wait_for(main.job_paper_fast_probe(), 0.2)
+    await asyncio.wait_for(main.job_balance_snapshot_prefetch(), 0.2)
 
     assert cancelled.is_set()
     assert any(

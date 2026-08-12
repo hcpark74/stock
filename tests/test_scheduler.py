@@ -12,6 +12,7 @@ def test_scheduler_times_are_single_sourced_from_schedule_times():
     for name in (
         "F1_H", "F1_M",
         "PAPER_FAST_PROBE_H", "PAPER_FAST_PROBE_M", "PAPER_FAST_PROBE_S",
+        "BALANCE_PREFETCH_H", "BALANCE_PREFETCH_M", "BALANCE_PREFETCH_S",
         "F2_H", "F2_M", "F3_H", "F3_M", "F3_S",
         "F3_FILL_DEADLINE_H", "F3_FILL_DEADLINE_M",
         "F5_PRECHECK_H", "F5_PRECHECK_M", "F5_PRECHECK_S",
@@ -25,6 +26,7 @@ async def test_scheduler_jobs_allow_short_startup_misfires():
         token_refresh=_noop,
         ntp_check=_noop,
         paper_fast_probe=_noop,
+        balance_snapshot_prefetch=_noop,
         f1=_noop,
         f2=_noop,
         f3=_noop,
@@ -39,6 +41,7 @@ async def test_scheduler_jobs_allow_short_startup_misfires():
             "token_refresh",
             "ntp_check",
             "paper_fast_probe",
+            "balance_snapshot_prefetch",
             "f1_filter",
             "f2_lockup",
             "f3_entry",
@@ -57,6 +60,9 @@ async def test_scheduler_jobs_allow_short_startup_misfires():
         )
         assert str(jobs["paper_fast_probe"].trigger) == (
             "cron[day_of_week='mon-fri', hour='8', minute='59', second='45']"
+        )
+        assert str(jobs["balance_snapshot_prefetch"].trigger) == (
+            "cron[day_of_week='mon-fri', hour='8', minute='59', second='50']"
         )
     finally:
         scheduler.shutdown(wait=False)

@@ -88,7 +88,9 @@ check('index: app.js cache-buster is not old version',
 check('index: post-close tracking stop button present', html.includes('id="tracking-stop-btn"'));
 check('app.js: post-close tracking stop handler present', src.includes('function stopPostCloseTracking()'));
 check('app.js: tracking stop uses POST endpoint',
-  src.includes("fetch('/api/tracking/stop', {method:'POST'})"));
+  src.includes("fetch('/api/tracking/stop'") &&
+  src.includes("method:'POST'") &&
+  src.includes("'X-Tracking-Source':'dashboard'"));
 check('app.js: tracking stop button is CLOSED-only',
   src.includes("const closed = d.position_status === 'CLOSED'"));
 

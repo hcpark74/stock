@@ -63,6 +63,20 @@ def _shadow_top_n() -> int:
         return 30
 
 
+def _shadow_required_days() -> int:
+    try:
+        return max(1, int(os.getenv("PAPER_FAST_SHADOW_REQUIRED_DAYS", "10")))
+    except ValueError:
+        return 10
+
+
+def _shadow_scan_file_limit() -> int:
+    try:
+        return max(1, int(os.getenv("PAPER_FAST_SHADOW_SCAN_FILE_LIMIT", "32")))
+    except ValueError:
+        return 32
+
+
 def _probe_dir() -> Path:
     return Path(os.getenv("PAPER_FAST_PROBE_DIR", "data/paper_fast_probe"))
 
@@ -653,7 +667,7 @@ def compare_with_legacy(legacy_candidates: list[dict]) -> dict:
         * 100
         for ticker in common
     ]
-    fields = {
+    fields: dict[str, Any] = {
         "fast_count": len(fast_tickers),
         "legacy_count": len(legacy_tickers),
         "fast_tickers": fast_tickers,
@@ -669,6 +683,112 @@ def compare_with_legacy(legacy_candidates: list[dict]) -> dict:
         _append_record("PAPER_FAST_SHADOW_COMPARE", phase="SHADOW", **fields)
         log("PAPER_FAST_SHADOW_COMPARE", level="INFO", **fields)
     return fields
+
+
+def shadow_validation_summary() -> dict:
+    """Summarize distinct, timely open-vs-legacy shadow comparison days.
+
+    A day counts only when a complete open-boundary observation is followed by
+    a legacy comparison within three minutes. This excludes manual/test reruns
+    much later in the day and never promotes the fast path automatically.
+    """
+    observations: list[tuple[str, dict]] = []
+    skipped_untimely_days: list[str] = []
+    skipped_incomplete_days: list[str] = []
+    parse_error_lines = 0
+    scan_file_limit = _shadow_scan_file_limit()
+    directory = _probe_dir()
+    paths: list[Path] = []
+    try:
+        if directory.exists():
+            paths = sorted(directory.glob("*.jsonl"), reverse=True)[:scan_file_limit]
+    except OSError:
+        paths = []
+    for path in reversed(paths):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            skipped_incomplete_days.append(path.stem)
+            continue
+        completed_opens: list[datetime] = []
+        compares: list[tuple[datetime, dict]] = []
+        for line in lines:
+            if (
+                '"PAPER_FAST_PROBE_OPEN_DONE"' not in line
+                and '"PAPER_FAST_SHADOW_COMPARE"' not in line
+            ):
+                continue
+            try:
+                record = json.loads(line)
+                if not isinstance(record, dict):
+                    raise TypeError("record is not an object")
+                recorded_at = datetime.fromisoformat(str(record.get("ts") or ""))
+                if recorded_at.tzinfo is None:
+                    recorded_at = recorded_at.replace(tzinfo=KST)
+                else:
+                    recorded_at = recorded_at.astimezone(KST)
+            except (TypeError, ValueError):
+                parse_error_lines += 1
+                continue
+            if record.get("event") == "PAPER_FAST_PROBE_OPEN_DONE":
+                quality = record.get("quality") or {}
+                if isinstance(quality, dict) and quality.get("ok") is True:
+                    completed_opens.append(recorded_at)
+                continue
+            if record.get("event") == "PAPER_FAST_SHADOW_COMPARE":
+                compares.append((recorded_at, record))
+
+        timely_compares = [
+            record
+            for compared_at, record in compares
+            if any(
+                0.0 <= (compared_at - opened_at).total_seconds() <= 180.0
+                for opened_at in completed_opens
+            )
+        ]
+        if timely_compares:
+            observations.append((path.stem, timely_compares[-1]))
+        elif completed_opens and compares:
+            skipped_untimely_days.append(path.stem)
+        elif completed_opens or compares:
+            skipped_incomplete_days.append(path.stem)
+
+    required_days = _shadow_required_days()
+    observed_days = len(observations)
+    return {
+        "observed_days": observed_days,
+        "required_days": required_days,
+        "remaining_days": max(0, required_days - observed_days),
+        "validation_complete": observed_days >= required_days,
+        "observed_dates": [date for date, _ in observations],
+        "rank1_match_days": sum(
+            1 for _, record in observations if record.get("rank1_match") is True
+        ),
+        "top3_overlap_total": sum(
+            int(record.get("top3_overlap_count") or 0) for _, record in observations
+        ),
+        "scanned_files": len(paths),
+        "scan_file_limit": scan_file_limit,
+        "skipped_untimely_days": skipped_untimely_days,
+        "skipped_incomplete_days": skipped_incomplete_days,
+        "parse_error_lines": parse_error_lines,
+    }
+
+
+def log_shadow_validation_progress() -> None:
+    """Log bounded shadow progress after the entry pipeline; never raise."""
+    if not shadow_enabled():
+        return
+    try:
+        fields: dict[str, Any] = shadow_validation_summary()
+        log("PAPER_FAST_SHADOW_PROGRESS", level="INFO", **fields)
+    except Exception as exc:
+        log(
+            "PAPER_FAST_SHADOW_PROGRESS_ERROR",
+            level="WARN",
+            reason="UNHANDLED",
+            error=repr(exc),
+        )
 
 
 async def observe_open_boundary() -> list[dict]:

@@ -4422,9 +4422,31 @@ async def test_available_cash_for_entry_refreshes_expired_snapshot(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_available_cash_for_entry_ignores_snapshot_outside_hybrid(monkeypatch):
+async def test_available_cash_for_entry_uses_snapshot_outside_fast_hybrid(monkeypatch):
     fetch = AsyncMock(return_value=2_000_000.0)
     monkeypatch.setattr(f3.paper_fast_probe, "hybrid_enabled", lambda: False)
+    monkeypatch.setenv("KIS_MODE", "PAPER")
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setenv("BALANCE_SNAPSHOT_PREFETCH", "1")
+    monkeypatch.setattr(f3, "_fetch_available_cash", fetch)
+    f3._available_cash_snapshot = {
+        "date": f3._today(),
+        "cash": 1_000_000.0,
+        "created_monotonic": f3.time.monotonic(),
+    }
+
+    cash = await f3._available_cash_for_entry()
+
+    assert cash == 1_000_000.0
+    fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_available_cash_for_entry_ignores_snapshot_when_prefetch_disabled(monkeypatch):
+    fetch = AsyncMock(return_value=2_000_000.0)
+    monkeypatch.setenv("KIS_MODE", "PAPER")
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setenv("BALANCE_SNAPSHOT_PREFETCH", "0")
     monkeypatch.setattr(f3, "_fetch_available_cash", fetch)
     f3._available_cash_snapshot = {
         "date": f3._today(),

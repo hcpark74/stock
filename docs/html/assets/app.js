@@ -1475,7 +1475,10 @@ async function stopPostCloseTracking() {
   _trackingStopPending = true;
   applyStatus(_lastStatus);
   try {
-    const r = await fetch('/api/tracking/stop', {method:'POST'});
+    const r = await fetch('/api/tracking/stop', {
+      method:'POST',
+      headers:{'X-Tracking-Source':'dashboard'},
+    });
     const result = await r.json().catch(() => ({}));
     if(!r.ok || !result.ok) {
       throw new Error(result.reason || `HTTP ${r.status}`);

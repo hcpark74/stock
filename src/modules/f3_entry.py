@@ -310,12 +310,18 @@ class FillSnapshot:
 
 
 async def prepare_available_cash_snapshot() -> float | None:
-    """Prefetch the PAPER entry budget; final buyable-quantity remains mandatory."""
+    """Prefetch the PAPER entry budget; final buyable-quantity remains mandatory.
+
+    This cache is intentionally independent from the experimental fast F1 path.
+    It only removes the broad balance lookup from the entry-time critical path;
+    the ticker-specific buyable-quantity check still runs immediately before an
+    order and remains the authoritative cap.
+    """
     global _available_cash_snapshot
     if (
         os.getenv("KIS_MODE", "PAPER").upper() != "PAPER"
         or os.getenv("DRY_RUN", "0") == "1"
-        or not paper_fast_probe.hybrid_enabled()
+        or os.getenv("BALANCE_SNAPSHOT_PREFETCH", "1") != "1"
     ):
         return None
     cash = await _fetch_available_cash()
@@ -337,7 +343,11 @@ async def prepare_available_cash_snapshot() -> float | None:
 
 
 def _cached_available_cash() -> float | None:
-    if not paper_fast_probe.hybrid_enabled():
+    if (
+        os.getenv("KIS_MODE", "PAPER").upper() != "PAPER"
+        or os.getenv("DRY_RUN", "0") == "1"
+        or os.getenv("BALANCE_SNAPSHOT_PREFETCH", "1") != "1"
+    ):
         return None
     snapshot = _available_cash_snapshot
     if not snapshot or snapshot.get("date") != _today():

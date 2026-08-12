@@ -632,8 +632,27 @@ async def api_status() -> JSONResponse:
 
 
 @app.post("/api/tracking/stop")
-async def api_stop_post_close_tracking() -> JSONResponse:
+async def api_stop_post_close_tracking(request: Request) -> JSONResponse:
     """매도 완료 후 진행 중인 가격 관측만 수동 종료한다."""
+    client = request.client
+    explicit_source = str(request.headers.get("x-tracking-source") or "").strip().lower()
+    referer = str(request.headers.get("referer") or "")[:300]
+    log(
+        "F4_POST_CLOSE_TRACKING_STOP_REQUESTED",
+        level="INFO",
+        request_source=(
+            explicit_source[:80]
+            if explicit_source
+            else "dashboard" if referer else "direct_api"
+        ),
+        request_source_trusted=False,
+        client_host=client.host if client else None,
+        client_port=client.port if client else None,
+        user_agent=str(request.headers.get("user-agent") or "")[:200],
+        origin=str(request.headers.get("origin") or "")[:200],
+        referer=referer,
+        sec_fetch_site=str(request.headers.get("sec-fetch-site") or "")[:40],
+    )
     result = await f4_tracking.stop_post_close_observation()
     if not result.get("ok"):
         return JSONResponse(result, status_code=409)

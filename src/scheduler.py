@@ -8,6 +8,9 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from src.schedule_times import (  # noqa: F401 — main.py가 이 모듈 경유로 재사용
+    BALANCE_PREFETCH_H,
+    BALANCE_PREFETCH_M,
+    BALANCE_PREFETCH_S,
     F1_H,
     F1_M,
     F2_H,
@@ -41,6 +44,7 @@ def build(
     token_refresh: Job,
     ntp_check: Job,
     paper_fast_probe: Job,
+    balance_snapshot_prefetch: Job,
     f1: Job,
     f2: Job,
     f3: Job,
@@ -75,6 +79,15 @@ def build(
             second=PAPER_FAST_PROBE_S,
         ),
         id="paper_fast_probe",
+    )
+    scheduler.add_job(
+        balance_snapshot_prefetch,
+        cron(
+            hour=BALANCE_PREFETCH_H,
+            minute=BALANCE_PREFETCH_M,
+            second=BALANCE_PREFETCH_S,
+        ),
+        id="balance_snapshot_prefetch",
     )
 
     # F1 — 갭/유동성 필터링
