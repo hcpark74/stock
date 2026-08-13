@@ -71,12 +71,15 @@ async def _prepare_limit_buy(ticker: str) -> dict:
     if not f3_entry._quote_is_fresh(quote):
         raise RuntimeError("final quote is stale")
     fresh_gap = quote.ask_price / prev_close - 1
-    if not f3_entry._gap_in_order_range(fresh_gap):
+    # 수동 REAL 스모크는 F1 후보(예상 체결대금) 컨텍스트가 없으므로 fail-closed로
+    # 판정한다. 고갭(>=8%) 구간은 유동성 미검증 상태에서 제출 전에 거부한다.
+    gap_allowed, gap_reason = f3_entry._evaluate_order_gap(fresh_gap, None)
+    if not gap_allowed:
         raise RuntimeError(
-            f"final ask gap {fresh_gap * 100:.2f}% is outside F3 range "
-            f"[{f3_entry.GAP_MIN_RECHECK * 100:.2f}%, {f3_entry.GAP_MAX_ORDER * 100:.2f}%)"
+            f"final ask gap {fresh_gap * 100:.2f}% rejected by F3 policy "
+            f"(reason={gap_reason})"
         )
-    gap_cap = f3_entry._strict_gap_cap(prev_close)
+    gap_cap = f3_entry._strict_gap_cap(prev_close, expected_amount=None)
     limit_price, ask_cap = f3_entry._entry_limit_price(quote.ask_price, gap_cap)
     if limit_price <= 0:
         raise RuntimeError("F3-capped limit price is not positive")

@@ -130,27 +130,6 @@ def test_market_buy_setting_cannot_disable_mandatory_limit_safety(monkeypatch):
     assert warning["effective_value"] == "1"
 
 
-def test_gap_in_order_range_boundaries():
-    """주문 전 갭 허용 구간의 경계 연산자를 고정한다: 하한 포함(<=), 상한 미포함(<).
-
-    원 단위 정수 가격 쌍으로는 계산된 갭이 상수와 정확히 같아지지 않아
-    부동소수점 가격 입력만으로는 상한의 <와 <= 회귀를 정확히 잡기 어려워
-    <와 <=의 회귀를 잡을 수 없다. 상수를 직접 넣어 경계를 검증한다.
-    """
-    assert f3._gap_in_order_range(f3.GAP_MIN_RECHECK) is True
-    assert f3._gap_in_order_range(f3.GAP_MIN_RECHECK - 1e-9) is False
-    assert f3._gap_in_order_range(f3.GAP_MAX_ORDER) is False
-    assert f3._gap_in_order_range(f3.GAP_MAX_ORDER - 1e-9) is True
-
-
-def test_hanwha_20260807_opening_gap_is_in_order_range():
-    """한화솔루션 당시 예상 갭 +8.39%는 상승 모멘텀 후보로 진입 심사를 계속한다."""
-    gap = 32_950 / 30_400 - 1
-
-    assert gap == pytest.approx(0.0838815789)
-    assert f3._gap_in_order_range(gap) is True
-
-
 def test_fill_gap_reaches_max_boundary():
     """체결가 갭이 정확히 상한(10%)이면 청산 대상이다 (>=, 초과가 아닌 이상)."""
     assert f3._fill_gap_reaches_max(f3.GAP_MAX_FILL) is True
@@ -160,7 +139,7 @@ def test_fill_gap_reaches_max_boundary():
 def test_entry_limit_price_uses_final_ask_cap(monkeypatch):
     """7/30 위닉스 호가는 신선한 매도호가 +1% 상한을 사용한다."""
     monkeypatch.setattr(f3, "F3_ASK_SLIPPAGE_RATIO", 0.01)
-    gap_cap = f3._strict_gap_cap(4_490)
+    gap_cap = f3._strict_gap_cap(4_490, expected_amount=f3.HIGH_GAP_MIN_EXPECTED_AMOUNT)
 
     limit_price, ask_cap = f3._entry_limit_price(4_690, gap_cap)
 
@@ -199,7 +178,8 @@ def test_strict_gap_cap_never_reaches_order_gap_boundary(
     prev_close,
     expected_cap,
 ):
-    cap = f3._strict_gap_cap(prev_close)
+    # 적격 고갭 유동성일 때만 10% 상한을 사용한다 (저대금/부재는 8% 전용 테스트).
+    cap = f3._strict_gap_cap(prev_close, expected_amount=f3.HIGH_GAP_MIN_EXPECTED_AMOUNT)
     exact_boundary = Decimal(prev_close) * Decimal("1.10")
 
     assert cap == expected_cap
@@ -1321,6 +1301,10 @@ async def test_limit_entry_allows_rising_ask_within_gap_cap(
 async def test_run_single_submits_absolute_gap_cap_when_ask_cap_is_higher(monkeypatch):
     """호출부가 ask 상한뿐 아니라 절대 갭 상한을 실제 제출가에 적용한다."""
     _reset_state()
+    # 최종 호가 9.13%는 고갭 구간이므로 적격 유동성 후보에서만 주문이 진행된다.
+    state.get().target_candidates = [
+        {"ticker": "006340", "expected_amount": f3.HIGH_GAP_MIN_EXPECTED_AMOUNT}
+    ]
     send_buy = AsyncMock(
         return_value={
             "rt_cd": "0",
@@ -1354,7 +1338,11 @@ async def test_run_single_submits_absolute_gap_cap_when_ask_cap_is_higher(monkey
 
     send_buy.assert_awaited_once()
     submitted_limit = send_buy.await_args.kwargs["limit_price"]
-    assert submitted_limit == f3._strict_gap_cap(4_490) == 4_935
+    assert (
+        submitted_limit
+        == f3._strict_gap_cap(4_490, expected_amount=f3.HIGH_GAP_MIN_EXPECTED_AMOUNT)
+        == 4_935
+    )
     assert Decimal(str(submitted_limit)) < Decimal("4490") * Decimal("1.10")
     assert send_buy.await_args.args == ("006340", 192, "PAPER")
 
@@ -3523,6 +3511,10 @@ async def test_slippage_guard_exits_when_fill_gap_exceeds_max(monkeypatch):
     """체결가 기준 갭이 상한(10%) 이상이면 즉시 청산하고 당일 스킵한다."""
     events = []
     _reset_state()
+    # 최종 호가 9.90%는 고갭 구간 — 적격 유동성 후보에서만 주문이 진행된다.
+    state.get().target_candidates = [
+        {"ticker": "006340", "expected_amount": f3.HIGH_GAP_MIN_EXPECTED_AMOUNT}
+    ]
     _mock_final_quote(monkeypatch, 1_066)
     from src.modules import f4_tracking
 
@@ -3600,8 +3592,12 @@ async def test_entry_recheck_blocks_gap_at_ten_percent(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_slippage_guard_allows_fill_just_below_ten_percent(monkeypatch):
-    """강한 모멘텀 체결도 10% 미만이면 보유를 유지한다."""
+    """강한 모멘텀 체결도 10% 미만이면(적격 유동성) 보유를 유지한다."""
     _reset_state()
+    # 최종 호가·체결 갭 9.90%는 고갭 구간 — 적격 유동성 후보에서만 진입/보유한다.
+    state.get().target_candidates = [
+        {"ticker": "006340", "expected_amount": f3.HIGH_GAP_MIN_EXPECTED_AMOUNT}
+    ]
     _mock_final_quote(monkeypatch, 1_066)
     send_sell = AsyncMock()
 
@@ -3663,7 +3659,10 @@ _VI_ACTIVE_INFO = {
 def test_vi_price_gap_cap_boundary(vi_price, expected):
     vi_info = {**_VI_ACTIVE_INFO, "vi_prc": str(vi_price)}
 
-    assert f3._vi_price_reaches_gap_cap(vi_info, 10_000) is expected
+    # 적격 유동성 후보의 VI 상한은 10% 경계다 (저대금 8% 경계는 별도 테스트).
+    assert (
+        f3._vi_price_reaches_gap_cap(vi_info, 10_000, f3.HIGH_GAP_MIN_EXPECTED_AMOUNT) is expected
+    )
 
 
 @pytest.mark.asyncio
@@ -5453,3 +5452,803 @@ async def test_persist_terminal_or_log_failure_notifies(monkeypatch):
     crit = [k for e, k in events if e == "ENTRY_TERMINAL_PERSIST_ERROR"]
     assert crit and crit[0]["level"] == "CRIT"
     assert any(a and a[0] == "ENTRY_TERMINAL_PERSIST_ERROR" for a, _ in notes)
+
+
+# ── F1 고갭 유동성 정책 하드닝 (F3 우회 차단) ────────────────────────────
+import src.modules.f1_selector as _f1  # noqa: E402
+
+
+def test_f3_gap_thresholds_are_sourced_from_f1():
+    """F3 고갭 임계값은 F1에서 가져와 정책이 갈라지지 않는다 (값 비교, identity 아님)."""
+    assert f3.GAP_HIGH_BAND == _f1.GAP_CORE_MAX
+    assert f3.GAP_MAX_ORDER == _f1.GAP_HARD_MAX
+    assert f3.GAP_MAX_FILL == _f1.GAP_HARD_MAX
+    assert f3.HIGH_GAP_MIN_EXPECTED_AMOUNT == _f1.HIGH_GAP_MIN_EXPECTED_AMOUNT
+    # 기본 정책값 회귀 방지
+    assert f3.GAP_HIGH_BAND == pytest.approx(0.08)
+    assert f3.GAP_MAX_ORDER == pytest.approx(0.10)
+    assert f3.HIGH_GAP_MIN_EXPECTED_AMOUNT == pytest.approx(5_000_000_000)
+
+
+def test_amount_qualifies_high_gap_fails_closed_on_missing_or_invalid():
+    thr = f3.HIGH_GAP_MIN_EXPECTED_AMOUNT
+    assert f3._amount_qualifies_high_gap(thr) is True
+    assert f3._amount_qualifies_high_gap(thr + 1) is True
+    assert f3._amount_qualifies_high_gap(thr - 1) is False
+    assert f3._amount_qualifies_high_gap(None) is False
+    assert f3._amount_qualifies_high_gap(0) is False
+    assert f3._amount_qualifies_high_gap(-1) is False
+    assert f3._amount_qualifies_high_gap(float("nan")) is False
+    # 무한대는 임계값보다 크더라도 유효 대금이 아니므로 자격 없음 (fail-closed).
+    assert f3._amount_qualifies_high_gap(float("inf")) is False
+    assert f3._amount_qualifies_high_gap(float("-inf")) is False
+    # 비수치 문자열/타입은 무효로 취급한다.
+    assert f3._amount_qualifies_high_gap("abc") is False
+    assert f3._amount_qualifies_high_gap(True) is False
+
+
+def test_candidate_expected_amount_normalizes_to_finite_float_or_none():
+    thr = f3.HIGH_GAP_MIN_EXPECTED_AMOUNT
+    # 유효 수치는 float로 정규화
+    got = f3._candidate_expected_amount({"expected_amount": thr})
+    assert got == float(thr) and isinstance(got, float)
+    # 부재/무효/무한/비수치는 None으로 정규화 (raw Any 반환 금지)
+    assert f3._candidate_expected_amount({}) is None
+    assert f3._candidate_expected_amount({"expected_amount": None}) is None
+    assert f3._candidate_expected_amount({"expected_amount": float("inf")}) is None
+    assert f3._candidate_expected_amount({"expected_amount": float("nan")}) is None
+    assert f3._candidate_expected_amount({"expected_amount": "abc"}) is None
+    assert f3._candidate_expected_amount(None) is None
+    # F1과 동일하게 expected_amount가 0/None이면 avg_amount_5d로 폴백한다.
+    assert f3._candidate_expected_amount(
+        {"expected_amount": 0, "avg_amount_5d": thr}
+    ) == float(thr)
+    assert f3._candidate_expected_amount(
+        {"expected_amount": None, "avg_amount_5d": thr}
+    ) == float(thr)
+    # 무한대 대금이 고갭 정책을 통과하지 못한다 (정규화→자격판정 일관성)
+    assert f3._amount_qualifies_high_gap(
+        f3._candidate_expected_amount({"expected_amount": float("inf")})
+    ) is False
+
+
+def test_evaluate_order_gap_policy_boundaries():
+    thr = f3.HIGH_GAP_MIN_EXPECTED_AMOUNT
+    low = thr - 1
+    # 하한 미만 차단
+    assert f3._evaluate_order_gap(0.019, thr) == (False, "BELOW_MIN")
+    # 코어 구간 허용 (대금 무관)
+    assert f3._evaluate_order_gap(0.05, None) == (True, "OK")
+    # 7.99% 저대금 허용
+    assert f3._evaluate_order_gap(0.0799, low) == (True, "OK")
+    # 8.00% 저대금 차단 (고갭 유동성 요건)
+    assert f3._evaluate_order_gap(0.08, low) == (False, "HIGH_GAP_AMOUNT_LOW")
+    # 8.00% 적격 대금 허용
+    assert f3._evaluate_order_gap(0.08, thr) == (True, "OK")
+    # 9.99% 적격 대금 허용
+    assert f3._evaluate_order_gap(0.0999, thr) == (True, "OK")
+    # 10% 차단
+    assert f3._evaluate_order_gap(0.10, thr) == (False, "ABOVE_MAX")
+    # 고갭 대금 부재/무효 fail-closed
+    assert f3._evaluate_order_gap(0.085, None) == (False, "HIGH_GAP_AMOUNT_LOW")
+    assert f3._evaluate_order_gap(0.085, 0) == (False, "HIGH_GAP_AMOUNT_LOW")
+
+
+def test_evaluate_order_gap_invalid_gap_fails_closed():
+    """비유한(NaN/±inf) 갭은 fail-open이 아니라 INVALID_GAP으로 차단한다."""
+    thr = f3.HIGH_GAP_MIN_EXPECTED_AMOUNT
+    assert f3._evaluate_order_gap(float("nan"), thr) == (False, "INVALID_GAP")
+    assert f3._evaluate_order_gap(float("inf"), thr) == (False, "INVALID_GAP")
+    assert f3._evaluate_order_gap(float("-inf"), thr) == (False, "INVALID_GAP")
+    # 대금이 없어도 NaN 갭은 INVALID_GAP(과열 고갭 사유보다 우선)로 차단한다.
+    assert f3._evaluate_order_gap(float("nan"), None) == (False, "INVALID_GAP")
+
+
+@pytest.mark.asyncio
+async def test_initial_recheck_invalid_gap_blocks_no_order(monkeypatch):
+    """운영 경로: 재검증 갭이 NaN이면 주문을 보내지 않고 차단한다."""
+    _reset_state()
+    state.get().target_candidates = [_high_gap_candidate("006340", _ok_amt())]
+    send_buy = AsyncMock()
+    monkeypatch.setattr(
+        f3, "_fetch_expected_price", AsyncMock(return_value=(float("nan"), 10_000.0))
+    )
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3._run_single()
+
+    send_buy.assert_not_awaited()
+    assert state.get().day_skip is True
+
+
+def test_resolve_recovery_expected_amount_priority():
+    thr = f3.HIGH_GAP_MIN_EXPECTED_AMOUNT
+    s = state.get()
+    s.target_candidates = [{"ticker": "006340", "expected_amount": thr}]
+    # 유효 pending(저대금) 우선 — 더 높은 후보 대금으로 대체되지 않는다.
+    amt, src = f3._resolve_recovery_expected_amount(
+        {"expected_amount": 100.0}, s, "006340"
+    )
+    assert (amt, src) == (100.0, "pending")
+    # 무효 pending(NaN)은 후보로 폴백한다.
+    amt, src = f3._resolve_recovery_expected_amount(
+        {"expected_amount": float("nan")}, s, "006340"
+    )
+    assert (amt, src) == (float(thr), "candidates")
+    # 무효 pending + 후보 없음 → 미확인
+    s.target_candidates = []
+    amt, src = f3._resolve_recovery_expected_amount(
+        {"expected_amount": "abc"}, s, "006340"
+    )
+    assert (amt, src) == (None, "unavailable")
+    # expected_amount 키 자체가 없는 구버전 pending은 현재 스키마 결측과 구분한다.
+    amt, src = f3._resolve_recovery_expected_amount({}, s, "006340")
+    assert (amt, src) == (None, "legacy_unavailable")
+
+
+@pytest.mark.asyncio
+async def test_recover_invalid_pending_amount_falls_back_to_candidate(monkeypatch):
+    """복구: pending 대금이 무효(NaN)면 후보 대금으로 폴백 — 적격이면 청산 안 함."""
+    close_now = AsyncMock()
+    await _run_recovery(
+        monkeypatch,
+        _recovery_pending(expected_amount=float("nan")),
+        10_850,
+        close_now,
+        candidates=[_high_gap_candidate("006340", _ok_amt())],
+    )
+    close_now.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("prev_close", "expected_cap"),
+    [
+        (1_300, 1_429),
+        (10_000, 10_990),
+        (50_000, 54_900),
+        (200_000, 219_500),
+    ],
+)
+def test_strict_gap_cap_qualifying_amount_uses_10pct(prev_close, expected_cap):
+    cap = f3._strict_gap_cap(prev_close, expected_amount=f3.HIGH_GAP_MIN_EXPECTED_AMOUNT)
+    boundary = Decimal(prev_close) * Decimal("1.10")
+    assert cap == expected_cap
+    assert Decimal(str(cap)) < boundary
+    assert Decimal(str(cap + f3._tick_size(cap))) >= boundary
+
+
+@pytest.mark.parametrize("prev_close", [1_300, 10_000, 50_000, 200_000])
+def test_strict_gap_cap_low_or_missing_amount_uses_8pct(prev_close):
+    boundary_8 = Decimal(prev_close) * Decimal("1.08")
+    for cap in (
+        f3._strict_gap_cap(prev_close),
+        f3._strict_gap_cap(prev_close, expected_amount=None),
+        f3._strict_gap_cap(prev_close, expected_amount=f3.HIGH_GAP_MIN_EXPECTED_AMOUNT - 1),
+    ):
+        assert Decimal(str(cap)) < boundary_8
+        assert Decimal(str(cap + f3._tick_size(cap))) >= boundary_8
+
+
+def test_strict_gap_cap_no_boundary_violations_both_ceilings():
+    price_bands = (
+        range(1, 2_000, 1),
+        range(2_000, 5_000, 5),
+        range(5_000, 20_000, 10),
+        range(20_000, 50_000, 50),
+        range(50_000, 200_000, 100),
+        range(200_000, 500_000, 500),
+        range(500_000, 1_000_001, 1_000),
+    )
+    thr = f3.HIGH_GAP_MIN_EXPECTED_AMOUNT
+    violations = []
+    for band in price_bands:
+        for prev_close in band:
+            cap10 = f3._strict_gap_cap(prev_close, expected_amount=thr)
+            if Decimal(str(cap10)) >= Decimal(prev_close) * Decimal("1.10"):
+                violations.append(("10", prev_close, cap10))
+            cap8 = f3._strict_gap_cap(prev_close)
+            if Decimal(str(cap8)) >= Decimal(prev_close) * Decimal("1.08"):
+                violations.append(("8", prev_close, cap8))
+    assert violations == []
+
+
+def test_evaluate_post_fill_guard_reasons():
+    thr = f3.HIGH_GAP_MIN_EXPECTED_AMOUNT
+    # 정상 코어 체결: 통과
+    assert f3._evaluate_post_fill_guard(
+        fill_price=10_300, submitted_order_price=10_400, prev_close=10_000, expected_amount=None
+    ) == []
+    # 체결 갭 >=10%: FILL_GAP
+    assert "FILL_GAP" in f3._evaluate_post_fill_guard(
+        fill_price=11_000, submitted_order_price=11_500, prev_close=10_000, expected_amount=thr
+    )
+    # 지정가 초과: LIMIT_PRICE
+    assert "LIMIT_PRICE" in f3._evaluate_post_fill_guard(
+        fill_price=10_500, submitted_order_price=10_400, prev_close=10_000, expected_amount=thr
+    )
+    # [8%,10%) 저대금: HIGH_GAP_AMOUNT_LOW
+    assert f3._evaluate_post_fill_guard(
+        fill_price=10_850, submitted_order_price=11_000, prev_close=10_000, expected_amount=thr - 1
+    ) == ["HIGH_GAP_AMOUNT_LOW"]
+    # [8%,10%) 대금 부재 fail-safe
+    assert f3._evaluate_post_fill_guard(
+        fill_price=10_850, submitted_order_price=11_000, prev_close=10_000, expected_amount=None
+    ) == ["HIGH_GAP_AMOUNT_LOW"]
+    # [8%,10%) 적격 대금: 통과
+    assert f3._evaluate_post_fill_guard(
+        fill_price=10_850, submitted_order_price=11_000, prev_close=10_000, expected_amount=thr
+    ) == []
+    # 8% 미만 대금 부재: 통과 (하위 호환)
+    assert f3._evaluate_post_fill_guard(
+        fill_price=10_790, submitted_order_price=11_000, prev_close=10_000, expected_amount=None
+    ) == []
+
+
+@pytest.mark.parametrize(
+    ("fill_price", "submitted_order_price", "prev_close"),
+    [
+        (float("nan"), 11_000, 10_000),
+        (float("inf"), 11_000, 10_000),
+        (10_850, float("nan"), 10_000),
+        (10_850, 11_000, float("nan")),
+        (10_850, 11_000, 0),
+    ],
+)
+def test_evaluate_post_fill_guard_invalid_prices_fail_closed(
+    fill_price, submitted_order_price, prev_close
+):
+    assert f3._evaluate_post_fill_guard(
+        fill_price=fill_price,
+        submitted_order_price=submitted_order_price,
+        prev_close=prev_close,
+        expected_amount=f3.HIGH_GAP_MIN_EXPECTED_AMOUNT,
+    ) == ["INVALID_FILL_DATA"]
+
+
+# ── F1 고갭 유동성 우회 차단: 주문 게이트/체결 후/복구 통합 ────────────────
+import src.modules.f4_tracking as _f4  # noqa: E402
+
+
+def _high_gap_candidate(ticker, amount):
+    return {"ticker": ticker, "name": ticker, "expected_amount": amount, "prev_close": 10_000}
+
+
+def _low_amt():
+    return f3.HIGH_GAP_MIN_EXPECTED_AMOUNT - 1
+
+
+def _ok_amt():
+    return f3.HIGH_GAP_MIN_EXPECTED_AMOUNT
+
+
+def _ok_buy_resp():
+    return {
+        "rt_cd": "0",
+        "msg_cd": "MCA00000",
+        "msg1": "OK",
+        "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_initial_recheck_high_gap_low_amount_blocks_no_order(monkeypatch):
+    _reset_state()
+    state.get().target_candidates = [_high_gap_candidate("006340", _low_amt())]
+    events = []
+    send_buy = AsyncMock()
+    monkeypatch.setattr(f3, "log", lambda event, **k: events.append((event, k)))
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10_850.0, 10_000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3._run_single()
+
+    send_buy.assert_not_awaited()
+    assert state.get().day_skip is True
+    blocked = [k for e, k in events if e == "F3_ENTRY_BLOCKED"]
+    assert any(k.get("reason") == "HIGH_GAP_AMOUNT_LOW" for k in blocked)
+
+
+@pytest.mark.asyncio
+async def test_initial_recheck_high_gap_qualifying_amount_allows_order(monkeypatch):
+    _reset_state()
+    state.get().target_candidates = [_high_gap_candidate("006340", _ok_amt())]
+    send_buy = AsyncMock(return_value=_ok_buy_resp())
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10_850.0, 10_000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    _mock_final_quote(monkeypatch, 10_800)
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(
+        f3, "_poll_fill", AsyncMock(return_value={"fill_price": 10_700, "fill_qty": 8})
+    )
+    monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=10_700))
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "record_order", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "update_order_fill", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+
+    await f3._run_single()
+
+    send_buy.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_final_ask_gate_high_gap_low_amount_blocks_no_order(monkeypatch):
+    _reset_state()
+    state.get().target_candidates = [_high_gap_candidate("006340", _low_amt())]
+    send_buy = AsyncMock()
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10_310.0, 10_000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    _mock_final_quote(monkeypatch, 10_850)
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3._run_single()
+
+    send_buy.assert_not_awaited()
+    assert state.get().day_skip is True
+
+
+@pytest.mark.asyncio
+async def test_post_fill_first_buy_high_gap_low_amount_triggers_guard(monkeypatch):
+    _reset_state()
+    state.get().target_candidates = [_high_gap_candidate("006340", _low_amt())]
+    close_now = AsyncMock()
+    monkeypatch.setattr(_f4, "close_now", close_now)
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10_310.0, 10_000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    _mock_final_quote(monkeypatch, 10_300)
+    monkeypatch.setattr(
+        f3, "_fetch_buyable_qty", AsyncMock(return_value=_buyable(qty=8, amt=100_000.0))
+    )
+    monkeypatch.setattr(f3, "_send_buy", AsyncMock(return_value=_ok_buy_resp()))
+    monkeypatch.setattr(
+        f3, "_poll_fill", AsyncMock(return_value={"fill_price": 10_850, "fill_qty": 8})
+    )
+    monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=10_850))
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "record_order", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "update_order_fill", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+    events = []
+    monkeypatch.setattr(f3, "log", lambda event, **k: events.append((event, k)))
+
+    await f3._run_single()
+
+    close_now.assert_awaited_once()
+    assert close_now.await_args.args[1] == "SLIPPAGE_GUARD"
+    assert state.get().day_skip is True
+    guard = [k for e, k in events if e == "SLIPPAGE_GUARD"]
+    assert guard and "HIGH_GAP_AMOUNT_LOW" in guard[-1]["guard_reasons"]
+
+
+def _recovery_pending(**over):
+    base = {
+        "order_id": "0000000937",
+        "org_no": "001",
+        "ticker": "006340",
+        "requested_qty": 8,
+        "limit_price": 11_000,
+        "anchor_price": 10_300,
+        "prev_close": 10_000,
+    }
+    base.update(over)
+    return base
+
+
+async def _run_recovery(monkeypatch, pending, fill_price, close_now, candidates=None):
+    _reset_state()
+    s = state.get()
+    s.position_status = "ENTERING"
+    s.pending_entry = dict(pending)
+    if candidates is not None:
+        s.target_candidates = candidates
+    fill = {
+        "status": "FILLED",
+        "order_qty": 8,
+        "fill_qty": 8,
+        "remaining_qty": 0,
+        "fill_price": fill_price,
+    }
+    monkeypatch.setattr(f3, "_fetch_order_fill_snapshot", AsyncMock(return_value=fill))
+    monkeypatch.setattr(f3.db, "get_order_by_kis_id", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        f3.db,
+        "get_trade_by_date",
+        AsyncMock(return_value={"id": 1, "ticker": "006340", "status": "OPEN"}),
+    )
+    monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "record_order", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "update_order_fill", AsyncMock())
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda *a, **k: None)
+    monkeypatch.setattr(_f4, "close_now", close_now)
+    recovered = await f3.recover_pending_entry()
+    tasks = [t for t in f3._entry_audit_tasks if t.get_loop() is asyncio.get_running_loop()]
+    if tasks:
+        await asyncio.gather(*tasks)
+    return recovered
+
+
+@pytest.mark.asyncio
+async def test_recover_high_gap_persisted_low_amount_guards(monkeypatch):
+    close_now = AsyncMock()
+    await _run_recovery(
+        monkeypatch, _recovery_pending(expected_amount=_low_amt()), 10_850, close_now
+    )
+    close_now.assert_awaited_once()
+    assert close_now.await_args.args[1] == "SLIPPAGE_GUARD"
+    assert state.get().day_skip is True
+
+
+@pytest.mark.asyncio
+async def test_recover_high_gap_missing_amount_fail_safe_guards(monkeypatch):
+    close_now = AsyncMock()
+    await _run_recovery(
+        monkeypatch,
+        _recovery_pending(expected_amount=None),
+        10_850,
+        close_now,
+    )
+    close_now.assert_awaited_once()
+    assert state.get().day_skip is True
+
+
+@pytest.mark.asyncio
+async def test_recover_legacy_high_gap_unknown_amount_does_not_force_close(monkeypatch):
+    """구버전 pending의 스키마 결측만으로 과거 합법 체결을 강제 청산하지 않는다."""
+    close_now = AsyncMock()
+    await _run_recovery(monkeypatch, _recovery_pending(), 10_850, close_now)
+    close_now.assert_not_awaited()
+    assert state.get().day_skip is False
+
+
+@pytest.mark.asyncio
+async def test_recover_below_8pct_missing_amount_is_compatible(monkeypatch):
+    close_now = AsyncMock()
+    await _run_recovery(monkeypatch, _recovery_pending(), 10_300, close_now)
+    close_now.assert_not_awaited()
+    assert state.get().day_skip is False
+
+
+@pytest.mark.asyncio
+async def test_recover_high_gap_amount_resolved_from_candidates(monkeypatch):
+    close_now = AsyncMock()
+    await _run_recovery(
+        monkeypatch,
+        _recovery_pending(),
+        10_850,
+        close_now,
+        candidates=[_high_gap_candidate("006340", _ok_amt())],
+    )
+    close_now.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pending_entry_persists_expected_amount(monkeypatch):
+    _reset_state()
+    state.get().target_candidates = [_high_gap_candidate("006340", _ok_amt())]
+    captured = {}
+
+    async def _capture_pending(payload):
+        captured.update(payload)
+        state.get().pending_entry = dict(payload)
+
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(f3.state, "set_pending_entry", _capture_pending)
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10_310.0, 10_000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    _mock_final_quote(monkeypatch, 10_300)
+    monkeypatch.setattr(f3, "_send_buy", AsyncMock(return_value=_ok_buy_resp()))
+    monkeypatch.setattr(
+        f3, "_poll_fill", AsyncMock(return_value={"fill_price": 10_300, "fill_qty": 8})
+    )
+    monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=10_300))
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "record_order", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "update_order_fill", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+
+    await f3._run_single()
+
+    assert captured.get("expected_amount") == _ok_amt()
+
+
+def test_high_gap_amount_low_is_candidate_retryable():
+    assert "HIGH_GAP_AMOUNT_LOW" in f3._CANDIDATE_RETRY_REASONS
+    assert "HIGH_GAP_AMOUNT_LOW" in f3._EXPECTED_CANDIDATE_REJECTIONS
+
+
+def test_high_gap_amount_low_has_dedicated_event_label():
+    from src.utils import logger as _logger
+
+    label = _logger.event_label("HIGH_GAP_AMOUNT_LOW")
+    # 원시 중복 라벨("HIGH_GAP_AMOUNT_LOW(HIGH_GAP_AMOUNT_LOW)")로 떨어지면 안 된다.
+    assert label != "HIGH_GAP_AMOUNT_LOW(HIGH_GAP_AMOUNT_LOW)"
+    assert "HIGH_GAP_AMOUNT_LOW" in _logger.EVENT_LABELS
+
+
+@pytest.mark.parametrize(
+    ("vi_price", "amount", "expected"),
+    [
+        (10_799, None, False),
+        (10_800, None, True),
+        (10_999, None, True),
+        (10_999, "OK", False),
+        (11_000, "OK", True),
+        (0, "OK", False),
+    ],
+)
+def test_vi_price_gap_cap_is_amount_aware(vi_price, amount, expected):
+    resolved = f3.HIGH_GAP_MIN_EXPECTED_AMOUNT if amount == "OK" else None
+    vi_info = dict(_VI_ACTIVE_INFO)
+    vi_info["vi_prc"] = str(vi_price)
+    assert f3._vi_price_reaches_gap_cap(vi_info, 10_000, resolved) is expected
+
+
+@pytest.mark.asyncio
+async def test_early_retry_gap_guard_blocks_high_gap_low_amount(monkeypatch):
+    monkeypatch.setattr(
+        f3, "_fetch_final_entry_quote", AsyncMock(return_value=_entry_quote(10_850))
+    )
+    reject = AsyncMock(return_value="HIGH_GAP_AMOUNT_LOW")
+    monkeypatch.setattr(f3, "_reject_final_entry_price", reject)
+
+    result = await f3._early_retry_gap_guard(
+        "006340",
+        expected_price=10_300,
+        prev_close=10_000,
+        allow_candidate_retry=True,
+        entry_attempt=2,
+        expected_amount=_low_amt(),
+    )
+
+    assert result == "HIGH_GAP_AMOUNT_LOW"
+    assert reject.await_args.args[1] == "HIGH_GAP_AMOUNT_LOW"
+
+
+@pytest.mark.asyncio
+async def test_early_retry_gap_guard_allows_high_gap_qualifying_amount(monkeypatch):
+    monkeypatch.setattr(
+        f3, "_fetch_final_entry_quote", AsyncMock(return_value=_entry_quote(10_850))
+    )
+    reject = AsyncMock()
+    monkeypatch.setattr(f3, "_reject_final_entry_price", reject)
+
+    result = await f3._early_retry_gap_guard(
+        "006340",
+        expected_price=10_300,
+        prev_close=10_000,
+        allow_candidate_retry=True,
+        entry_attempt=2,
+        expected_amount=_ok_amt(),
+    )
+
+    assert result is None
+    reject.assert_not_awaited()
+
+
+# ── 경로 테스트 (correction round 1): 게이트별 행위 검증 ──────────────────
+@pytest.mark.asyncio
+async def test_rank_excludes_high_gap_low_amount_and_selects_next(monkeypatch):
+    """랭킹 재검증: 정확히 8% 저대금 후보를 제외하고 다음 유효 후보를 고른다."""
+    _reset_state()
+    s = state.get()
+    s.target_ticker = "111111"
+    s.target_candidates = [
+        {"ticker": "111111", "name": "A", "expected_amount": _low_amt(), "prev_close": 10_000},
+        {"ticker": "222222", "name": "B", "expected_amount": _ok_amt(), "prev_close": 10_000},
+    ]
+    events = []
+    monkeypatch.setattr(f3, "log", lambda event, **k: events.append((event, k)))
+    monkeypatch.setattr(f3, "_fast_recheck_rows", lambda *a, **k: None)
+    monkeypatch.setattr(f3, "_available_cash_for_entry", AsyncMock(return_value=1_000_000.0))
+
+    async def _expected(ticker, fallback_prev_close=0.0):
+        # 111111: 정확히 8.0% (저대금 → 제외), 222222: 3.0% 코어 (선택)
+        return (10_800.0, 10_000.0) if ticker == "111111" else (10_300.0, 10_000.0)
+
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(side_effect=_expected))
+
+    ranked = await f3._rank_final_entry_candidates(s)
+
+    assert ranked is not None
+    assert ranked[0]["ticker"] == "222222"
+    assert all(row["ticker"] != "111111" for row in ranked)
+    blocked = [k for e, k in events if e == "F3_ENTRY_BLOCKED" and k.get("ticker") == "111111"]
+    assert blocked and blocked[-1]["reason"] == "HIGH_GAP_AMOUNT_LOW"
+    assert blocked[-1]["expected_amount"] == _low_amt()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_rotates_after_high_gap_low_amount_and_enters_next(monkeypatch):
+    """파이프라인: 1번 후보의 고갭 저대금 거절 후 2번 후보 진입까지 이어진다."""
+    _reset_state()
+    s = state.get()
+    first = {"ticker": "111111", "name": "A", "expected_amount": _low_amt()}
+    second = {"ticker": "222222", "name": "B", "expected_amount": _ok_amt()}
+    s.target_ticker = first["ticker"]
+    s.target_name = first["name"]
+    s.target_candidates = [first, second]
+    ranked = [
+        {
+            "ticker": first["ticker"],
+            "candidate": first,
+            "candidate_rank": 1,
+            "expected_price": 10_850.0,
+            "prev_close": 10_000.0,
+            "cash": 1_000_000.0,
+            "total_amount": 950_000,
+            "total_qty": 87,
+        },
+        {
+            "ticker": second["ticker"],
+            "candidate": second,
+            "candidate_rank": 2,
+            "expected_price": 10_300.0,
+            "prev_close": 10_000.0,
+            "cash": 1_000_000.0,
+            "total_amount": 950_000,
+            "total_qty": 92,
+        },
+    ]
+    monkeypatch.setattr(f3, "_rank_final_entry_candidates", AsyncMock(return_value=ranked))
+    monkeypatch.setattr(f3, "_refresh_entry_candidate", AsyncMock(return_value=ranked[1]))
+    monkeypatch.setattr(f3, "_before_deadline", lambda *_: True)
+    monkeypatch.setattr(f3, "log", lambda *a, **k: None)
+
+    calls = []
+
+    async def run_single(*, picked=None, allow_candidate_retry=False):
+        calls.append((picked["ticker"], allow_candidate_retry))
+        if picked["ticker"] == first["ticker"]:
+            return "HIGH_GAP_AMOUNT_LOW"
+        state.get().position_status = "HOLDING"
+        return None
+
+    monkeypatch.setattr(f3, "_run_single", run_single)
+
+    await f3._run_pipeline()
+
+    assert calls == [("111111", True), ("222222", True)]
+    assert state.get().target_ticker == "222222"
+    assert state.get().position_status == "HOLDING"
+    f3._refresh_entry_candidate.assert_awaited_once_with(ranked[1])
+
+
+@pytest.mark.asyncio
+async def test_refresh_entry_candidate_rejects_crossing_to_high_gap_low_amount(monkeypatch):
+    """후보 리프레시: >=8%로 넘어가며 적격 대금이 없으면 제외(None) + 증거 로그."""
+    _reset_state()
+    events = []
+    monkeypatch.setattr(f3, "log", lambda event, **k: events.append((event, k)))
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10_850.0, 10_000.0)))
+    picked = {
+        "ticker": "006340",
+        "candidate": {"ticker": "006340", "expected_amount": _low_amt(), "prev_close": 10_000},
+        "candidate_rank": 2,
+        "expected_price": 10_300.0,
+        "prev_close": 10_000.0,
+        "total_amount": 1_000_000,
+        "cash": 1_000_000,
+    }
+
+    refreshed = await f3._refresh_entry_candidate(picked)
+
+    assert refreshed is None
+    blocked = [k for e, k in events if e == "F3_ENTRY_BLOCKED"]
+    assert blocked and blocked[-1]["reason"] == "HIGH_GAP_AMOUNT_LOW"
+    assert blocked[-1]["expected_amount"] == _low_amt()
+
+
+@pytest.mark.asyncio
+async def test_vi_release_then_fresh_quote_crossing_high_gap_low_amount_no_order(monkeypatch):
+    """VI 해제 확인 후에도 최종 호가가 8.5% 저대금이면 주문을 보내지 않는다."""
+    _reset_state()
+    state.get().target_candidates = [_high_gap_candidate("006340", _low_amt())]
+    send_buy = AsyncMock()
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 1)
+    # 초기 재검증은 코어(3.1%) 통과, VI 발동 후 해제 확인, 최종 호가 8.5% 크로싱
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10_310.0, 10_000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_fetch_vi_active", AsyncMock(return_value=dict(_VI_ACTIVE_INFO)))
+    monkeypatch.setattr(f3, "_wait_for_vi_release", AsyncMock(return_value=True))
+    _mock_final_quote(monkeypatch, 10_850)
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+
+    await f3._run_single()
+
+    send_buy.assert_not_awaited()
+    assert state.get().day_skip is True
+
+
+def _pyramid_common(monkeypatch, *, final_quotes, fills, amount, current_price):
+    _reset_state()
+    state.get().target_candidates = [_high_gap_candidate("006340", amount)]
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(f3, "FIRST_RATIO", 0.5)
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "_pre_order_quiet_wait", AsyncMock())
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(10_310.0, 10_000.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(
+        f3, "_fetch_final_entry_quote", AsyncMock(side_effect=list(final_quotes))
+    )
+    monkeypatch.setattr(f3, "_poll_fill", AsyncMock(side_effect=list(fills)))
+    monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=current_price))
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "record_order", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "update_order_fill", AsyncMock())
+    monkeypatch.setattr(f3.db, "mark_pyramided", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+
+
+@pytest.mark.asyncio
+async def test_dormant_pyramid_no_second_buy_on_high_gap_low_amount_crossing(monkeypatch):
+    """휴면 피라미딩: 2차 호가가 8.5% 저대금으로 크로싱하면 2차 매수를 보내지 않는다."""
+    send_buy = AsyncMock(return_value=_ok_buy_resp())
+    _pyramid_common(
+        monkeypatch,
+        final_quotes=[_entry_quote(10_300), _entry_quote(10_850)],
+        fills=[{"fill_price": 10_300, "fill_qty": 999_999}],
+        amount=_low_amt(),
+        current_price=10_400,
+    )
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+
+    await f3._run_single()
+
+    # 1차 매수만 전송, 2차(피라미딩)는 크로싱 차단으로 미전송
+    assert send_buy.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_pyramid_abnormal_fill_high_gap_low_amount_triggers_guard(monkeypatch):
+    """피라미딩 이상 체결이 8.5% 저대금이면 공유 체결후 평가기로 SLIPPAGE_GUARD."""
+    close_now = AsyncMock()
+    send_buy = AsyncMock(return_value=_ok_buy_resp())
+    _pyramid_common(
+        monkeypatch,
+        # 2차 호가는 코어(3%)라 게이트 통과, 그러나 체결은 8.5% 이상 이상 체결
+        final_quotes=[_entry_quote(10_300), _entry_quote(10_300)],
+        fills=[
+            {"fill_price": 10_300, "fill_qty": 999_999},
+            {"fill_price": 10_850, "fill_qty": 999_999},
+        ],
+        amount=_low_amt(),
+        current_price=10_400,
+    )
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(_f4, "close_now", close_now)
+    events = []
+    monkeypatch.setattr(f3, "log", lambda event, **k: events.append((event, k)))
+
+    await f3._run_single()
+
+    assert send_buy.await_count == 2
+    close_now.assert_awaited_once()
+    assert close_now.await_args.args[1] == "SLIPPAGE_GUARD"
+    assert state.get().day_skip is True
+    # 공유 체결후 평가기가 고갭 유동성 부족을 방어 사유로 명시해야 한다.
+    guard = [k for e, k in events if e == "SLIPPAGE_GUARD" and k.get("phase") == "PYRAMID"]
+    assert guard and "HIGH_GAP_AMOUNT_LOW" in guard[-1]["guard_reasons"]

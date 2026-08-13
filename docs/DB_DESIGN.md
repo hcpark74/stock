@@ -38,6 +38,7 @@ asset_snapshots             (KIS 자산 조회 이력)
 erDiagram
     TRADES ||--o{ ORDERS : has
     TRADES ||--o{ PARTIAL_EXITS : has
+    TRADES ||--o| TRAILING_SHADOW_COMPARISONS : has
     ORDERS ||--o{ PARTIAL_EXITS : references
 
     TRADES {
@@ -95,6 +96,18 @@ erDiagram
         integer remaining_qty
         real pnl_pct
         text exited_at
+    }
+
+    TRAILING_SHADOW_COMPARISONS {
+        integer trade_id PK, FK
+        real baseline_step_trail
+        real recommended_step_trail
+        real baseline_exit_price
+        real recommended_exit_price
+        real actual_exit_price
+        real pnl_delta_pct
+        real pnl_delta_amount
+        integer finalized
     }
 
     DAILY_SKIPS {
@@ -183,7 +196,7 @@ CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(date);
 | `pnl_amount` | `(exit_price − entry_price) × exit_qty` 단순 계산 |
 | `pyramided` | F3에서 2차 30% 매수가 체결됐으면 1 |
 | `execution_mode` | 진입 당시 `KIS_MODE`; 준비도 계산은 PAPER만 인정 |
-| `strategy_fingerprint` | 동일 코드 버전의 PAPER 실적만 집계하기 위한 지문 |
+| `strategy_fingerprint` | 동일 전략 코드와 비밀값 제외 유효 환경설정의 PAPER 실적만 집계하기 위한 지문 |
 
 ---
 
@@ -307,6 +320,9 @@ CREATE INDEX IF NOT EXISTS idx_asset_snapshots_captured_at
 - 실제 결과: `actual_exit_price`, `actual_pnl_pct`, `close_reason`
 - 차이: `pnl_delta_pct`, `pnl_delta_amount` (추천 - 기존)
 - 완료 여부: `finalized`
+
+분석·비교 집계에는 최종화된 행만 사용하며 반드시 `WHERE finalized = 1`로
+필터링한다. `finalized = 0` 행은 기존 1.5% 선의 최초 도달만 기록된 미완료 관측이다.
 
 `trade_id`는 `trades(id)`에 대한 PK/FK이며 거래 삭제 시 함께 삭제한다.
 

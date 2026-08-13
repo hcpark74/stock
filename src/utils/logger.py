@@ -158,6 +158,10 @@ EVENT_LABELS = {
     "PENDING_ENTRY_RECOVERED": "재시작 매수 주문 대조 완료(Pending Entry Recovered)",
     "PENDING_ENTRY_RECOVERY_FAILED": "재시작 매수 주문 대조 실패(Pending Entry Recovery Failed)",
     "GAP_CHANGED": "진입 전 갭 변동(Gap Changed)",
+    "HIGH_GAP_AMOUNT_LOW": "고갭 유동성 부족 차단(High-Gap Liquidity Low)",
+    "PENDING_ENTRY_LEGACY_AMOUNT_UNVERIFIED": (
+        "구버전 매수복구 대금 미확인(Legacy Entry Amount Unverified)"
+    ),
     "VI_ENTRY_BLOCKED": "진입 전 VI 차단(VI Entry Blocked)",
     "VI_ENTRY_WAIT_STARTED": "VI 해제 대기 시작(VI Release Wait Started)",
     "VI_ENTRY_RELEASED": "VI 해제 확인(VI Release Confirmed)",

@@ -795,6 +795,9 @@ async def _record_trailing_shadow_baseline(
         or _shadow_baseline_recorded_trade_id == s.trade_id
     ):
         return
+    # 보고 전용 DB 장애가 손절 임박 가격대의 매 틱 쓰기로 번지지 않도록
+    # 성공 여부와 무관하게 이 프로세스에서는 거래당 한 번만 시도한다.
+    _shadow_baseline_recorded_trade_id = s.trade_id
     try:
         inserted = await db.record_trailing_shadow_baseline(
             s.trade_id,
@@ -806,7 +809,6 @@ async def _record_trailing_shadow_baseline(
             recommended_stop_price=recommended_stop,
             baseline_exit_price=price,
         )
-        _shadow_baseline_recorded_trade_id = s.trade_id
         if inserted:
             entry = float(s.entry_price or price)
             log(
@@ -1081,6 +1083,13 @@ async def recover_pending_exit() -> bool:
                     s.highest_step,
                     exit_qty=total_qty,
                     high_price=s.high_price,
+                )
+                await finalize_trailing_shadow(
+                    trigger_price=float(pending.get("trigger_price") or 0),
+                    actual_exit_price=exit_price,
+                    exit_qty=total_qty,
+                    actual_pnl_pct=pnl_pct,
+                    close_reason=reason,
                 )
             await state.set_closed(reason)
             await state.persist(

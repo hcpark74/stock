@@ -359,6 +359,27 @@ async def test_shadow_does_not_delay_current_stop_with_baseline_write():
     f4.db.record_trailing_shadow_baseline.assert_not_awaited()
 
 
+async def test_shadow_db_failure_is_attempted_only_once_per_trade(monkeypatch):
+    """보고 DB 장애가 손절 임박 구간의 매 틱 쓰기 재시도로 번지지 않는다."""
+    import src.modules.f4_tracking as f4
+
+    s = _state_mod.get()
+    s.trade_id = 123
+    s.trailing_active = True
+    s.highest_step = STEP_SIZE
+    write = AsyncMock(side_effect=RuntimeError("database is locked"))
+    monkeypatch.setattr(f4.db, "record_trailing_shadow_baseline", write)
+    price = (
+        ENTRY * (1 + STEP_SIZE - f4.TRAILING_SHADOW_BASELINE_TRAIL)
+        + ENTRY * (1 + STEP_SIZE - STEP_TRAIL)
+    ) / 2
+
+    await _run_tick(price)
+    await _run_tick(price)
+
+    assert write.await_count == 1
+
+
 # ── 청산 10분 전 강제 발동 ────────────────────────────────────────────
 # 시각 리터럴을 쓰지 않는다 — F5 청산 시각이 바뀌면 이 테스트도 따라가야 한다.
 

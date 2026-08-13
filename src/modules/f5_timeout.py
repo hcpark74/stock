@@ -255,8 +255,6 @@ async def execute() -> None:
             except Exception as e:
                 log("F5_PRICE_QUERY_FAIL", level="WARN",
                     ticker=ticker, error=str(e))
-        last_ref_price = ref_price
-
         try:
             send_started_at = time.perf_counter()
             submission = await exit_recovery.submit_sell(
@@ -292,6 +290,10 @@ async def execute() -> None:
             last_org_no = submission.org_no
             order_db_id = submission.order_db_id
             order_started_at = send_started_at
+            # 실제 접수된 주문의 유효한 결정가만 보존한다. 이후 재시도에서
+            # 시세 조회가 실패해 0이 되어도 앞선 성공 기준가를 덮어쓰지 않는다.
+            if ref_price > 0:
+                last_ref_price = ref_price
             if liquidation_started_at is None:
                 liquidation_started_at = send_started_at
         except Exception as e:

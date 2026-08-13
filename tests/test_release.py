@@ -59,3 +59,29 @@ def test_strategy_fingerprint_fails_closed_when_listed_file_is_missing(
             release.strategy_fingerprint()
     finally:
         release.strategy_fingerprint.cache_clear()
+
+
+def test_strategy_fingerprint_changes_with_loaded_strategy_environment(monkeypatch):
+    monkeypatch.setenv("F1_GAP_MIN", "0.025")
+    release.strategy_fingerprint.cache_clear()
+    try:
+        baseline = release.strategy_fingerprint()
+        monkeypatch.setenv("F1_GAP_MIN", "0.030")
+        # 프로세스 수명 중에는 시작 지문을 고정한다.
+        assert release.strategy_fingerprint() == baseline
+        release.strategy_fingerprint.cache_clear()
+        assert release.strategy_fingerprint() != baseline
+    finally:
+        release.strategy_fingerprint.cache_clear()
+
+
+def test_strategy_fingerprint_excludes_secrets(monkeypatch):
+    monkeypatch.setenv("KIS_APP_SECRET", "secret-a")
+    release.strategy_fingerprint.cache_clear()
+    try:
+        baseline = release.strategy_fingerprint()
+        monkeypatch.setenv("KIS_APP_SECRET", "secret-b")
+        release.strategy_fingerprint.cache_clear()
+        assert release.strategy_fingerprint() == baseline
+    finally:
+        release.strategy_fingerprint.cache_clear()

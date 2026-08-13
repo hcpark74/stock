@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import time
 from collections.abc import Callable
@@ -14,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from src import db, notifier, state
 from src.api import kis_rest
-from src.modules import paper_fast_probe, vi_watch
+from src.modules import f1_selector, paper_fast_probe, vi_watch
 from src.utils.logger import log
 from src.utils.number import to_float
 
@@ -28,9 +29,13 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-GAP_MIN_RECHECK = 0.020  # 재검증 하한 (F1 3%보다 낮음 — 완충)
-GAP_MAX_ORDER = 0.100  # F1 고갭 후보 범위와 동일: +10% 미만
-GAP_MAX_FILL = 0.100  # +10% 이상 추격 체결은 즉시 방어 청산
+GAP_MIN_RECHECK = 0.020  # 재검증 하한 (F1 3%보다 낮음 — 완충). F3 로컬 완충값.
+# F1 고갭 유동성 정책과 정확히 일치시키기 위해 8%/10%/50억원 임계값은 F1에서 가져온다.
+# F3가 자체 상수를 복제하면 정책이 갈라져 F1 이후 우회가 생긴다.
+GAP_HIGH_BAND = f1_selector.GAP_CORE_MAX  # >=8%: 고갭 유동성 요건 적용 경계
+GAP_MAX_ORDER = f1_selector.GAP_HARD_MAX  # F1 고갭 후보 범위와 동일: +10% 미만
+GAP_MAX_FILL = f1_selector.GAP_HARD_MAX  # +10% 이상 추격 체결은 즉시 방어 청산
+HIGH_GAP_MIN_EXPECTED_AMOUNT = f1_selector.HIGH_GAP_MIN_EXPECTED_AMOUNT
 ALLOC_RATIO = float(os.getenv("F3_ALLOC_RATIO", "0.95"))  # 주문가능 현금 기본 95% 기준
 F3_QTY_CLAMP_WARN_PCT = max(
     0.0,
@@ -165,9 +170,107 @@ F3_VI_RELEASE_POLL_SEC = max(
 )
 
 
-def _gap_in_order_range(gap: float) -> bool:
-    """주문 전 재검증 갭 허용 구간: 하한 포함, 상한 미포함."""
-    return GAP_MIN_RECHECK <= gap < GAP_MAX_ORDER
+def _normalize_expected_amount(value: object) -> float | None:
+    """예상 체결대금을 유한한 float 또는 None으로 정규화한다.
+
+    None/비수치/문자열/±inf/NaN/bool은 모두 무효(None)로 취급한다. 이렇게
+    정규화한 값만 고갭 유동성 판정·저장·로깅에 사용해 raw Any가 새지 않게 한다.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if not isinstance(value, (int, float, str)):
+        return None
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(amount):
+        return None
+    return amount
+
+
+def _amount_qualifies_high_gap(expected_amount: float | None) -> bool:
+    """[8%,10%) 고갭 진입 유동성 요건: 예상 체결대금이 F1 하한 이상인지.
+
+    F1 f1_selector.high_gap_allowed와 동일한 판정을 F3에서 재사용한다.
+    대금이 없거나 무효(None/NaN/±inf/비수치/<=0)면 fail-closed로 False.
+    """
+    amount = _normalize_expected_amount(expected_amount)
+    if amount is None or amount <= 0:
+        return False
+    return amount >= HIGH_GAP_MIN_EXPECTED_AMOUNT
+
+
+def _evaluate_order_gap(gap: float, expected_amount: float | None) -> tuple[bool, str]:
+    """F1 고갭 유동성 정책을 반영한 주문 전 갭 판정. 모든 매수 게이트의 단일 기준.
+
+    반환: (허용 여부, 사유). 사유는 OK/INVALID_GAP/BELOW_MIN/ABOVE_MAX/HIGH_GAP_AMOUNT_LOW.
+    - 비유한(NaN/±inf) 갭: INVALID_GAP fail-closed 차단 (NaN 비교가 모두 False라
+      fail-open 되는 것을 방지; 호출부는 GAP_CHANGED로 매핑해 주문하지 않는다)
+    - gap < 2%: BELOW_MIN 차단
+    - 2% <= gap < 8%: 허용 (대금 무관)
+    - 8% <= gap < 10%: 예상 체결대금이 F1 하한 이상일 때만 허용, 아니면(대금
+      부재·무효 포함) HIGH_GAP_AMOUNT_LOW fail-closed 차단
+    - gap >= 10%: ABOVE_MAX 차단
+    """
+    if not math.isfinite(gap):
+        return (False, "INVALID_GAP")
+    if gap < GAP_MIN_RECHECK:
+        return (False, "BELOW_MIN")
+    if gap >= GAP_MAX_ORDER:
+        return (False, "ABOVE_MAX")
+    if gap >= GAP_HIGH_BAND and not _amount_qualifies_high_gap(expected_amount):
+        return (False, "HIGH_GAP_AMOUNT_LOW")
+    return (True, "OK")
+
+
+def _evaluate_post_fill_guard(
+    *,
+    fill_price: float,
+    submitted_order_price: float,
+    prev_close: float,
+    expected_amount: float | None,
+) -> list[str]:
+    """체결 후 방어 청산(SLIPPAGE_GUARD) 사유를 순서대로 반환한다. 빈 리스트=통과.
+
+    기존 불변식(체결 갭 >=10% → FILL_GAP, 제출 지정가 초과 → LIMIT_PRICE)을
+    그대로 유지하고, [8%,10%) 체결이 고갭 유동성 요건을 만족하지 못하면(대금
+    부재·무효 포함) fail-safe로 HIGH_GAP_AMOUNT_LOW를 추가한다. 최초 매수·
+    피라미딩·재시작 복구가 모두 이 단일 평가기를 공유한다.
+    """
+    # NaN/무한대는 아래 비교를 모두 False로 만들어 가드를 우회할 수 있다.
+    # 지정가 0은 복구 시 "미확인" 표식으로 허용하되, 체결가·전일종가는
+    # 반드시 양의 유한값이어야 한다.
+    price_values_valid = (
+        isinstance(fill_price, (int, float))
+        and not isinstance(fill_price, bool)
+        and math.isfinite(float(fill_price))
+        and fill_price > 0
+        and isinstance(prev_close, (int, float))
+        and not isinstance(prev_close, bool)
+        and math.isfinite(float(prev_close))
+        and prev_close > 0
+        and isinstance(submitted_order_price, (int, float))
+        and not isinstance(submitted_order_price, bool)
+        and math.isfinite(float(submitted_order_price))
+        and submitted_order_price >= 0
+    )
+    if not price_values_valid:
+        return ["INVALID_FILL_DATA"]
+
+    reasons: list[str] = []
+    fill_gap = (fill_price / prev_close) - 1 if prev_close > 0 else 0.0
+    if prev_close > 0 and _fill_gap_reaches_max(fill_gap):
+        reasons.append("FILL_GAP")
+    if submitted_order_price > 0 and fill_price > submitted_order_price:
+        reasons.append("LIMIT_PRICE")
+    if (
+        prev_close > 0
+        and GAP_HIGH_BAND <= fill_gap < GAP_MAX_FILL
+        and not _amount_qualifies_high_gap(expected_amount)
+    ):
+        reasons.append("HIGH_GAP_AMOUNT_LOW")
+    return reasons
 
 
 def _fill_gap_reaches_max(fill_gap: float) -> bool:
@@ -199,16 +302,27 @@ def _floor_to_tick(price: float, api_tick_size: float = 0.0) -> float:
     return float(int(price // tick) * tick)
 
 
-def _strict_gap_cap(prev_close: float, api_tick_size: float = 0.0) -> float:
-    """GAP_MAX_ORDER 미만인 마지막 유효 매수가를 반환한다."""
+def _strict_gap_cap(
+    prev_close: float,
+    api_tick_size: float = 0.0,
+    *,
+    expected_amount: float | None = None,
+) -> float:
+    """유효 갭 상한 미만인 마지막 매수가를 반환한다.
+
+    예상 체결대금이 고갭 유동성 요건을 만족하면 상한은 10%(GAP_MAX_ORDER),
+    아니면(대금 부재·무효 포함) fail-closed로 8%(GAP_HIGH_BAND)를 쓴다.
+    """
     if prev_close <= 0:
         return 0.0
 
-    # 10% 경계 계산과 비교를 모두 Decimal로 수행한다. float의 1.10이
+    ceiling = GAP_MAX_ORDER if _amount_qualifies_high_gap(expected_amount) else GAP_HIGH_BAND
+
+    # 경계 계산과 비교를 모두 Decimal로 수행한다. float의 1.10이
     # 1.1000000000000001로 올라가면 경계 호가를 경계 미만으로 오인해 정적 VI
     # 발동가에 주문을 제출할 수 있다.
     decimal_prev_close = Decimal(str(prev_close))
-    raw_cap = decimal_prev_close * (Decimal("1") + Decimal(str(GAP_MAX_ORDER)))
+    raw_cap = decimal_prev_close * (Decimal("1") + Decimal(str(ceiling)))
 
     # raw_cap이 호가단위 구간 경계(예: 50,000원)에 정확히 놓이면 그 가격보다
     # 아래 구간의 틱이 마지막 유효 호가를 결정한다.
@@ -220,12 +334,20 @@ def _strict_gap_cap(prev_close: float, api_tick_size: float = 0.0) -> float:
     return max(0.0, float(cap))
 
 
-def _vi_price_reaches_gap_cap(vi_info: dict, prev_close: float) -> bool:
-    """확인된 VI 발동가가 주문 갭 상한 이상인지 정확한 10진수로 판정한다."""
+def _vi_price_reaches_gap_cap(
+    vi_info: dict,
+    prev_close: float,
+    expected_amount: float | None = None,
+) -> bool:
+    """확인된 VI 발동가가 유효 갭 상한 이상인지 정확한 10진수로 판정한다.
+
+    적격 유동성이면 상한은 10%, 아니면(대금 부재·무효 포함) 8%다.
+    """
     vi_price = to_float(vi_info.get("vi_prc"))
     if vi_price <= 0 or prev_close <= 0:
         return False
-    boundary = Decimal(str(prev_close)) * (Decimal("1") + Decimal(str(GAP_MAX_ORDER)))
+    ceiling = GAP_MAX_ORDER if _amount_qualifies_high_gap(expected_amount) else GAP_HIGH_BAND
+    boundary = Decimal(str(prev_close)) * (Decimal("1") + Decimal(str(ceiling)))
     return Decimal(str(vi_price)) >= boundary
 
 
@@ -269,12 +391,14 @@ _CANDIDATE_RETRY_REASONS = {
     "FINAL_QUOTE_UNAVAILABLE",
     "FINAL_QUOTE_STALE",
     "GAP_CHANGED",
+    "HIGH_GAP_AMOUNT_LOW",
 }
 _EXPECTED_CANDIDATE_REJECTIONS = {
     "BUYABLE_QTY_ZERO",
     "QTY_ZERO",
     "VI_ACTIVE",
     "GAP_CHANGED",
+    "HIGH_GAP_AMOUNT_LOW",
 }
 # KIS "모의투자 영업일이 아닙니다" — CTCA0903R이 모의투자 미지원이라 주문 거부가 유일한 휴장 신호
 _MARKET_CLOSED_MSG_CD = "40100000"
@@ -1070,13 +1194,52 @@ async def recover_pending_entry() -> bool:
         ticker=ticker,
     )
 
-    # 정상 지정가 체결에서는 둘 다 불변식상 발생하지 않는다. 과거 주문을
-    # 복구했거나 거래소/API 대조 이상이 생긴 경우에만 마지막 방어선으로 쓴다.
-    guard_breached = (prev_close > 0 and _fill_gap_reaches_max(fill_price / prev_close - 1)) or (
-        limit_price > 0 and fill_price > limit_price
+    # 정상 지정가 체결에서는 FILL_GAP/LIMIT_PRICE가 불변식상 발생하지 않는다.
+    # 과거 주문을 복구했거나 거래소/API 대조 이상일 때 마지막 방어선으로 쓴다.
+    # 고갭(>=8%) 유동성 검증은 저장된 대금이 있으면 그대로, 없으면
+    # state.target_candidates에서 해소한다. 현재 스키마의 누락·무효는
+    # fail-safe로 방어 청산하되, expected_amount 키 자체가 없던 구버전
+    # pending은 당시 합법 체결과 구분할 수 없으므로 별도 경고 후 보유한다.
+    recovery_amount, amount_source = _resolve_recovery_expected_amount(pending, s, ticker)
+    guard_reasons = _evaluate_post_fill_guard(
+        fill_price=fill_price,
+        submitted_order_price=limit_price,
+        prev_close=prev_close,
+        expected_amount=recovery_amount,
     )
-    if guard_breached:
+    legacy_amount_unverified = (
+        amount_source == "legacy_unavailable"
+        and "HIGH_GAP_AMOUNT_LOW" in guard_reasons
+    )
+    if legacy_amount_unverified:
+        guard_reasons = [reason for reason in guard_reasons if reason != "HIGH_GAP_AMOUNT_LOW"]
+        log(
+            "PENDING_ENTRY_LEGACY_AMOUNT_UNVERIFIED",
+            level="WARN",
+            ticker=ticker,
+            order_id=order_id,
+            fill_price=fill_price,
+            prev_close=prev_close,
+            amount_source=amount_source,
+            recovery=True,
+        )
+    if guard_reasons:
         state.get().day_skip = True
+        log(
+            "SLIPPAGE_GUARD",
+            level="WARN",
+            ticker=ticker,
+            order_id=order_id,
+            fill_price=fill_price,
+            prev_close=prev_close,
+            submitted_limit_price=limit_price,
+            fill_gap_pct=round((fill_price / prev_close - 1) * 100, 3) if prev_close > 0 else None,
+            guard_reasons=guard_reasons,
+            expected_amount=recovery_amount,
+            amount_source=amount_source,
+            threshold=HIGH_GAP_MIN_EXPECTED_AMOUNT,
+            recovery=True,
+        )
         from src.modules import f4_tracking
 
         await f4_tracking.close_now(fill_price, "SLIPPAGE_GUARD")
@@ -1119,15 +1282,20 @@ async def _run_single(
     if picked and picked.get("ticker") == ticker:
         expected_price = float(picked["expected_price"])
         prev_close = float(picked.get("prev_close") or 0)
+        entry_candidate = picked.get("candidate")
     else:
-        candidate = _candidate_for_ticker(s, ticker)
-        fallback_prev_close = _candidate_prev_close(candidate)
+        entry_candidate = _candidate_for_ticker(s, ticker)
+        fallback_prev_close = _candidate_prev_close(entry_candidate)
         expected_price, prev_close = await _fetch_expected_price(
             ticker,
             fallback_prev_close=fallback_prev_close,
         )
         if prev_close <= 0:
             prev_close = fallback_prev_close
+    # 고갭(>=8%) 유동성 판정에 쓰는 예상 체결대금. 부재 시 None → fail-closed.
+    entry_expected_amount = _candidate_expected_amount(
+        entry_candidate if isinstance(entry_candidate, dict) else None
+    )
     if not expected_price or prev_close <= 0:
         s.day_skip = True
         s.close_reason = "GAP_RECHECK_UNAVAILABLE"
@@ -1169,33 +1337,62 @@ async def _run_single(
         gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
         gap_max_pct=round(GAP_MAX_ORDER * 100, 2),
     )
-    if not _gap_in_order_range(gap):
+    gap_allowed, gap_reason = _evaluate_order_gap(gap, entry_expected_amount)
+    if not gap_allowed:
+        is_high_gap_low = gap_reason == "HIGH_GAP_AMOUNT_LOW"
+        block_reason = "HIGH_GAP_AMOUNT_LOW" if is_high_gap_low else "GAP_CHANGED"
+        # 대체 후보가 있으면 day_skip 없이 후보 사유를 반환해 다음 후보로 넘어간다.
+        if allow_candidate_retry:
+            _log_entry_blocked(
+                ticker,
+                block_reason,
+                level="INFO",
+                gap_at_entry=round(gap * 100, 2),
+                gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
+                gap_max_pct=round(GAP_MAX_ORDER * 100, 2),
+                high_gap_band_pct=round(GAP_HIGH_BAND * 100, 2),
+                expected_amount=entry_expected_amount,
+                threshold=HIGH_GAP_MIN_EXPECTED_AMOUNT,
+                gap_reason=gap_reason,
+                candidate_retry=True,
+            )
+            return block_reason
         s.day_skip = True
         s.close_reason = "GAP_CHANGED"
-        gap_reason = "BELOW_MIN" if gap < GAP_MIN_RECHECK else "ABOVE_MAX"
         log(
-            "GAP_CHANGED",
+            "GAP_CHANGED" if not is_high_gap_low else "HIGH_GAP_AMOUNT_LOW",
             level="WARN",
             ticker=ticker,
             gap_at_lockup=None,
             gap_at_entry=round(gap * 100, 2),
             reason=gap_reason,
+            expected_amount=entry_expected_amount,
+            threshold=HIGH_GAP_MIN_EXPECTED_AMOUNT,
         )
         _log_entry_blocked(
             ticker,
-            "GAP_CHANGED",
+            block_reason,
             gap_at_entry=round(gap * 100, 2),
             gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
             gap_max_pct=round(GAP_MAX_ORDER * 100, 2),
+            high_gap_band_pct=round(GAP_HIGH_BAND * 100, 2),
+            expected_amount=entry_expected_amount,
+            threshold=HIGH_GAP_MIN_EXPECTED_AMOUNT,
             gap_reason=gap_reason,
         )
         await notifier.send(
             "GAP_CHANGED",
             level="WARN",
-            message=f"진입 직전 갭 변동({gap*100:.1f}%). 거래 스킵.",
+            message=(
+                f"진입 직전 갭 변동({gap*100:.1f}%, 사유={gap_reason}). 거래 스킵."
+            ),
             ticker=ticker,
         )
-        await db.record_skip(_today(), "GAP_CHANGED", f"gap={gap*100:.2f}%")
+        await db.record_skip(
+            _today(),
+            "GAP_CHANGED",
+            f"gap={gap*100:.2f}%,reason={gap_reason},expected_amount={entry_expected_amount}",
+        )
         return
 
     # ── 잔고 조회 및 수량 산정 ────────────────────────────────────────
@@ -1281,7 +1478,7 @@ async def _run_single(
     last_run_attempt = 0
     last_entry_fail_reason = "UNFILLED"
     submitted_order_price = 0.0
-    gap_cap = _strict_gap_cap(prev_close)
+    gap_cap = _strict_gap_cap(prev_close, expected_amount=entry_expected_amount)
     ask_cap = 0.0
     fill_was_partial = False
     for attempt in range(1, max_attempts + 1):
@@ -1319,6 +1516,7 @@ async def _run_single(
                 prev_close=prev_close,
                 allow_candidate_retry=allow_candidate_retry,
                 entry_attempt=attempt,
+                expected_amount=entry_expected_amount,
             )
             if early_reject_reason is not None:
                 return early_reject_reason
@@ -1432,7 +1630,7 @@ async def _run_single(
         if vi_info:
             if allow_candidate_retry:
                 vi_wait_skipped_reason = "CANDIDATE_AVAILABLE"
-            elif _vi_price_reaches_gap_cap(vi_info, prev_close):
+            elif _vi_price_reaches_gap_cap(vi_info, prev_close, entry_expected_amount):
                 vi_wait_skipped_reason = "VI_PRICE_AT_OR_ABOVE_GAP_CAP"
             elif await _wait_for_vi_release(
                 ticker,
@@ -1517,10 +1715,14 @@ async def _run_single(
             )
 
         fresh_gap = (entry_quote.ask_price / prev_close) - 1
-        if not _gap_in_order_range(fresh_gap):
+        fresh_allowed, fresh_reason = _evaluate_order_gap(fresh_gap, entry_expected_amount)
+        if not fresh_allowed:
+            reject_reason = (
+                "HIGH_GAP_AMOUNT_LOW" if fresh_reason == "HIGH_GAP_AMOUNT_LOW" else "GAP_CHANGED"
+            )
             return await _reject_final_entry_price(
                 ticker,
-                "GAP_CHANGED",
+                reject_reason,
                 allow_candidate_retry=allow_candidate_retry,
                 anchor_price=expected_price,
                 prev_close=prev_close,
@@ -1528,6 +1730,7 @@ async def _run_single(
                 limit_price=gap_cap,
                 quote_age_ms=quote_age_ms,
                 fresh_gap=fresh_gap,
+                expected_amount=entry_expected_amount,
             )
         submitted_order_price, ask_cap = _entry_limit_price(
             entry_quote.ask_price,
@@ -1764,6 +1967,7 @@ async def _run_single(
                 "limit_price": submitted_order_price,
                 "anchor_price": expected_price,
                 "prev_close": prev_close,
+                "expected_amount": entry_expected_amount,
                 "attempt": attempt,
                 "max_attempts": max_attempts,
                 "mode": mode,
@@ -2029,13 +2233,13 @@ async def _run_single(
     # 갭 10%와 지정가 초과 조건에 도달하지 않는다.
     fill_gap = (fill_price / prev_close) - 1
     direct_slippage = (fill_price / expected_price) - 1
-    limit_breached = submitted_order_price > 0 and fill_price > submitted_order_price
-    if _fill_gap_reaches_max(fill_gap) or limit_breached:
-        reasons = []
-        if _fill_gap_reaches_max(fill_gap):
-            reasons.append("FILL_GAP")
-        if limit_breached:
-            reasons.append("LIMIT_PRICE")
+    reasons = _evaluate_post_fill_guard(
+        fill_price=fill_price,
+        submitted_order_price=submitted_order_price,
+        prev_close=prev_close,
+        expected_amount=entry_expected_amount,
+    )
+    if reasons:
         log(
             "SLIPPAGE_GUARD",
             level="WARN",
@@ -2123,18 +2327,26 @@ async def _run_single(
                 quote_age_ms=_quote_age_ms(py_quote),
             )
             return
-        if not _gap_in_order_range(py_gap):
+        py_allowed, py_gap_reason = _evaluate_order_gap(py_gap, entry_expected_amount)
+        if not py_allowed:
             log(
                 "PYRAMID_SKIPPED",
                 level="INFO",
                 ticker=ticker,
-                reason="GAP_CHANGED",
+                reason=(
+                    "HIGH_GAP_AMOUNT_LOW"
+                    if py_gap_reason == "HIGH_GAP_AMOUNT_LOW"
+                    else "GAP_CHANGED"
+                ),
                 anchor_price=current_price,
                 ask_price=py_quote.ask_price,
                 limit_price=py_limit_price,
                 ask_cap_price=py_ask_cap,
                 gap_cap_price=py_gap_cap,
                 gap_pct=round(py_gap * 100, 3),
+                gap_reason=py_gap_reason,
+                expected_amount=entry_expected_amount,
+                threshold=HIGH_GAP_MIN_EXPECTED_AMOUNT,
                 quote_age_ms=_quote_age_ms(py_quote),
             )
             return
@@ -2168,6 +2380,7 @@ async def _run_single(
                 "limit_price": py_limit_price,
                 "anchor_price": current_price,
                 "prev_close": prev_close,
+                "expected_amount": entry_expected_amount,
                 "attempt": 1,
                 "max_attempts": 1,
                 "mode": mode,
@@ -2263,6 +2476,30 @@ async def _run_single(
                 ),
                 ticker=ticker,
             )
+            # 최초 매수와 동일한 단일 평가기로 피라미딩 체결도 방어한다.
+            py_guard_reasons = _evaluate_post_fill_guard(
+                fill_price=float(py_fill["fill_price"]),
+                submitted_order_price=py_limit_price,
+                prev_close=prev_close,
+                expected_amount=entry_expected_amount,
+            )
+            if py_guard_reasons:
+                state.get().day_skip = True
+                log(
+                    "SLIPPAGE_GUARD",
+                    level="WARN",
+                    ticker=ticker,
+                    phase="PYRAMID",
+                    fill_price=float(py_fill["fill_price"]),
+                    prev_close=prev_close,
+                    submitted_limit_price=py_limit_price,
+                    guard_reasons=py_guard_reasons,
+                    expected_amount=entry_expected_amount,
+                    threshold=HIGH_GAP_MIN_EXPECTED_AMOUNT,
+                )
+                from src.modules import f4_tracking
+
+                await f4_tracking.close_now(float(py_fill["fill_price"]), "SLIPPAGE_GUARD")
     elif second_qty > 0:
         diff_pct = ((current_price or 0.0) / fill_price - 1) * 100
         log(
@@ -2381,6 +2618,45 @@ def _candidate_for_ticker(s: state.State, ticker: str) -> dict | None:
         if isinstance(candidate, dict) and candidate.get("ticker") == ticker:
             return candidate
     return None
+
+
+def _candidate_expected_amount(candidate: dict | None) -> float | None:
+    """후보의 예상 체결대금(고갭 유동성 판정용). 유한 float 또는 None으로 정규화.
+
+    부재·무효(None/NaN/±inf/비수치)는 모두 None (fail-closed)으로 반환한다.
+    """
+    if not isinstance(candidate, dict):
+        return None
+    # F1 selector와 동일하게 raw 예상 체결대금이 0/None이면 5일 평균
+    # 거래대금으로 폴백한다. 두 단계가 서로 다른 유동성 지표를 쓰지 않는다.
+    value = candidate.get("expected_amount") or candidate.get("avg_amount_5d")
+    return _normalize_expected_amount(value)
+
+
+def _resolve_recovery_expected_amount(
+    pending: dict,
+    s: state.State,
+    ticker: str,
+) -> tuple[float | None, str]:
+    """재시작 복구에서 고갭 판정용 예상 체결대금을 해소한다.
+
+    우선순위: 유효(유한)로 정규화되는 pending 키 → state.target_candidates의
+    동일 종목 → 미확인. pending 대금이 있으나 무효(NaN/±inf/비수치)면 pending을
+    쓰지 않고 후보로 폴백한다. 유효한 저대금 pending은 더 큰 후보 대금으로
+    대체되지 않고 그대로 우선한다. 현재 버전 pending에 키가 있으나 끝까지
+    확인 불가면 (None, "unavailable")로 fail-safe 처리한다. expected_amount
+    키 자체가 없는 구버전 pending만 (None, "legacy_unavailable")로 구분한다.
+    """
+    pending_amount = _normalize_expected_amount(pending.get("expected_amount"))
+    if pending_amount is not None:
+        return (pending_amount, "pending")
+    candidate = _candidate_for_ticker(s, ticker)
+    amount = _candidate_expected_amount(candidate)
+    if amount is not None:
+        return (amount, "candidates")
+    if "expected_amount" not in pending:
+        return (None, "legacy_unavailable")
+    return (None, "unavailable")
 
 
 def _candidate_prev_close(candidate: dict | None) -> float:
@@ -2557,10 +2833,13 @@ async def _reject_final_entry_price(
     limit_price: float = 0.0,
     quote_age_ms: int | None = None,
     fresh_gap: float | None = None,
+    expected_amount: float | None = None,
 ) -> str:
     """살아 있는 주문이 없을 때 최종 가격검사를 fail-closed로 종료한다."""
     await _reset_to_idle_persisted(reason)
     level = "INFO" if allow_candidate_retry else "WARN"
+    # HIGH_GAP_AMOUNT_LOW도 갭 계열 종료로 취급한다 (후보 전환/종료 사유·이벤트 매핑).
+    is_gap_reason = reason in ("GAP_CHANGED", "HIGH_GAP_AMOUNT_LOW")
     log(
         "ENTRY_PRICE_BLOCKED",
         level=level,
@@ -2572,6 +2851,8 @@ async def _reject_final_entry_price(
         limit_price=limit_price,
         quote_age_ms=quote_age_ms,
         fresh_gap_pct=(round(fresh_gap * 100, 3) if fresh_gap is not None else None),
+        expected_amount=expected_amount,
+        threshold=HIGH_GAP_MIN_EXPECTED_AMOUNT,
         candidate_retry=allow_candidate_retry,
     )
     _log_entry_blocked(
@@ -2581,13 +2862,15 @@ async def _reject_final_entry_price(
         anchor_price=anchor_price,
         ask_price=ask_price,
         limit_price=limit_price,
+        expected_amount=expected_amount,
+        threshold=HIGH_GAP_MIN_EXPECTED_AMOUNT,
         candidate_retry=allow_candidate_retry,
     )
     if allow_candidate_retry:
         return reason
 
     state.get().day_skip = True
-    state.get().close_reason = "GAP_CHANGED" if reason == "GAP_CHANGED" else "ENTRY_FAIL"
+    state.get().close_reason = "GAP_CHANGED" if is_gap_reason else "ENTRY_FAIL"
     # reset 시 원시 거절 사유로 persist된 disk를 최종 close_reason으로 재동기화한다.
     await _persist_terminal_or_log(state.get().close_reason)
     await notifier.send(
@@ -2601,7 +2884,7 @@ async def _reject_final_entry_price(
     )
     await db.record_skip(
         _today(),
-        "GAP_CHANGED" if reason == "GAP_CHANGED" else "ENTRY_FAIL",
+        "GAP_CHANGED" if is_gap_reason else "ENTRY_FAIL",
         (
             f"reason={reason},anchor={anchor_price},ask={ask_price},"
             f"limit={limit_price},quote_age_ms={quote_age_ms}"
@@ -2617,6 +2900,7 @@ async def _early_retry_gap_guard(
     prev_close: float,
     allow_candidate_retry: bool,
     entry_attempt: int,
+    expected_amount: float | None = None,
 ) -> str | None:
     """느린 수량·VI 조회 전에 재시도 후보의 명백한 갭 이탈만 조기 차단한다.
 
@@ -2631,6 +2915,7 @@ async def _early_retry_gap_guard(
         return None
 
     fresh_gap = (entry_quote.ask_price / prev_close) - 1 if prev_close > 0 else -1.0
+    fresh_allowed, fresh_reason = _evaluate_order_gap(fresh_gap, expected_amount)
     log(
         "ENTRY_RETRY_EARLY_GAP_CHECK",
         level="INFO",
@@ -2639,21 +2924,27 @@ async def _early_retry_gap_guard(
         ask_price=entry_quote.ask_price,
         prev_close=prev_close,
         fresh_gap_pct=round(fresh_gap * 100, 3),
-        gap_allowed=_gap_in_order_range(fresh_gap),
+        gap_allowed=fresh_allowed,
+        gap_reason=fresh_reason,
+        expected_amount=expected_amount,
         quote_age_ms=quote_age_ms,
     )
-    if _gap_in_order_range(fresh_gap):
+    if fresh_allowed:
         return None
+    reject_reason = (
+        "HIGH_GAP_AMOUNT_LOW" if fresh_reason == "HIGH_GAP_AMOUNT_LOW" else "GAP_CHANGED"
+    )
     return await _reject_final_entry_price(
         ticker,
-        "GAP_CHANGED",
+        reject_reason,
         allow_candidate_retry=allow_candidate_retry,
         anchor_price=expected_price,
         prev_close=prev_close,
         ask_price=entry_quote.ask_price,
-        limit_price=_strict_gap_cap(prev_close),
+        limit_price=_strict_gap_cap(prev_close, expected_amount=expected_amount),
         quote_age_ms=quote_age_ms,
         fresh_gap=fresh_gap,
+        expected_amount=expected_amount,
     )
 
 
@@ -2883,27 +3174,36 @@ async def _rank_final_entry_candidates(
             gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
             gap_max_pct=round(GAP_MAX_ORDER * 100, 2),
         )
-        if not _gap_in_order_range(gap):
-            reason = "BELOW_MIN" if gap < GAP_MIN_RECHECK else "ABOVE_MAX"
-            blocked_reasons.append("GAP_CHANGED")
+        cand_amount = _candidate_expected_amount(candidate)
+        gap_allowed, gap_reason = _evaluate_order_gap(gap, cand_amount)
+        if not gap_allowed:
+            block_reason = (
+                "HIGH_GAP_AMOUNT_LOW" if gap_reason == "HIGH_GAP_AMOUNT_LOW" else "GAP_CHANGED"
+            )
+            blocked_reasons.append(block_reason)
             log(
-                "GAP_CHANGED",
+                block_reason,
                 level="INFO",
                 ticker=ticker,
                 candidate_rank=rank,
                 gap_at_lockup=None,
                 gap_at_entry=round(gap * 100, 2),
-                reason=reason,
+                reason=gap_reason,
+                expected_amount=cand_amount,
+                threshold=HIGH_GAP_MIN_EXPECTED_AMOUNT,
             )
             _log_entry_blocked(
                 ticker,
-                "GAP_CHANGED",
+                block_reason,
                 level="INFO",
                 candidate_rank=rank,
                 gap_at_entry=round(gap * 100, 2),
                 gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
                 gap_max_pct=round(GAP_MAX_ORDER * 100, 2),
-                gap_reason=reason,
+                high_gap_band_pct=round(GAP_HIGH_BAND * 100, 2),
+                expected_amount=cand_amount,
+                threshold=HIGH_GAP_MIN_EXPECTED_AMOUNT,
+                gap_reason=gap_reason,
             )
             continue
         total_qty = int(total_amount / expected_price)
@@ -3042,27 +3342,36 @@ async def _refresh_entry_candidate(picked: dict) -> dict | None:
         gap_max_pct=round(GAP_MAX_ORDER * 100, 2),
         freshness_check=True,
     )
-    if not _gap_in_order_range(gap):
-        reason = "BELOW_MIN" if gap < GAP_MIN_RECHECK else "ABOVE_MAX"
+    cand_amount = _candidate_expected_amount(candidate)
+    gap_allowed, gap_reason = _evaluate_order_gap(gap, cand_amount)
+    if not gap_allowed:
+        block_reason = (
+            "HIGH_GAP_AMOUNT_LOW" if gap_reason == "HIGH_GAP_AMOUNT_LOW" else "GAP_CHANGED"
+        )
         log(
-            "GAP_CHANGED",
+            block_reason,
             level="INFO",
             ticker=ticker,
             candidate_rank=picked.get("candidate_rank"),
             gap_at_lockup=None,
             gap_at_entry=round(gap * 100, 2),
-            reason=reason,
+            reason=gap_reason,
+            expected_amount=cand_amount,
+            threshold=HIGH_GAP_MIN_EXPECTED_AMOUNT,
             freshness_check=True,
         )
         _log_entry_blocked(
             ticker,
-            "GAP_CHANGED",
+            block_reason,
             level="INFO",
             candidate_rank=picked.get("candidate_rank"),
             gap_at_entry=round(gap * 100, 2),
             gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
             gap_max_pct=round(GAP_MAX_ORDER * 100, 2),
-            gap_reason=reason,
+            high_gap_band_pct=round(GAP_HIGH_BAND * 100, 2),
+            expected_amount=cand_amount,
+            threshold=HIGH_GAP_MIN_EXPECTED_AMOUNT,
+            gap_reason=gap_reason,
             freshness_check=True,
         )
         return None

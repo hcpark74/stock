@@ -407,6 +407,48 @@ async def test_partial_fills_close_at_weighted_average_price(monkeypatch):
     assert "TIMEOUT_ORDER_FAILED" not in codes
 
 
+async def test_retry_quote_failure_preserves_last_acknowledged_reference(monkeypatch):
+    """후속 시세 실패가 앞선 접수 주문의 결정가를 0으로 덮어쓰지 않는다."""
+    monkeypatch.setattr(
+        f5_timeout,
+        "_fetch_current_price",
+        AsyncMock(side_effect=[10_050.0, RuntimeError("quote down")]),
+    )
+    monkeypatch.setattr(
+        f5_timeout,
+        "_send_sell",
+        AsyncMock(return_value={"output": {"ODNO": "S1"}}),
+    )
+    monkeypatch.setattr(
+        f5_timeout,
+        "_poll_fill",
+        AsyncMock(
+            side_effect=[
+                {"fill_price": 10_100, "fill_qty": 6, "fill_amt": 60_600.0},
+                {"fill_price": 10_050, "fill_qty": 4, "fill_amt": 40_200.0},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        f5_timeout,
+        "_fetch_order_status",
+        AsyncMock(return_value={"ccld_qty": 6, "ccld_amt": 60_600.0, "rmn_qty": 0}),
+    )
+    monkeypatch.setattr(f5_timeout, "_fetch_holding_qty", AsyncMock(return_value=4))
+    _wire_db(monkeypatch)
+    monkeypatch.setattr(f5_timeout.notifier, "send", AsyncMock())
+
+    await f5_timeout.execute()
+
+    f5_timeout.f4_tracking.finalize_trailing_shadow.assert_awaited_once_with(
+        trigger_price=10_050.0,
+        actual_exit_price=10_080,
+        exit_qty=10,
+        actual_pnl_pct=0.8,
+        close_reason="TIMEOUT",
+    )
+
+
 async def test_timeout_sell_separates_trigger_price_and_measures_latency(monkeypatch):
     calls = []
     send_sell = AsyncMock(

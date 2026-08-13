@@ -82,6 +82,36 @@ async def test_real_smoke_buy_refuses_market_fallback(monkeypatch):
 
 
 async def test_real_smoke_limit_plan_uses_production_f3_caps(monkeypatch):
+    # 코어 갭(3%)에서는 계획이 산출되며 그 절대 갭 상한은 프로덕션 _strict_gap_cap과
+    # 동일해야 한다(유동성 미검증 → fail-closed 8% 상한).
+    quote = f3_entry.EntryQuote(
+        ask_price=10_300,
+        ask_qty=10,
+        antc_price=0,
+        fetched_monotonic=f3_entry.time.monotonic(),
+        rt_cd="0",
+        msg_cd="MCA00000",
+        msg1="OK",
+    )
+    monkeypatch.setattr(
+        f3_entry,
+        "_fetch_expected_price",
+        AsyncMock(return_value=(10_300.0, 10_000.0)),
+    )
+    monkeypatch.setattr(f3_entry, "_fetch_final_entry_quote", AsyncMock(return_value=quote))
+
+    plan = await order._prepare_limit_buy("005930")
+
+    assert plan["gap_cap"] == f3_entry._strict_gap_cap(10_000) == 10_790
+    assert plan["limit_price"] == 10_400
+    assert plan["limit_price"] < 10_800
+    assert round(plan["fresh_gap"], 4) == 0.03
+
+
+async def test_real_smoke_rejects_high_gap_without_liquidity(monkeypatch):
+    """9% 수동 REAL 스모크는 후보 대금이 없으므로 제출 전에 거부되어야 한다."""
+    import pytest
+
     quote = f3_entry.EntryQuote(
         ask_price=10_900,
         ask_qty=10,
@@ -98,11 +128,10 @@ async def test_real_smoke_limit_plan_uses_production_f3_caps(monkeypatch):
     )
     monkeypatch.setattr(f3_entry, "_fetch_final_entry_quote", AsyncMock(return_value=quote))
 
-    plan = await order._prepare_limit_buy("005930")
+    with pytest.raises(RuntimeError) as exc:
+        await order._prepare_limit_buy("005930")
 
-    assert plan["limit_price"] == f3_entry._strict_gap_cap(10_000) == 10_990
-    assert plan["limit_price"] < 11_000
-    assert round(plan["fresh_gap"], 4) == 0.09
+    assert "HIGH_GAP_AMOUNT_LOW" in str(exc.value)
 
 
 async def test_real_smoke_sell_does_not_request_buy_bypass(monkeypatch):
@@ -307,3 +336,59 @@ async def test_smoke_sell_uses_actual_buy_fill_qty(monkeypatch):
     assert result is True
     assert place.await_args_list[0].args[2] == 3
     assert place.await_args_list[1].args[2] == 2
+
+
+# ── PAPER 스모크 매수 게이트: 고갭 유동성 정책 연동 ────────────────────────
+from api_tests import order_smoke  # noqa: E402
+from src import state  # noqa: E402
+
+
+def _smoke_quote(ask_price: float) -> f3_entry.EntryQuote:
+    return f3_entry.EntryQuote(
+        ask_price=ask_price,
+        ask_qty=10,
+        antc_price=0,
+        fetched_monotonic=f3_entry.time.monotonic(),
+        rt_cd="0",
+        msg_cd="MCA00000",
+        msg1="OK",
+    )
+
+
+def _lock_candidate(ticker: str, amount) -> None:
+    s = state.get()
+    s.target_ticker = ticker
+    s.target_candidates = [{"ticker": ticker, "expected_amount": amount, "prev_close": 10_000}]
+
+
+def test_order_smoke_gate_rejects_high_gap_low_amount():
+    """잠긴 후보가 고갭·저대금이면 매수 게이트가 지정가를 확정하지 않는다."""
+    _lock_candidate("005930", f3_entry.HIGH_GAP_MIN_EXPECTED_AMOUNT - 1)
+    limit, reason = order_smoke._smoke_buy_limit_or_reason(
+        "005930", 10_300.0, 10_000.0, _smoke_quote(10_850)
+    )
+    assert limit is None
+    assert reason == "HIGH_GAP_AMOUNT_LOW"
+
+
+def test_order_smoke_gate_allows_high_gap_qualifying_amount():
+    """적격 유동성이면 고갭에서도 10% 상한 기반 지정가를 확정한다."""
+    _lock_candidate("005930", f3_entry.HIGH_GAP_MIN_EXPECTED_AMOUNT)
+    limit, reason = order_smoke._smoke_buy_limit_or_reason(
+        "005930", 10_300.0, 10_000.0, _smoke_quote(10_850)
+    )
+    assert reason == "OK"
+    assert limit == min(
+        f3_entry._floor_to_tick(10_850 * (1 + f3_entry.F3_ASK_SLIPPAGE_RATIO)),
+        f3_entry._strict_gap_cap(10_000, expected_amount=f3_entry.HIGH_GAP_MIN_EXPECTED_AMOUNT),
+    )
+
+
+def test_order_smoke_gate_allows_core_gap_without_amount():
+    """코어 갭(3%)은 대금 미검증이어도 통과하며 8% fail-closed 상한을 쓴다."""
+    _lock_candidate("005930", None)
+    limit, reason = order_smoke._smoke_buy_limit_or_reason(
+        "005930", 10_300.0, 10_000.0, _smoke_quote(10_300)
+    )
+    assert reason == "OK"
+    assert limit == 10_400

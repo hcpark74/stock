@@ -145,6 +145,8 @@ async def test_confirmed_broker_rejection_returns_to_holding(holding):
 
 
 async def test_restart_reconciliation_closes_confirmed_full_exit(holding, monkeypatch):
+    finalize = AsyncMock()
+    monkeypatch.setattr(f4_tracking, "finalize_trailing_shadow", finalize)
     submission = await exit_recovery.submit_sell(
         qty=10,
         reason="HARD_STOP",
@@ -175,6 +177,13 @@ async def test_restart_reconciliation_closes_confirmed_full_exit(holding, monkey
     trade = await db.get_trade_by_date("20260806")
     assert trade["status"] == "CLOSED"
     assert trade["exit_qty"] == 10
+    finalize.assert_awaited_once_with(
+        trigger_price=9_800.0,
+        actual_exit_price=9_800,
+        exit_qty=10,
+        actual_pnl_pct=-2.0,
+        close_reason="HARD_STOP",
+    )
 
 
 async def test_restart_reconciliation_keeps_partial_exit_remainder_tracked(

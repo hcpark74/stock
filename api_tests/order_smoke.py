@@ -33,6 +33,36 @@ def _deadline(seconds: int = 30) -> tuple[int, int, int]:
     return dl.hour, dl.minute, dl.second
 
 
+def _smoke_buy_limit_or_reason(
+    ticker: str,
+    expected_price: float,
+    prev_close: float,
+    quote: "f3_entry.EntryQuote | None",
+) -> tuple[float | None, str]:
+    """PAPER 스모크 매수 지정가를 산출하거나 거부 사유를 반환한다.
+
+    잠긴 상태 후보(state.target_candidates)의 예상 체결대금으로 F3 고갭 유동성
+    정책을 적용한다. 고갭(>=8%) 저대금/부재는 fail-closed로 거부하고, 지정가
+    상한도 동일한 대금 기준으로 결정한다. (limit_price 또는 None, 사유) 반환.
+    """
+    if expected_price <= 0 or prev_close <= 0 or quote is None:
+        return None, "QUOTE_UNAVAILABLE"
+    if not f3_entry._quote_is_fresh(quote):
+        return None, "QUOTE_STALE"
+    amount = f3_entry._candidate_expected_amount(
+        f3_entry._candidate_for_ticker(state.get(), ticker)
+    )
+    fresh_gap = quote.ask_price / prev_close - 1
+    allowed, reason = f3_entry._evaluate_order_gap(fresh_gap, amount)
+    if not allowed:
+        return None, reason
+    limit_price, _ = f3_entry._entry_limit_price(
+        quote.ask_price,
+        f3_entry._strict_gap_cap(prev_close, expected_amount=amount),
+    )
+    return limit_price, "OK"
+
+
 async def run() -> bool:
     h.header("PAPER 1주 왕복 주문 스모크 테스트")
 
@@ -70,20 +100,15 @@ async def run() -> bool:
 
     expected_price, prev_close = await f3_entry._fetch_expected_price(ticker)
     quote = await f3_entry._fetch_final_entry_quote(ticker)
-    if (
-        expected_price <= 0
-        or prev_close <= 0
-        or quote is None
-        or not f3_entry._quote_is_fresh(quote)
-        or not f3_entry._gap_in_order_range(quote.ask_price / prev_close - 1)
-    ):
-        h.fail("buy limit", "신선한 허용 갭 매도호가를 확정하지 못함")
+    limit_price, gate_reason = _smoke_buy_limit_or_reason(
+        ticker, expected_price, prev_close, quote
+    )
+    # limit_price가 확정되면 quote는 헬퍼에서 None/무효가 아님이 보장되지만,
+    # 타입 검사기 관점에서 send_guard의 quote를 EntryQuote로 좁히기 위해 명시한다.
+    if limit_price is None or quote is None:
+        h.fail("buy limit", f"신선한 허용 갭 매도호가 확정 실패 (reason={gate_reason})")
         await db.close()
         return False
-    limit_price, _ = f3_entry._entry_limit_price(
-        quote.ask_price,
-        f3_entry._strict_gap_cap(prev_close),
-    )
     qty = 1
     log(
         "ORDER_SMOKE_BUY_START",
