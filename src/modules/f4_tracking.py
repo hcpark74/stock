@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from src import db, live, notifier, state
 from src.api import kis_rest, kis_ws
-from src.modules import exit_recovery
+from src.modules import exit_recovery, tick_capture
 from src.modules import vi_watch as vi_watch_mod
 from src.modules.vi_watch import ViWatch
 from src.utils.logger import log
@@ -159,9 +159,15 @@ def _price_observation_active(now: datetime | None = None) -> bool:
             _invalid_entry_at_warned_value = invalid_value
         return False
     _invalid_entry_at_warned_value = None
-    observe_until = _get_observe_until()
+    # 캡처가 이 체결 종목에 활성이면 사후 관측을 고정 15:15까지 연장해 durable
+    # 가격 경로가 실제 청산 이후에도 계속 기록되게 한다. 캡처 비활성이면 기존
+    # 조기·수동 진입 동작(F4_POST_CLOSE_OBSERVE_UNTIL, 기본 09:10)을 보존한다.
+    if tick_capture.is_active() and tick_capture.active_ticker() == s.target_ticker:
+        cutoff_hm = tick_capture.CAPTURE_UNTIL
+    else:
+        cutoff_hm = _get_observe_until()
     cutoff = now.replace(
-        hour=observe_until[0], minute=observe_until[1], second=0, microsecond=0
+        hour=cutoff_hm[0], minute=cutoff_hm[1], second=0, microsecond=0
     )
     return entry_at.astimezone(KST).date() == now.date() and now < cutoff
 
@@ -169,6 +175,65 @@ def _price_observation_active(now: datetime | None = None) -> bool:
 def post_close_observation_active(now: datetime | None = None) -> bool:
     """UI/API용: 현재 CLOSED 거래의 사후 가격 관측이 진행 중인지 반환한다."""
     return state.get().position_status == "CLOSED" and _price_observation_active(now)
+
+
+def _capture_backup_active(now: datetime | None = None) -> bool:
+    """캡처가 이 종목에 활성이고 09:35~15:14 창이면 사후 저우선 REST 백업을 허용한다.
+
+    이 경로는 일반 사후 폴링 스위치(F4_POST_CLOSE_REST_BACKUP_ENABLED, 기본 0)를
+    우회하므로, 우회 자체를 별도 스위치(STRATEGY_TICK_REST_BACKUP_ENABLED)로 명시해
+    운영자가 끈 설정을 캡처가 조용히 되살리지 않게 한다. 09:35 이전에는 시작하지
+    않고, 15:14에 멈춰 F5 precheck(15:14:50)·exec(15:15:00)이 항상 우선하게 한다.
+    """
+    if not tick_capture.REST_BACKUP_ENABLED:
+        return False
+    if not (
+        tick_capture.is_active()
+        and tick_capture.active_ticker() == state.get().target_ticker
+    ):
+        return False
+    now = now or datetime.now(KST)
+    now_hm = (now.hour, now.minute)
+    return tick_capture.CAPTURE_BACKUP_START <= now_hm < tick_capture.CAPTURE_BACKUP_STOP
+
+
+def _note_ws_loss(now: datetime | None = None) -> bool:
+    """15:15 이전 WS 단절을 캡처에 실제 증거로 기록한다.
+
+    재연결하더라도 그 사이 구간이 비어 완전 커버가 깨지므로, 캡처는 이 거래를
+    ``data_complete=0``/``missing_reason=WS_LOSS``로 최종화한다.
+    """
+    if not (
+        tick_capture.is_active()
+        and tick_capture.active_ticker() == state.get().target_ticker
+    ):
+        return False
+    now = now or datetime.now(KST)
+    if (now.hour, now.minute) >= tick_capture.CAPTURE_UNTIL:
+        return False
+    tick_capture.mark_ws_disconnect()
+    return True
+
+
+async def _finalize_capture_after_observation() -> None:
+    """관측 창이 끝난 뒤 캡처를 최종화한다(정상 청산 경로 전용).
+
+    포지션이 아직 HOLDING이면(모니터 비정상 종료 후 재무장) 캡처를 계속 두고
+    최종화하지 않는다. 15:15에 도달했으면 COMPLETE, 이전이면 불완전으로 남긴다.
+    """
+    if not (
+        tick_capture.is_active()
+        and tick_capture.active_ticker() == state.get().target_ticker
+    ):
+        return
+    if state.get().position_status == "HOLDING":
+        return
+    now = datetime.now(KST)
+    reached = (now.hour, now.minute) >= tick_capture.CAPTURE_UNTIL
+    await tick_capture.finalize(
+        "COMPLETE" if reached else "INCOMPLETE_BEFORE_1515",
+        reached_expected_close=reached,
+    )
 
 
 async def stop_post_close_observation() -> dict:
@@ -191,6 +256,10 @@ async def stop_post_close_observation() -> dict:
             continue
         task.cancel()
         cancelled += 1
+
+    # 수동 중지는 15:15 이전 종료이므로 캡처를 불완전(MANUAL_STOP)으로 최종화한다.
+    if tick_capture.is_active() and tick_capture.active_ticker() == s.target_ticker:
+        await tick_capture.finalize("MANUAL_STOP", reached_expected_close=False)
 
     persisted = True
     try:
@@ -283,6 +352,22 @@ async def run() -> None:
         await _run_dry_ticks(ticker, spike_filter)
         return
 
+    # 체결 종목의 durable 가격 경로 캡처에 idempotent하게 붙는다. F3가 체결
+    # 확정 시 이미 시작했으면 no-op이고, DB 복구된 HOLDING이면 여기서 이어쓴다.
+    if s.trade_id and s.position_status in ("HOLDING", "CLOSED"):
+        try:
+            from src.modules import baseline_experiment
+
+            tick_capture.attach_or_resume(
+                datetime.now(KST).strftime("%Y%m%d"),
+                ticker,
+                s.trade_id,
+                baseline_experiment.active_experiment_id(),
+                s.entry_at,
+            )
+        except Exception:  # noqa: BLE001 — 캡처 부착 실패가 추적을 막지 않는다
+            pass
+
     live.ws_connected = False
     last_ws_tick_at = 0.0
     ws_watch_started_at = time.monotonic()
@@ -301,6 +386,9 @@ async def run() -> None:
 
     def should_poll_rest() -> bool:
         if state.get().position_status == "CLOSED":
+            if _capture_backup_active():
+                # 캡처용 저우선 백업(15:14까지). 주문 경로보다 항상 뒤로 밀린다.
+                return not F4_REST_ONLY_WHEN_WS_STALE or is_ws_stale()
             return F4_POST_CLOSE_REST_BACKUP_ENABLED and (
                 not F4_REST_ONLY_WHEN_WS_STALE or is_ws_stale()
             )
@@ -333,6 +421,7 @@ async def run() -> None:
             spike_filter,
             source="ws",
             vi_watch=vi_watch,
+            tick_meta=tick,
         )
         if not accepted:
             return
@@ -343,6 +432,12 @@ async def run() -> None:
         nonlocal ws_transport_known
         ws_transport_known = True
         live.ws_connected = connected
+        # 15:15 이전 WS 단절을 캡처에 실제 증거로 남긴다(재연결해도 불완전).
+        if not connected:
+            try:
+                _note_ws_loss()
+            except Exception:  # noqa: BLE001 — 관측 전용, 전파 금지
+                pass
         # Re-evaluate REST fallback immediately instead of waiting for the
         # normal polling interval after a transport disconnect.
         rest_wakeup.set()
@@ -400,6 +495,11 @@ async def run() -> None:
                     ),
                     ticker=ticker,
                 )
+        # 관측 창(15:15)이 끝나 모니터가 정상 종료했으면 캡처를 최종화한다.
+        # 취소(shutdown) 시에는 여기 도달하지 않고 main.py finally가
+        # PROCESS_SHUTDOWN으로 마감한다. 캡처는 F4 청산 모니터가 소유·취소하지
+        # 않으므로 정상 청산이 writer를 죽이지 않는다.
+        await _finalize_capture_after_observation()
     finally:
         closing = _closing_task
         # EXITING 전환으로 WS/health 태스크가 먼저 끝나더라도, 청산을 호출한
@@ -550,7 +650,11 @@ async def _run_rest_price_backup(
             if should_poll_rest is not None
             else True
         )
-        if is_post_close and not F4_POST_CLOSE_REST_BACKUP_ENABLED:
+        if (
+            is_post_close
+            and not F4_POST_CLOSE_REST_BACKUP_ENABLED
+            and not _capture_backup_active()
+        ):
             should_poll = False
         interval_sec = (
             F4_POST_CLOSE_REST_POLL_INTERVAL_SEC
@@ -566,6 +670,7 @@ async def _run_rest_price_backup(
                     ticker,
                     latency_context="F4_POST_CLOSE",
                     aggregate_latency=True,
+                    request_priority=kis_rest.REQUEST_PRIORITY_BACKGROUND,
                 )
             else:
                 price = await _fetch_current_price(
@@ -607,6 +712,16 @@ async def _wait_for_rest_wakeup(
         wake_event.clear()
 
 
+def _offset_aware(ts: str | None) -> bool:
+    if not ts:
+        return False
+    try:
+        parsed = datetime.fromisoformat(str(ts))
+    except (TypeError, ValueError):
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
+
+
 async def _handle_price_tick(
     price: float,
     ticker: str,
@@ -614,6 +729,7 @@ async def _handle_price_tick(
     *,
     source: str,
     vi_watch: ViWatch | None = None,
+    tick_meta: dict | None = None,
 ) -> bool:
     """WS/REST 공용 가격 처리.
 
@@ -624,6 +740,25 @@ async def _handle_price_tick(
         return False
 
     live.push_tick(price, ticker=ticker)
+    # 진입~15:15 durable 가격 경로에 적재한다. 논블로킹·격리 — 캡처 실패가
+    # 스탑 추적·주문 경로를 흔들면 안 된다. CLOSED 구간에서도 가격만 기록한다.
+    # 거래소 시각(source_ts)·체결량(qty)·출처를 그대로 보존하고, naive/무효
+    # 시각은 소리 없이 받아들이지 않고 source_ts=None·valid=False로 표시한다.
+    try:
+        meta = tick_meta or {}
+        raw_source_ts = meta.get("source_ts")
+        ts_valid = _offset_aware(raw_source_ts)
+        tick_capture.enqueue({
+            "source_ts": raw_source_ts if ts_valid else None,
+            "received_at": datetime.now(KST).isoformat(),
+            "price": price,
+            "qty": meta.get("qty"),
+            "source": source,
+            "valid": ts_valid,
+            "ticker": ticker,
+        })
+    except Exception:  # noqa: BLE001 — 캡처는 관측 전용, 절대 전파하지 않는다
+        pass
     if state.get().position_status != "HOLDING":
         return True
 
@@ -1396,6 +1531,7 @@ async def _fetch_current_price(
     *,
     latency_context: str | None = None,
     aggregate_latency: bool = False,
+    request_priority: int = kis_rest.REQUEST_PRIORITY_PRICE,
 ) -> float:
     resp = await kis_rest.get(
         "/uapi/domestic-stock/v1/quotations/inquire-price",
@@ -1403,7 +1539,7 @@ async def _fetch_current_price(
         params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker},
         latency_context=latency_context,
         aggregate_latency=aggregate_latency,
-        request_priority=kis_rest.REQUEST_PRIORITY_PRICE,
+        request_priority=request_priority,
     )
     out = resp.get("output", {}) if isinstance(resp.get("output"), dict) else {}
     return float(out.get("stck_prpr") or out.get("antc_cnpr") or 0)

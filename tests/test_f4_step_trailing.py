@@ -1173,6 +1173,7 @@ async def test_run_routes_websocket_ticks_through_shared_handler(monkeypatch):
         ANY,
         source="ws",
         vi_watch=None,
+        tick_meta={"price": ENTRY + 50},
     )
 
 
@@ -1209,10 +1210,12 @@ async def test_rest_backup_collects_after_close_without_running_stop_logic(monke
 
     await _run_rest_price_backup("005930", _spike_always_pass(), lambda: True)
 
+    # 사후 관측 조회는 주문 경로와 경쟁하지 않도록 배경 우선순위를 사용한다.
     fetch.assert_awaited_once_with(
         "005930",
         latency_context="F4_POST_CLOSE",
         aggregate_latency=True,
+        request_priority=f4.kis_rest.REQUEST_PRIORITY_BACKGROUND,
     )
     push_tick.assert_called_once_with(ENTRY + 100, ticker="005930")
     process_tick.assert_not_awaited()

@@ -21,9 +21,20 @@ _REQUIRED_ORDER_DECISION_FILES = {
     "src/utils/spike_filter.py",
 }
 
+# 관측 전용 모듈. 지문에 넣으면 관측 코드 수정마다 새 기준선이 열려 40거래일
+# paired 수집이 초기화되므로 반드시 제외한다.
+_OBSERVATION_ONLY_FILES = {
+    "src/modules/tick_capture.py",
+    "src/modules/f1_snapshot_selector.py",
+}
+
 
 def test_strategy_fingerprint_file_list_covers_order_decision_dependencies():
     assert _REQUIRED_ORDER_DECISION_FILES <= set(release._STRATEGY_FILES)
+
+
+def test_strategy_fingerprint_excludes_observation_only_modules():
+    assert not (_OBSERVATION_ONLY_FILES & set(release._STRATEGY_FILES))
 
 
 def test_strategy_fingerprint_is_frozen_until_process_cache_is_cleared(
@@ -69,6 +80,18 @@ def test_strategy_fingerprint_changes_with_loaded_strategy_environment(monkeypat
         monkeypatch.setenv("F1_GAP_MIN", "0.030")
         # 프로세스 수명 중에는 시작 지문을 고정한다.
         assert release.strategy_fingerprint() == baseline
+        release.strategy_fingerprint.cache_clear()
+        assert release.strategy_fingerprint() != baseline
+    finally:
+        release.strategy_fingerprint.cache_clear()
+
+
+def test_strategy_fingerprint_covers_tick_capture_env(monkeypatch):
+    monkeypatch.setenv("STRATEGY_TICK_CAPTURE_ENABLED", "1")
+    release.strategy_fingerprint.cache_clear()
+    try:
+        baseline = release.strategy_fingerprint()
+        monkeypatch.setenv("STRATEGY_TICK_CAPTURE_ENABLED", "0")
         release.strategy_fingerprint.cache_clear()
         assert release.strategy_fingerprint() != baseline
     finally:

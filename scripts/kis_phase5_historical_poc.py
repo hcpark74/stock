@@ -11,7 +11,6 @@ import argparse
 import asyncio
 import json
 import os
-import re
 import sqlite3
 import sys
 from collections import Counter
@@ -24,27 +23,23 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-load_dotenv(ROOT / ".env")
+# 테스트 수집 중에는 개발 머신의 .env가 os.environ을 오염시키지 않게 한다
+# (conftest가 STOCK_SKIP_DOTENV=1을 설정). 운영/수동 실행에서는 정상 로드한다.
+if os.getenv("STOCK_SKIP_DOTENV", "0") != "1":
+    load_dotenv(ROOT / ".env")
 
 from src.api import auth, kis_rest  # noqa: E402
+from src.modules import f1_snapshot_selector as f1_sel  # noqa: E402
 
 KST = ZoneInfo("Asia/Seoul")
-SNAPSHOT_NAME_RE = re.compile(r"^(?P<date>\d{8})_(?P<time>\d{6})\.jsonl$")
-CAPTURE_START = time(9, 0)
-CAPTURE_END = time(9, 11)
+# 파일명 규약·창 시각·필수 필드·시각 파싱은 공통 선택기와 단일 출처를 공유한다.
+SNAPSHOT_NAME_RE = f1_sel.SNAPSHOT_NAME_RE
+CAPTURE_START = f1_sel.CAPTURE_START
+CAPTURE_END = f1_sel.CAPTURE_END
 DAILY_PATH = "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
 DAILY_TR = "FHKST03010100"
 RATE_LIMIT_CODES = {"EGW00201", "HTTP_429"}
-REQUIRED_SNAPSHOT_FIELDS = {
-    "ticker",
-    "expected_price",
-    "prev_close",
-    "gap_pct",
-    "expected_amount",
-    "vi_gap",
-    "gap_allowed",
-    "gap_band",
-}
+REQUIRED_SNAPSHOT_FIELDS = set(f1_sel.REQUIRED_SNAPSHOT_FIELDS)
 
 
 class PocStop(RuntimeError):
@@ -56,16 +51,7 @@ class PocStop(RuntimeError):
 
 def parse_snapshot_time(path: Path) -> datetime | None:
     """파일명 시각을 프로젝트 계약에 따라 Asia/Seoul aware datetime으로 해석한다."""
-    match = SNAPSHOT_NAME_RE.match(path.name)
-    if not match:
-        return None
-    try:
-        naive = datetime.strptime(
-            match.group("date") + match.group("time"), "%Y%m%d%H%M%S"
-        )
-    except ValueError:
-        return None
-    return naive.replace(tzinfo=KST)
+    return f1_sel.parse_snapshot_time(path)
 
 
 def read_market_closed_dates(db_path: Path) -> set[str]:
@@ -84,41 +70,41 @@ def read_market_closed_dates(db_path: Path) -> set[str]:
 
 
 def select_representative_snapshots(
-    paths: list[Path], market_closed_dates: set[str]
+    paths: list[Path],
+    market_closed_dates: set[str],
+    *,
+    log_dir: Path | None = None,
 ) -> tuple[list[Path], dict]:
-    """09:00~09:10 KST의 거래일 후보에서 날짜별 최초 파일 하나를 선택한다."""
-    eligible: list[tuple[datetime, Path]] = []
-    invalid_name_n = outside_window_n = weekend_n = market_closed_n = 0
-    for path in sorted(paths):
-        captured_at = parse_snapshot_time(path)
-        if captured_at is None:
-            invalid_name_n += 1
-            continue
-        compact_date = captured_at.strftime("%Y%m%d")
-        local_time = captured_at.timetz().replace(tzinfo=None)
-        if not (CAPTURE_START <= local_time < CAPTURE_END):
-            outside_window_n += 1
-            continue
-        if captured_at.weekday() >= 5:
-            weekend_n += 1
-            continue
-        if compact_date in market_closed_dates:
-            market_closed_n += 1
-            continue
-        eligible.append((captured_at, path))
+    """날짜별 최초 **정상** 스냅샷 하나를 공통 선택기로 고른다.
 
-    representatives: dict[str, Path] = {}
-    for captured_at, path in eligible:
-        representatives.setdefault(captured_at.strftime("%Y%m%d"), path)
-    selected = [representatives[key] for key in sorted(representatives)]
+    계획 §2의 "정상" 규칙(완료 증거·JSON 무결성·중복 종목 없음·최소 universe
+    coverage)을 공통 함수 하나로 고정한다. 이전에는 이 스크립트만 창·거래일만 보고
+    "최초 파일"을 골라, 재산출 대상인 F1 품질 통계가 옛 규칙으로 계산됐다.
+    """
+    selected_map, report = f1_sel.select_earliest_normal_snapshots(
+        list(paths),
+        market_closed_dates=market_closed_dates,
+        log_dir=log_dir,
+    )
+    selected = [selected_map[key] for key in sorted(selected_map)]
+    reasons = report["reasons"]
     inventory = {
-        "total_files": len(paths),
-        "invalid_filename_count": invalid_name_n,
-        "outside_capture_window_count": outside_window_n,
-        "weekend_count": weekend_n,
-        "known_market_closed_count": market_closed_n,
-        "eligible_file_count": len(eligible),
-        "duplicate_eligible_count": len(eligible) - len(selected),
+        "selector_version": report["selector_version"],
+        "min_coverage": report["min_coverage"],
+        "total_files": report["total_files"],
+        "invalid_filename_count": reasons["INVALID_FILENAME"],
+        "outside_capture_window_count": reasons["OUTSIDE_WINDOW"],
+        "weekend_count": reasons["WEEKEND"],
+        "known_market_closed_count": reasons["MARKET_CLOSED"],
+        "hash_mismatch_count": reasons["HASH_MISMATCH"],
+        "sidecar_invalid_count": reasons["SIDECAR_INVALID"],
+        "no_completion_evidence_count": reasons["NO_COMPLETION_EVIDENCE"],
+        "invalid_json_count": reasons["INVALID_JSON"],
+        "missing_required_field_count": reasons["MISSING_REQUIRED_FIELD"],
+        "duplicate_ticker_count": reasons["DUPLICATE_TICKER"],
+        "below_min_coverage_count": reasons["BELOW_MIN_COVERAGE"],
+        "eligible_file_count": len(selected) + reasons["DUPLICATE_DATE"],
+        "duplicate_eligible_count": reasons["DUPLICATE_DATE"],
         "selected_file_count": len(selected),
         "selected_date_start": selected[0].name[:8] if selected else None,
         "selected_date_end": selected[-1].name[:8] if selected else None,
@@ -377,7 +363,11 @@ async def run(args: argparse.Namespace) -> dict:
     db_path = Path(args.db_path)
     paths = sorted(snapshot_dir.glob("*.jsonl")) if snapshot_dir.exists() else []
     market_closed_dates = read_market_closed_dates(db_path)
-    selected, inventory = select_representative_snapshots(paths, market_closed_dates)
+    # 사이드카 도입 이전 스냅샷은 결정론적 로그 매칭으로만 완료를 증명할 수 있다.
+    log_dir = Path(args.log_dir) if getattr(args, "log_dir", None) else None
+    selected, inventory = select_representative_snapshots(
+        paths, market_closed_dates, log_dir=log_dir
+    )
     snapshot_quality, snapshot_rows = analyze_snapshots(selected)
     improve, trade_pairs = read_improve_summary(db_path)
     result = {
@@ -409,6 +399,11 @@ def main() -> int:
     parser.add_argument("--snapshot-dir", default=str(ROOT / "data" / "f1_snapshots"))
     parser.add_argument(
         "--db-path", default=str(ROOT / os.getenv("DB_DIR", "data/db") / "trading.db")
+    )
+    parser.add_argument(
+        "--log-dir",
+        default=str(ROOT / os.getenv("LOG_DIR", "logs")),
+        help="사이드카가 없는 과거 스냅샷의 완료 증거를 찾을 로그 디렉터리",
     )
     parser.add_argument("--with-kis", action="store_true", help="장 종료 후 PAPER 일봉 GET 대조")
     parser.add_argument("--max-kis-samples", type=int, default=3, choices=range(1, 4))

@@ -22,6 +22,7 @@ import uvicorn  # noqa: E402
 from src import db, live, notifier, readiness, state  # noqa: E402
 from src.api import auth, kis_rest, server  # noqa: E402
 from src.modules import (  # noqa: E402
+    baseline_experiment,
     exit_recovery,
     f1_filter,
     f2_lockup,
@@ -29,6 +30,7 @@ from src.modules import (  # noqa: E402
     f4_tracking,
     f5_timeout,
     paper_fast_probe,
+    tick_capture,
 )
 from src.release import strategy_fingerprint  # noqa: E402
 from src.scheduler import (  # noqa: E402
@@ -1322,6 +1324,17 @@ async def main() -> None:
         raise SystemExit(2)
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     await db.init(DB_PATH)
+    # 현재 지문의 canonical 기준선 실험·설정을 등록한다. 실패해도 런타임과
+    # 주문 안전 경로를 막지 않는다(등록은 통계 기준선용, 주문 판단과 무관).
+    try:
+        baseline_experiment_id = await baseline_experiment.ensure_baseline_experiment()
+        logger.log(
+            "BASELINE_EXPERIMENT_REGISTERED",
+            level="INFO",
+            experiment_id=baseline_experiment_id,
+        )
+    except Exception as exc:
+        logger.log("BASELINE_EXPERIMENT_REGISTER_FAILED", level="WARN", error=repr(exc))
     if os.getenv("KIS_MODE", "PAPER") == "REAL" and not dry_run:
         real_readiness = await readiness.calculate()
         if not real_readiness["eligible_for_real"]:
@@ -1412,6 +1425,14 @@ async def main() -> None:
             with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.gather(*tasks)
         await f3_entry.drain_entry_audit_tasks()
+        # 아직 진행 중인 가격 경로 캡처를 마감한다(15:15 미도달 → 불완전).
+        # F4가 이미 정상 최종화했으면 no-op이다. DB close 전에 실행한다.
+        try:
+            await tick_capture.finalize(
+                "PROCESS_SHUTDOWN", reached_expected_close=False
+            )
+        except Exception:  # noqa: BLE001 — 종료 정리가 실패해도 나머지 종료 진행
+            pass
         await kis_rest.close_client()
         await db.close()
         _clear_pid()

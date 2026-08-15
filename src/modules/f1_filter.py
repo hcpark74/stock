@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from src import db, notifier, state
 from src.api import kis_rest
-from src.modules import f1_selector
+from src.modules import f1_selector, f1_snapshot_selector
 from src.utils.logger import log
 from src.utils.number import to_float as _to_float
 from src.utils.number import to_int as _to_int
@@ -29,7 +29,11 @@ F1_DEADLINE_H = 9
 F1_DEADLINE_M = 10
 F1_RETRY_INTERVAL_SEC = int(os.getenv("F1_RETRY_INTERVAL_SEC", "5"))
 F1_SNAPSHOT_DIR = os.getenv("F1_SNAPSHOT_DIR", "data/f1_snapshots")
-F1_SNAPSHOT_KEEP = int(os.getenv("F1_SNAPSHOT_KEEP", "20"))
+# 회전 한도는 수집 창보다 넉넉히 커야 한다. 스냅샷 JSONL은 후보 원본의 유일한
+# 사본이고, 계획은 최소 40거래일 + 잠금 10거래일을 요구하며 원시 데이터는 180일
+# 보존이 원칙이다. 하루 여러 파일이 남을 수 있으므로 20개는 기준선 절반을 수집
+# 도중에 지운다.
+F1_SNAPSHOT_KEEP = int(os.getenv("F1_SNAPSHOT_KEEP", "400"))
 # Keep the PAPER default at 1. A 2026-07-23 read-only benchmark found no speed
 # benefit at 2 and observed one KIS rate-limit response; see docs/F1_SPEED_EXPERIMENT_20260723.md.
 F1_EXPECTED_QUOTE_CONCURRENCY = int(os.getenv("F1_EXPECTED_QUOTE_CONCURRENCY", "1"))
@@ -508,6 +512,29 @@ def _log_expected_comparison(candidates: list[dict]) -> None:
     )
 
 
+def write_candidate_snapshot(
+    snapshot_dir: Path, candidates: list[dict], now: datetime
+) -> Path:
+    """Write the JSONL atomically then the completion sidecar.
+
+    The full snapshot is written to a temp file and renamed into place, so a
+    partially written ``.jsonl`` never appears. Only after that success is the
+    completion sidecar written (also tmp→rename), making the sidecar's presence
+    atomic evidence that the snapshot finished. The shared selector requires
+    this evidence before treating a file as normal.
+    """
+    snapshot_dir = Path(snapshot_dir)
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    path = snapshot_dir / f"{now.strftime('%Y%m%d_%H%M%S')}.jsonl"
+    tmp = snapshot_dir / f"{path.name}.tmp"
+    with tmp.open("w", encoding="utf-8") as f:
+        for candidate in candidates:
+            f.write(json.dumps(candidate, ensure_ascii=False) + "\n")
+    tmp.replace(path)
+    f1_snapshot_selector.write_completion_sidecar(path)
+    return path
+
+
 def _save_candidate_snapshot(candidates: list[dict]) -> None:
     if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("F1_SAVE_SNAPSHOT", "1") != "1":
         return
@@ -516,12 +543,7 @@ def _save_candidate_snapshot(candidates: list[dict]) -> None:
 
     try:
         snapshot_dir = Path(F1_SNAPSHOT_DIR)
-        snapshot_dir.mkdir(parents=True, exist_ok=True)
-        now = datetime.now(KST)
-        path = snapshot_dir / f"{now.strftime('%Y%m%d_%H%M%S')}.jsonl"
-        with path.open("w", encoding="utf-8") as f:
-            for candidate in candidates:
-                f.write(json.dumps(candidate, ensure_ascii=False) + "\n")
+        path = write_candidate_snapshot(snapshot_dir, candidates, datetime.now(KST))
         _rotate_candidate_snapshots(snapshot_dir, keep=F1_SNAPSHOT_KEEP)
         log("F1_SNAPSHOT_SAVED", level="INFO", path=str(path), count=len(candidates))
     except Exception as e:
@@ -544,6 +566,7 @@ def _rotate_candidate_snapshots(snapshot_dir: Path, keep: int = F1_SNAPSHOT_KEEP
     for old in files[keep:]:
         try:
             old.unlink()
+            f1_snapshot_selector.sidecar_path(old).unlink(missing_ok=True)
         except OSError as e:
             log("F1_SNAPSHOT_ROTATE_ERROR", level="WARN", path=str(old), error=repr(e))
 

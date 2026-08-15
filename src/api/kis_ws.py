@@ -2,11 +2,15 @@ import asyncio
 import json
 import os
 from collections.abc import Awaitable, Callable
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import websockets
 
 from src.api import auth
 from src.utils.logger import log
+
+KST = ZoneInfo("Asia/Seoul")
 
 _RETRY_INTERVAL_BASE = 2     # 최초 재연결 대기 (초)
 _RETRY_INTERVAL_MAX  = 30    # 지수 백오프 상한 (초)
@@ -97,8 +101,24 @@ async def _send_subscribe(ws: websockets.WebSocketClientProtocol, ticker: str) -
     await ws.send(json.dumps(req, ensure_ascii=False))
 
 
+def _exchange_iso(hms: str, now: datetime | None = None) -> str | None:
+    """체결시간 HHMMSS를 당일 KST 오프셋 포함 ISO8601로 변환. 유효하지 않으면 None."""
+    if not hms or len(hms) != 6 or not hms.isdigit():
+        return None
+    hh, mm, ss = int(hms[0:2]), int(hms[2:4]), int(hms[4:6])
+    if hh > 23 or mm > 59 or ss > 59:
+        return None
+    base = now or datetime.now(KST)
+    return base.replace(hour=hh, minute=mm, second=ss, microsecond=0).isoformat()
+
+
 def _parse_tick(raw: str) -> dict | None:
-    """KIS 체결 응답 파싱 → {"ticker", "price", "volume"}"""
+    """KIS 체결 응답 파싱 → {ticker, price, volume, qty, exchange_time, source_ts}.
+
+    체결시간(거래소 시각)을 오프셋 포함 ISO(``source_ts``)로 함께 제공한다. 시각이
+    없거나 유효하지 않으면 ``source_ts=None``으로 표시해 하위에서 naive 시각을
+    소리 없이 받아들이지 않게 한다.
+    """
     try:
         if raw.startswith("{"):
             return None  # 시스템/PINGPONG 메시지
@@ -106,10 +126,15 @@ def _parse_tick(raw: str) -> dict | None:
         if len(parts) < 4:
             return None
         fields = parts[3].split("^")
+        exchange_time = fields[1] if len(fields) > 1 else ""
+        qty = int(fields[12])
         return {
             "ticker": fields[0],
             "price": float(fields[2]),
-            "volume": int(fields[12]),
+            "volume": qty,
+            "qty": qty,
+            "exchange_time": exchange_time,
+            "source_ts": _exchange_iso(exchange_time),
         }
     except Exception:
         return None

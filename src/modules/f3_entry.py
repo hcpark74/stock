@@ -15,11 +15,33 @@ from zoneinfo import ZoneInfo
 
 from src import db, notifier, state
 from src.api import kis_rest
-from src.modules import f1_selector, paper_fast_probe, vi_watch
+from src.modules import f1_selector, paper_fast_probe, tick_capture, vi_watch
 from src.utils.logger import log
 from src.utils.number import to_float
 
 KST = ZoneInfo("Asia/Seoul")
+
+
+def _begin_tick_capture(ticker: str, trade_id: int) -> None:
+    """진입 체결 확정 직후 가격 경로 캡처를 시작한다(논블로킹·가드).
+
+    캡처/파일/DB 실패는 진입을 막거나 지연시키지 않는다. 실제 체결 경로에서만
+    호출하며 DRY_RUN은 건너뛴다.
+    """
+    if os.getenv("DRY_RUN", "0") == "1":
+        return
+    try:
+        from src.modules import baseline_experiment
+
+        tick_capture.start(
+            _today(),
+            ticker,
+            trade_id,
+            baseline_experiment.active_experiment_id(),
+            state.get().entry_at,
+        )
+    except Exception as exc:  # noqa: BLE001 — 캡처 시작 실패가 진입을 막지 않는다
+        log("TICK_CAPTURE_START_ERROR", level="WARN", ticker=ticker, error=repr(exc))
 
 
 def _env_float(name: str, default: float) -> float:
@@ -1144,6 +1166,7 @@ async def recover_pending_entry() -> bool:
             name=state.get().target_name,
         )
         state.get().trade_id = trade_id
+        _begin_tick_capture(ticker, trade_id)
         order_db_id = (
             int(existing_order["id"])
             if existing_order
@@ -2162,6 +2185,7 @@ async def _run_single(
             name=state.get().target_name,
         )
         state.get().trade_id = trade_id
+        _begin_tick_capture(ticker, trade_id)
         order_db_id = await db.record_order(
             trade_id,
             order_id,

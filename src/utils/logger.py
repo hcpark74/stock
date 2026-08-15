@@ -31,6 +31,12 @@ EVENT_LABELS = {
     "STRATEGY_FINGERPRINT_LOCKED": (
         "프로세스 전략 지문 고정(Strategy Fingerprint Locked)"
     ),
+    "BASELINE_EXPERIMENT_REGISTERED": (
+        "기준선 실험 등록(Baseline Experiment Registered)"
+    ),
+    "BASELINE_EXPERIMENT_REGISTER_FAILED": (
+        "기준선 실험 등록 실패(Baseline Experiment Register Failed)"
+    ),
     "TIME_SYNC_OK": "시각 동기화 정상(Time Sync OK)",
     "TIME_SYNC_WARN": "시각 오차 경고(Time Sync Warning)",
     "TIME_SYNC_FALLBACK": "시각 동기화 서버 재시도(Time Sync Fallback)",
@@ -220,6 +226,12 @@ EVENT_LABELS = {
     "F4_DB_PROGRESS_ERROR": "F4 DB 진행 상태 저장 오류(F4 DB Progress Error)",
     "F4_ENTRY_AT_INVALID": "F4 진입시각 오류(F4 Entry Time Invalid)",
     "TICK_SPIKE_DROPPED": "이상 틱 제외(Tick Spike Dropped)",
+    "TICK_CAPTURE_STARTED": "가격경로 캡처 시작(Tick Capture Started)",
+    "TICK_CAPTURE_START_ERROR": "가격경로 캡처 시작 오류(Tick Capture Start Error)",
+    "TICK_CAPTURE_WRITE_ERROR": "가격경로 캡처 쓰기 오류(Tick Capture Write Error)",
+    "TICK_CAPTURE_MANIFEST_ERROR": "가격경로 manifest 오류(Tick Capture Manifest Error)",
+    "TICK_CAPTURE_FINALIZE_ERROR": "가격경로 캡처 종료 오류(Tick Capture Finalize Error)",
+    "TICK_CAPTURE_FINALIZED": "가격경로 캡처 최종화(Tick Capture Finalized)",
     "F4_SELL_ERROR": "F4 매도 오류(F4 Sell Error)",
     "F4_SELL_SUBMISSION_UNKNOWN": (
         "F4 매도 접수 여부 불명(F4 Sell Submission Unknown)"

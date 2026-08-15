@@ -192,6 +192,66 @@ async def init(db_path: str) -> None:
             created_at                  TEXT NOT NULL,
             updated_at                  TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS strategy_configs (
+            config_id        TEXT PRIMARY KEY,
+            config_json      TEXT NOT NULL,
+            config_sha256    TEXT NOT NULL UNIQUE,
+            kind             TEXT NOT NULL CHECK (kind IN (
+                                 'PRIMARY','EXPLORATORY','ACTIVE','RETIRED'
+                             )),
+            code_fingerprint TEXT,
+            parent_config_id TEXT,
+            created_at       TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS experiment_registry (
+            experiment_id        TEXT PRIMARY KEY,
+            hypothesis           TEXT,
+            baseline_config_id   TEXT,
+            candidate_config_id  TEXT,
+            tested_combos_count  INTEGER,
+            learn_start_date     TEXT,
+            validate_start_date  TEXT,
+            stop_conditions      TEXT,
+            primary_metric       TEXT,
+            safety_limits        TEXT,
+            status               TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN (
+                                     'ACTIVE','PAUSED_DATA','PAUSED_RISK',
+                                     'ROLLED_BACK','RETIRED'
+                                 )),
+            strategy_fingerprint TEXT,
+            notes                TEXT,
+            created_at           TEXT NOT NULL,
+            updated_at           TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS price_path_manifests (
+            id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_date               TEXT NOT NULL,
+            ticker                   TEXT NOT NULL,
+            trade_id                 INTEGER,
+            experiment_id            TEXT NOT NULL DEFAULT '',
+            chunks_json              TEXT,
+            first_source_ts          TEXT,
+            last_source_ts           TEXT,
+            first_received_at        TEXT,
+            last_received_at         TEXT,
+            seq_gaps                 INTEGER,
+            source_ts_reversals      INTEGER,
+            ws_disconnects           INTEGER,
+            rest_backfill_ranges_json TEXT,
+            reached_expected_close   INTEGER,
+            data_complete            INTEGER,
+            missing_reason           TEXT,
+            writer_version           TEXT,
+            schema_version           TEXT,
+            content_hash             TEXT,
+            correction_history_json  TEXT,
+            created_at               TEXT NOT NULL,
+            finalized_at             TEXT,
+            UNIQUE (trade_date, ticker, experiment_id)
+        );
     """)
     # 기존 DB 마이그레이션: highest_step 컬럼 추가
     try:
@@ -213,6 +273,7 @@ async def init(db_path: str) -> None:
     for table, column, definition in (
         ("trades", "execution_mode", "TEXT"),
         ("trades", "strategy_fingerprint", "TEXT"),
+        ("trades", "experiment_id", "TEXT"),
         ("orders", "client_order_id", "TEXT"),
         (
             "orders",
@@ -387,14 +448,23 @@ async def open_trade(
     now = _now()
     execution_mode = os.getenv("KIS_MODE", "PAPER")
     fingerprint = strategy_fingerprint()
+    # 활성 기준선 실험 ID를 best-effort로 기록한다. 실험이 아직 등록되지 않았거나
+    # 조회가 실패해도 거래 기록을 막지 않는다(주문 안전 우선).
+    experiment_id: str | None = None
+    try:
+        from src.modules import baseline_experiment
+
+        experiment_id = baseline_experiment.active_experiment_id()
+    except Exception:
+        experiment_id = None
     conn = get()
     try:
         async with conn.execute(
             """INSERT INTO trades
                    (date, ticker, name, entry_price, entry_qty, entry_at,
-                    status, execution_mode, strategy_fingerprint,
+                    status, execution_mode, strategy_fingerprint, experiment_id,
                     created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?)""",
             (
                 date,
                 ticker,
@@ -404,6 +474,7 @@ async def open_trade(
                 now,
                 execution_mode,
                 fingerprint,
+                experiment_id,
                 now,
                 now,
             ),
@@ -1024,6 +1095,258 @@ async def close_trade(
         # shared connection could discard another coroutine's uncommitted write.
         raise RuntimeError(f"open trade not found while closing trade_id={trade_id}")
     await conn.commit()
+
+
+def _canonical_config_hash(config: dict) -> str:
+    """정규화 SHA-256 — release.py 지문 직렬화 규약과 동일."""
+    import hashlib
+
+    payload = json.dumps(
+        config,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+async def upsert_strategy_config(
+    config: dict,
+    *,
+    kind: str,
+    code_fingerprint: str | None = None,
+    parent_config_id: str | None = None,
+) -> str:
+    """정규화 해시로 config를 고정한다. 동일 해시는 기존 config_id 재사용.
+
+    값이 하나라도 다르면 새 해시 → 새 config_id. 기존 결과를 덮어쓰지 않고
+    추가만 하므로 상수·설정 변경은 항상 새 config로 전량 재생된다.
+    """
+    sha = _canonical_config_hash(config)
+    conn = get()
+    async with conn.execute(
+        "SELECT config_id FROM strategy_configs WHERE config_sha256=?",
+        (sha,),
+    ) as cur:
+        row = await cur.fetchone()
+    if row is not None:
+        return str(row["config_id"])
+
+    config_id = f"cfg-{sha[:12]}"
+    now = _now()
+    config_json = json.dumps(config, ensure_ascii=False, sort_keys=True)
+    await conn.execute(
+        """INSERT OR IGNORE INTO strategy_configs
+               (config_id, config_json, config_sha256, kind,
+                code_fingerprint, parent_config_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (config_id, config_json, sha, kind, code_fingerprint, parent_config_id, now),
+    )
+    await conn.commit()
+    return config_id
+
+
+async def get_strategy_config(config_id: str) -> dict | None:
+    conn = get()
+    async with conn.execute(
+        "SELECT * FROM strategy_configs WHERE config_id=?", (config_id,)
+    ) as cur:
+        row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+async def register_experiment(
+    experiment_id: str,
+    *,
+    hypothesis: str,
+    baseline_config_id: str,
+    candidate_config_id: str,
+    primary_metric: str,
+    learn_start_date: str,
+    stop_conditions: dict | None = None,
+    safety_limits: dict | None = None,
+    strategy_fingerprint: str | None = None,
+    tested_combos_count: int | None = None,
+    validate_start_date: str | None = None,
+    status: str = "ACTIVE",
+    notes: str | None = None,
+) -> dict | None:
+    """실험 정의를 사전 등록한다. 이미 있으면 시작값을 보존한다(INSERT OR IGNORE).
+
+    사후에 유리한 기간·지표를 고르는 일을 막기 위해 등록 후에는 시작 설정을
+    덮어쓰지 않는다.
+    """
+    now = _now()
+    conn = get()
+    await conn.execute(
+        """INSERT OR IGNORE INTO experiment_registry
+               (experiment_id, hypothesis, baseline_config_id, candidate_config_id,
+                tested_combos_count, learn_start_date, validate_start_date,
+                stop_conditions, primary_metric, safety_limits, status,
+                strategy_fingerprint, notes, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            experiment_id,
+            hypothesis,
+            baseline_config_id,
+            candidate_config_id,
+            tested_combos_count,
+            learn_start_date,
+            validate_start_date,
+            json.dumps(stop_conditions or {}, ensure_ascii=False),
+            primary_metric,
+            json.dumps(safety_limits or {}, ensure_ascii=False),
+            status,
+            strategy_fingerprint,
+            notes,
+            now,
+            now,
+        ),
+    )
+    await conn.commit()
+    return await get_experiment(experiment_id)
+
+
+async def get_experiment(experiment_id: str) -> dict | None:
+    conn = get()
+    async with conn.execute(
+        "SELECT * FROM experiment_registry WHERE experiment_id=?", (experiment_id,)
+    ) as cur:
+        row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+async def get_active_experiment() -> dict | None:
+    conn = get()
+    async with conn.execute(
+        """SELECT * FROM experiment_registry
+            WHERE status='ACTIVE'
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT 1"""
+    ) as cur:
+        row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+async def upsert_price_path_manifest(
+    *,
+    trade_date: str,
+    ticker: str,
+    experiment_id: str | None,
+    trade_id: int | None = None,
+    chunks_json: str = "[]",
+    first_source_ts: str | None = None,
+    last_source_ts: str | None = None,
+    first_received_at: str | None = None,
+    last_received_at: str | None = None,
+    seq_gaps: int | None = None,
+    source_ts_reversals: int | None = None,
+    ws_disconnects: int | None = None,
+    rest_backfill_ranges_json: str = "[]",
+    reached_expected_close: int | None = None,
+    data_complete: int | None = None,
+    missing_reason: str | None = None,
+    writer_version: str | None = None,
+    schema_version: str | None = None,
+    content_hash: str | None = None,
+    finalized_at: str | None = None,
+) -> dict:
+    """가격 경로 manifest를 (거래일,종목,실험) 자연키로 UPSERT한다.
+
+    ``experiment_id``가 없으면 빈 문자열 sentinel로 정규화한다 — SQLite UNIQUE는
+    NULL을 서로 다르게 취급해 UPSERT가 실패하기 때문이다. content_hash가 기존과
+    다르면 조용히 덮어쓰지 않고 correction_history에 이전 해시·시각을 남긴 뒤 갱신한다.
+    """
+    experiment_id = experiment_id or ""
+    now = _now()
+    conn = get()
+    existing = await get_price_path_manifest(trade_date, ticker, experiment_id)
+
+    correction_history: list[dict] = []
+    created_at = now
+    if existing is not None:
+        created_at = existing.get("created_at") or now
+        try:
+            correction_history = json.loads(
+                existing.get("correction_history_json") or "[]"
+            )
+        except (TypeError, json.JSONDecodeError):
+            correction_history = []
+        prev_hash = existing.get("content_hash")
+        if content_hash is not None and prev_hash is not None and prev_hash != content_hash:
+            correction_history.append(
+                {"prev_content_hash": prev_hash, "at": now}
+            )
+
+    await conn.execute(
+        """INSERT INTO price_path_manifests
+               (trade_date, ticker, trade_id, experiment_id, chunks_json,
+                first_source_ts, last_source_ts, first_received_at, last_received_at,
+                seq_gaps, source_ts_reversals, ws_disconnects, rest_backfill_ranges_json,
+                reached_expected_close, data_complete, missing_reason,
+                writer_version, schema_version, content_hash,
+                correction_history_json, created_at, finalized_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(trade_date, ticker, experiment_id) DO UPDATE SET
+               trade_id=excluded.trade_id,
+               chunks_json=excluded.chunks_json,
+               first_source_ts=excluded.first_source_ts,
+               last_source_ts=excluded.last_source_ts,
+               first_received_at=excluded.first_received_at,
+               last_received_at=excluded.last_received_at,
+               seq_gaps=excluded.seq_gaps,
+               source_ts_reversals=excluded.source_ts_reversals,
+               ws_disconnects=excluded.ws_disconnects,
+               rest_backfill_ranges_json=excluded.rest_backfill_ranges_json,
+               reached_expected_close=excluded.reached_expected_close,
+               data_complete=excluded.data_complete,
+               missing_reason=excluded.missing_reason,
+               writer_version=excluded.writer_version,
+               schema_version=excluded.schema_version,
+               content_hash=excluded.content_hash,
+               correction_history_json=excluded.correction_history_json,
+               finalized_at=excluded.finalized_at""",
+        (
+            trade_date,
+            ticker,
+            trade_id,
+            experiment_id,
+            chunks_json,
+            first_source_ts,
+            last_source_ts,
+            first_received_at,
+            last_received_at,
+            seq_gaps,
+            source_ts_reversals,
+            ws_disconnects,
+            rest_backfill_ranges_json,
+            reached_expected_close,
+            data_complete,
+            missing_reason,
+            writer_version,
+            schema_version,
+            content_hash,
+            json.dumps(correction_history, ensure_ascii=False),
+            created_at,
+            finalized_at,
+        ),
+    )
+    await conn.commit()
+    return await get_price_path_manifest(trade_date, ticker, experiment_id)
+
+
+async def get_price_path_manifest(
+    trade_date: str, ticker: str, experiment_id: str | None
+) -> dict | None:
+    conn = get()
+    experiment_id = experiment_id or ""  # NULL 정규화 — UNIQUE/UPSERT 일관성 유지
+    async with conn.execute(
+        """SELECT * FROM price_path_manifests
+            WHERE trade_date=? AND ticker=? AND experiment_id=?""",
+        (trade_date, ticker, experiment_id),
+    ) as cur:
+        row = await cur.fetchone()
+    return dict(row) if row else None
 
 
 async def get_skip_by_date(date: str) -> dict | None:

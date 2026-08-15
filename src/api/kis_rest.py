@@ -40,6 +40,13 @@ def default_rate_interval() -> float:
 _last_call_at: float = 0.0
 _RATE_INTERVAL = float(os.getenv("KIS_RATE_INTERVAL_SEC", "") or default_rate_interval())
 _MAX_TRANSIENT_RETRIES = int(os.getenv("KIS_MAX_TRANSIENT_RETRIES", "2"))
+
+
+def rate_interval() -> float:
+    """현재 실효 KIS 직렬 호출 간격(초). 설정 스냅샷·보고용 읽기 전용 접근자."""
+    return _RATE_INTERVAL
+
+
 _TRANSIENT_RETRY_BASE_SEC = float(os.getenv("KIS_TRANSIENT_RETRY_BASE_SEC", "1.0"))
 _TRANSIENT_RETRY_MAX_SEC = float(os.getenv("KIS_TRANSIENT_RETRY_MAX_SEC", "8.0"))
 _TIMEOUT = 15.0        # 잔고조회 등 느린 API 대응 (문서: "조회속도가 느린 API")
@@ -52,6 +59,37 @@ REQUEST_PRIORITY_ORDER_STATUS = 5
 REQUEST_PRIORITY_PRICE = 10
 REQUEST_PRIORITY_DEFAULT = 20
 REQUEST_PRIORITY_VI = 30
+# 조회 전용 배경 작업(사후 틱 REST 보강·과거 데이터 PoC). 주문/체결/F5/VI보다
+# 항상 뒤로 밀린다.
+REQUEST_PRIORITY_BACKGROUND = 40
+
+
+class RequestBudgetExceeded(RuntimeError):
+    """Raised before sending when a read-only budget would be exceeded."""
+
+
+class CallBudget:
+    """실제 HTTP 시도(내부 재시도 포함) 횟수를 정확히 세는 예산 객체.
+
+    ``_request`` 재귀의 모든 분기(transient/token/rate-limit 재시도)로 전달되며,
+    실제 ``client.request`` 직전에 ``charge()``를 호출한다. 예산을 넘기는 시도는
+    전송 전에 거절한다(예: 61번째 호출은 보내지 않는다).
+    """
+
+    def __init__(self, max_calls: int) -> None:
+        self.max_calls = int(max_calls)
+        self.used = 0
+
+    def charge(self) -> None:
+        if self.used >= self.max_calls:
+            raise RequestBudgetExceeded(
+                f"call budget exceeded: used={self.used} max={self.max_calls}"
+            )
+        self.used += 1
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.max_calls - self.used)
 _LOW_PRIORITY_MAX_WAIT_SLOTS = max(
     1.0,
     float(os.getenv("KIS_LOW_PRIORITY_MAX_WAIT_SLOTS", "25")),
@@ -294,11 +332,14 @@ async def _request(
     aggregate_latency: bool = False,
     request_priority: int = REQUEST_PRIORITY_DEFAULT,
     allow_real_smoke_buy: bool = False,
+    budget: "CallBudget | None" = None,
     **kwargs,
 ) -> dict:
     """Rate-limited KIS REST 요청.
 
     조사 모드는 429/EGW00201에서 즉시 중단하며, 401 토큰 갱신은 항상 수행한다.
+    ``budget``이 주어지면 실제 HTTP 전송 직전에 예산을 차감하고, 예산을 넘기면
+    전송하지 않고 ``RequestBudgetExceeded``를 올린다(내부 재시도 시도도 카운트).
     """
     base_url = os.getenv("KIS_BASE_URL", "")
     url = base_url + path
@@ -351,6 +392,10 @@ async def _request(
                 "msg_cd": SEND_GUARD_BLOCKED_MSG_CD,
                 "msg1": "request blocked by send guard",
             }, enabled=include_response_meta, http_status=None, request_sent=False)
+        # 실제 전송 직전에 예산을 차감한다 — 재귀 재시도 분기도 이 지점을 다시
+        # 지나므로 모든 실제 HTTP 시도가 정확히 1회씩 카운트된다.
+        if budget is not None:
+            budget.charge()
         request_start = time.monotonic()
         resp = await client.request(
             method,
@@ -392,6 +437,7 @@ async def _request(
                 aggregate_latency=aggregate_latency,
                 request_priority=request_priority,
                 allow_real_smoke_buy=allow_real_smoke_buy,
+                budget=budget,
                 **kwargs,
             )
         log(
@@ -470,6 +516,7 @@ async def _request(
             aggregate_latency=aggregate_latency,
             request_priority=request_priority,
             allow_real_smoke_buy=allow_real_smoke_buy,
+            budget=budget,
             **kwargs,
         )
         if _app_retry == 0 and str(result.get("rt_cd", "1")) == "0":
@@ -501,6 +548,7 @@ async def _request(
                 aggregate_latency=aggregate_latency,
                 request_priority=request_priority,
                 allow_real_smoke_buy=allow_real_smoke_buy,
+                budget=budget,
                 **kwargs,
             )
 
@@ -530,6 +578,7 @@ async def _request(
                 aggregate_latency=aggregate_latency,
                 request_priority=request_priority,
                 allow_real_smoke_buy=allow_real_smoke_buy,
+                budget=budget,
                 **kwargs,
             )
 
@@ -569,6 +618,7 @@ async def _request(
             aggregate_latency=aggregate_latency,
             request_priority=request_priority,
             allow_real_smoke_buy=allow_real_smoke_buy,
+            budget=budget,
             **kwargs,
         )
         if _app_retry == 0 and str(result.get("rt_cd", "1")) == "0":
@@ -602,6 +652,7 @@ async def get(
     latency_context: str | None = None,
     aggregate_latency: bool = False,
     request_priority: int = REQUEST_PRIORITY_DEFAULT,
+    budget: "CallBudget | None" = None,
 ) -> dict:
     return await _request(
         "GET",
@@ -615,6 +666,7 @@ async def get(
         latency_context=latency_context,
         aggregate_latency=aggregate_latency,
         request_priority=request_priority,
+        budget=budget,
     )
 
 
@@ -629,6 +681,7 @@ async def post(
     include_response_meta: bool = False,
     allow_real_smoke_buy: bool = False,
     request_priority: int = REQUEST_PRIORITY_CRITICAL,
+    budget: "CallBudget | None" = None,
 ) -> dict:
     return await _request(
         "POST",
@@ -641,5 +694,6 @@ async def post(
         include_response_meta=include_response_meta,
         allow_real_smoke_buy=allow_real_smoke_buy,
         request_priority=request_priority,
+        budget=budget,
         json=body,
     )

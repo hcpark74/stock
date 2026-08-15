@@ -543,7 +543,52 @@ F3_PYRAMID_AT=09:10:40
 F4_POST_CLOSE_OBSERVE_UNTIL=09:10
 TRAILING_SHADOW_ENABLED=1
 TRAILING_SHADOW_BASELINE_TRAIL=0.015
+
+# 0단계 계측: 체결된 PAPER 한 종목의 재생 가능한 가격 경로 durable 기록
+STRATEGY_TICK_CAPTURE_ENABLED=1
+STRATEGY_TICK_DIR=data/strategy_ticks
+# 캡처 경로 완전성 전용 사후 REST 백업 스위치(09:35~15:14). 차트 보강용
+# F4_POST_CLOSE_REST_BACKUP_ENABLED와 별개이며, 이 값을 0으로 두면 캡처는
+# WS만으로 15:15까지의 경로를 채운다.
+STRATEGY_TICK_REST_BACKUP_ENABLED=1
+# 압축 후 일 용량 소프트 한도(MB). 초과해도 기록을 버리지 않고 경고만 남긴다.
+STRATEGY_TICK_SOFT_LIMIT_MB=100
 ```
+
+### 0단계 가격 경로 캡처(tick_capture)
+
+- 체결된 PAPER 한 종목만 대상으로 진입(F3 체결 확정)부터 고정 **15:15 KST**까지 시간 단위
+  gzip JSONL(`data/strategy_ticks/YYYYMMDD/{ticker}.{HH}.jsonl.gz`)로 기록하고 DB
+  `price_path_manifests`에 최종화한다. 행 필드는 순번·거래소 시각(`source_ts`)·수신 시각·
+  가격·수량·출처(ws/rest)·유효성이다.
+- writer는 논블로킹이며 캡처·파일·DB 실패가 진입·청산·F5·복구 주문을 막거나 지연시키지
+  않는다. writer는 F4 청산 모니터가 소유·취소하지 않는다(정상 청산이 기록을 끊지 않음).
+- CLOSED 이후에는 가격만 기록하고 스탑·주문·VI 계산을 하지 않는다. 저우선
+  (`REQUEST_PRIORITY_BACKGROUND`) REST 백업은 **09:35에 시작해 15:14에 멈춰** F5
+  precheck/exec가 항상 우선한다. 이 백업은 차트 보강용
+  `F4_POST_CLOSE_REST_BACKUP_ENABLED`(기본 0)를 우회하므로, 우회 자체를
+  `STRATEGY_TICK_REST_BACKUP_ENABLED`로 명시해 운영자가 끈 설정을 캡처가 조용히
+  되살리지 않게 한다.
+- 15:15 이전 WS 단절은 재연결해도 `data_complete=0`/`missing_reason=WS_LOSS`로 남기고,
+  프로세스 재시작은 truncate/중복 없이 이어쓰며 `RESTART_GAP`으로 표시한다. 거래소 시각
+  역전은 `source_ts_reversals`, 실제 seq 빈틈은 `seq_gaps`, REST 보강 구간은
+  `rest_backfill_ranges_json`으로 분리 기록한다.
+- 재시작 복원 스캔(하루치 gzip 전체)은 워커 스레드에서 돈다. 이 경로가 F4 스탑 감시
+  무장보다 앞서므로 이벤트 루프를 막으면 포지션이 무방비가 된다. writer·manifest는
+  복원이 끝난 뒤에만 기록해 seq 중복을 막는다.
+- `source_ts`가 없는 REST 표본은 거래소 시각 경계(`first_source_ts`/`last_source_ts`)를
+  지우지 않는다. 사후 REST 백업이 마지막 행이 되는 실운영에서 경계가 NULL이 되면
+  진입~15:15 커버리지 판정이 실제와 무관해진다.
+- manifest `chunks_json`은 chunk별 `first_seq`/`last_seq`/`seq_count`만 담는다(틱마다
+  순번을 넣으면 주문 경로와 같은 SQLite에 수 MB 쓰기가 생긴다).
+- 압축 후 일 용량이 `STRATEGY_TICK_SOFT_LIMIT_MB`(기본 100MB)를 넘으면 기록을 버리지
+  않고 `TICK_CAPTURE_SOFT_LIMIT_EXCEEDED` 경고에 실제 용량을 남긴다.
+- `tick_capture`와 `f1_snapshot_selector`는 관측 전용이라 전략 지문
+  (`_STRATEGY_FILES`)에 넣지 않는다. 넣으면 관측 코드 수정마다 새 `experiment_id`가
+  열려 40거래일 paired 수집이 매번 초기화된다. 캡처 on/off는 `STRATEGY_TICK_` 환경
+  스냅샷이 지문에 반영한다.
+- 당일 분봉 읽기 전용 PoC는 `python scripts\kis_minute_bar_poc.py`(외부 호출 없음)이며,
+  라이브 검증은 PAPER·09:35 이후·`--with-kis`로 수동 실행한다(≤60 실제 호출, 주문 경로 없음).
 
 ### DRY_RUN 실행 목적
 

@@ -9,6 +9,11 @@ from functools import lru_cache
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
+
+# 주문 판단·상태 복구에 실제로 참여하는 파일만 넣는다. 관측 전용 모듈
+# (tick_capture, f1_snapshot_selector 등)은 제외한다 — 관측 코드 수정이 지문을
+# 바꾸면 새 experiment_id가 열려 40거래일 paired 수집이 매번 0부터 다시 시작한다.
+# 관측 동작이 기준선 적격성에 영향을 주는 부분은 STRATEGY_TICK_ 환경 스냅샷이 잡는다.
 _STRATEGY_FILES = (
     "main.py",
     "src/state.py",
@@ -42,6 +47,7 @@ _STRATEGY_ENV_PREFIXES = (
     "F5_",
     "PAPER_FAST_",
     "TRAILING_SHADOW_",
+    "STRATEGY_TICK_",
     "VI_",
     "BALANCE_SNAPSHOT_",
     "EXIT_RECONCILE_",

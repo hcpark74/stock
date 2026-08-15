@@ -557,6 +557,25 @@ DB 행과 함께 사람이 읽는 Markdown을
 - [ ] 현재 설정과 새 전략 지문을 `experiment_registry`에 등록
 - [ ] 운영 DB 재기동 후 `trailing_shadow_comparisons` 실제 생성 확인
 
+0단계 항목의 코드·테스트는 병합됐으나(비용 모델, 원자적 완료 증거·공통 F1 스냅샷 선택기,
+`experiment_registry`·`strategy_configs`·`price_path_manifests` 스키마·CRUD·기동 시 현재
+지문 기준선 등록, 내구 틱 writer·불완전 manifest·분봉 PoC), **라이브·운영 검증이 남았으므로
+체크박스는 모두 비워 둔다.** 코드·mock 테스트만으로는 완료로 표시하지 않는다.
+
+- 15:15 durable 경로와 WS 단절·수동 중지·프로세스 종료 불완전 판정: 다음 PAPER 거래일
+  1건에서 진입~15:15 manifest `data_complete=1`/`reached_expected_close=1`과 각 중단
+  시나리오의 `missing_reason`(WS_LOSS/MANUAL_STOP/PROCESS_SHUTDOWN/RESTART_GAP)을 확인한 뒤
+  체크한다. 오늘은 이미 15:15 관측 창 이후이므로 전체 라이브 틱 게이트는 다음 PAPER
+  거래일이 필요하다.
+- 당일 분봉 API 가용성·호출량·`AMBIGUOUS`: PAPER·09:35 이후·`--with-kis`·≤60 실제 호출로
+  수동 확인 후 체크.
+- 비용 모델·F1 스냅샷 선택기·기준선 등록: 스키마·등록·상수 반영이 운영 DB에 실제로 남는지는
+  다음 정상 재기동 후 읽기 전용 `sqlite_master`/행 조회로 확인한 뒤 체크한다.
+- 운영 DB 신규 테이블 생성(`experiment_registry`·`strategy_configs`·`price_path_manifests`·
+  `trailing_shadow_comparisons`)은 다음 정상 재기동 후 읽기 전용 조회로 확인한다. 등록 로직·
+  스키마는 `tests/test_db_schema_creation.py`로 증명됐고, 운영 DB에는 이미 finalized
+  trade-27 shadow가 있어 shadow 테이블 존재는 확인된다.
+
 이 항목을 마치기 전에는 1단계 수집 결과를 승격 통계로 사용하지 않는다. 특히 비용 모델과
 15:15까지의 사후 경로가 없으면 느슨한 청산 설정이 체계적으로 결측된다.
 

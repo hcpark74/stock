@@ -18,6 +18,7 @@
 | Enum 값 | `TEXT` CHECK 제약으로 강제 |
 | 운영 상태 | `today_state.json` 유지 — crash recovery 전용 |
 | 분석/이력 | SQLite (`trades`, `orders`, `entry_order_attempts`, `partial_exits`, `daily_skips`, `asset_snapshots`, `trailing_shadow_comparisons`) |
+| 실험/설정/경로 | SQLite (`strategy_configs`, `experiment_registry`, `price_path_manifests`) — 0단계 계측 기준선 |
 
 ---
 
