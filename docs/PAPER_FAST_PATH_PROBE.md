@@ -130,3 +130,54 @@ KOSPI 30종목 요청은 30종목, KOSDAQ 28종목 요청은 28종목이 반환�
 다만 이 확인은 개장 후 수행되어 예상체결 관련 필드가 0이었다. 따라서
 장전 순위의 의미, 장전 예상체결 필드 값, 상태 필드의 VI 의미는 아직
 검증되지 않았으며 위 관측 프로브가 이를 확인한다.
+
+## 전환 판단 도구: 반사실 평가
+
+`PAPER_FAST_SHADOW_PROGRESS`가 세는 `rank1_match_days`와 `top3_overlap_total`은
+후보 일치도일 뿐이라 전환 여부를 답하지 못한다. 불일치가 유리했는지 불리했는지를
+가리지 못하기 때문이다. `scripts/fast_path_counterfactual.py`가 그 공백을 메운다.
+
+```bash
+# 로컬 요약만 (외부 호출 없음)
+python scripts/fast_path_counterfactual.py
+
+# 분봉으로 실제 평가 (PAPER, 09:35 이후, 장 마감 후 권장)
+python scripts/fast_path_counterfactual.py --with-kis --out data/fast_path_counterfactual.json
+```
+
+관측일마다 두 반사실을 나란히 놓는다.
+
+- Fast: 개장 멀티시세 매도1호가(`inter2_askp`)로 09:00에 진입. 하이브리드가 실제로
+  주문했을 가격이 프로브 파일에 그대로 남아 있다.
+- 레거시: 09:01 분봉 종가로 진입. F1 선정에 68~89초가 걸리므로 09:00 호가로 값을
+  매기면 비교 대상인 지연 페널티가 사라진다. 20260814 레거시 진입가 106,700은
+  DB의 실제 체결가와 일치해 이 모델을 뒷받침한다.
+
+각 편은 09:00~09:30에서 승인된 장벽(+2.5% / -2.0%) 선착과 MFE/MAE를 낸다. 분봉은
+봉 내부 경로를 모르므로 트레일링은 재현하지 않는다. 같은 봉이 양쪽 장벽에 닿으면
+`AMBIGUOUS`, 측정 창에 봉이 없으면 미판정으로 남긴다. 빈 창을 "장벽 미접촉"으로
+보고하면 데이터 없음이 유리한 결과로 둔갑한다.
+
+분봉은 일별분봉 TR(`FHKST03010230`)로 읽는다. 당일 TR(`FHKST03010200`)은 빈 커서에서
+장 마감 직전 30봉을 주므로 개장 30분 창에 쓸 수 없다. 휴장일을 요청하면 KIS가 가장
+가까운 거래일로 조용히 대체하므로 요청 날짜와 다른 봉은 전부 버린다.
+
+### 전환 기준 (제안)
+
+10거래일을 채운 뒤 아래를 모두 만족하면 `PAPER_FAST_HYBRID=1`로 전환한다.
+자동 전환은 없다.
+
+1. `undecidable`을 뺀 판정일이 6일 이상이다. 표본이 얇으면 판단하지 않는다.
+2. `legacy_better`가 `fast_better`를 넘지 않는다.
+3. 전 관측일의 개장 응답 품질이 `COMPLETE`다 (`PAPER_FAST_PROBE_OPEN_DONE.quality.ok`).
+4. 개장 관측 지각(`lateness_ms`)이 `PAPER_FAST_PROBE_OPEN_MAX_LATENESS_MS` 안에 있다.
+
+롤백은 `PAPER_FAST_HYBRID=0` 한 줄이다. `readiness.py`의 `paper_experiments_off`
+게이트가 REAL 전환 시 두 플래그를 모두 강제로 확인하므로 실전 경로에는 영향이 없다.
+
+### 관측일 계수 주의
+
+`shadow_validation_summary`는 휴장일을 걸러내지 않는다. 20260817(광복절 대체공휴일)은
+`observed_dates`에 포함됐지만 실제 세션이 없어 분봉이 비어 있고 반사실도 미판정이다.
+10일 게이트를 채울 때 이런 날이 섞이면 실제 표본은 그보다 적다. 반사실 평가의
+`evaluated_days`와 `undecidable`을 함께 봐야 한다.
