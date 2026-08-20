@@ -225,6 +225,12 @@ async def _check_market_holiday() -> None:
         )
         return
 
+    await _mark_market_closed(today, source="HOLIDAY_API")
+
+
+async def _mark_market_closed(today: str, *, source: str) -> None:
+    """당일을 휴장으로 확정하고 잡 전체를 스킵시킨다. 중복 호출은 무시한다."""
+    global _market_closed_date
     if _market_closed_date == today:
         return  # 기동 시 체크 후 08:29 잡 재확인 등 — 중복 로그·알림 방지
 
@@ -232,7 +238,7 @@ async def _check_market_holiday() -> None:
     s = state.get()
     s.day_skip = True
     s.close_reason = s.close_reason or "MARKET_CLOSED"
-    logger.log("MARKET_CLOSED", level="INFO", date=today)
+    logger.log("MARKET_CLOSED", level="INFO", date=today, source=source)
     await notifier.send(
         "MARKET_CLOSED",
         level="INFO",
@@ -438,6 +444,12 @@ async def job_paper_fast_probe() -> None:
             reason="UNHANDLED",
             error=repr(exc),
         )
+        return
+    # CTCA0903R(국내휴장일조회)은 모의투자 미지원이라 PAPER 는 평일 가드밖에 없다.
+    # 장전 멀티시세가 '오늘 세션 없음'을 말하면 REAL 의 휴장 경로와 같은 처리를 한다.
+    # 08:59:45 판정이라 F1 의 개장 후 조회가 시작되기 전에 막힌다.
+    if paper_fast_probe.market_closed_detected():
+        await _mark_market_closed(_today(), source="FAST_PROBE")
 
 
 async def job_balance_snapshot_prefetch() -> None:

@@ -35,6 +35,22 @@ _prepared_tickers: list[str] = []
 _prepared_candidates: list[dict] = []
 _open_candidates: list[dict] = []
 _last_open_quality: dict[str, Any] = {"ok": False, "reason": "NOT_RUN"}
+_last_closed_verdict: dict[str, Any] = {"closed": False, "reason": "NOT_RUN"}
+
+# 휴장 판정 기준. CTCA0903R(국내휴장일조회)이 모의투자 미지원이라 PAPER 는 평일
+# 가드밖에 없고, 2026-08-17(광복절 대체공휴일)에 F1 이 60종목을 조회하고 주문까지
+# 전송했다. 장전 멀티시세 응답에 이미 신호가 있어 추가 호출 없이 막을 수 있다.
+#
+# 관측된 분리 (2026-07-28~08-20, 개장 14일 / 휴장 1일):
+#   hour_cls_code   개장 'B'          / 휴장 '0' (전 종목)
+#   intr_antc_vol   개장 0~1종목만 0  / 휴장 전 종목 0
+#   acml_vol 중앙값 개장 246~1,995    / 휴장 3,859,277 (전일 거래량이 그대로)
+#
+# 휴장 표본이 1일뿐이므로 세 조건을 모두 만족할 때만 휴장으로 본다. 기존 휴장
+# 판정과 같은 fail-open 원칙이다 — 거래일을 놓치는 쪽이 더 큰 손실이다.
+MARKET_CLOSED_HOUR_CLS = "0"
+MARKET_CLOSED_MIN_ROWS = 10
+MARKET_CLOSED_MIN_STALE_VOLUME = 100_000
 
 
 def enabled() -> bool:
@@ -361,12 +377,13 @@ def _select_probe_tickers(
 
 async def prepare() -> list[str]:
     """Collect the 08:59 ranking and multi-price evidence."""
-    global _prepared_tickers, _prepared_candidates
+    global _prepared_tickers, _prepared_candidates, _last_closed_verdict
     if not enabled():
         return []
 
     _prepared_tickers = []
     _prepared_candidates = []
+    _last_closed_verdict = {"closed": False, "reason": "NOT_RUN"}
     now = datetime.now(KST)
     market_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
     if now >= market_open:
@@ -462,6 +479,17 @@ async def prepare() -> list[str]:
         for ticker in _prepared_tickers
         if ticker in prepared_by_ticker
     ]
+    # 시장 전체를 한 표본으로 본다. 시장별로 따로 재면 한쪽 응답이 얇을 때
+    # 표본 하한에 걸려 판정을 놓친다.
+    _last_closed_verdict = evaluate_market_closed(
+        [row for rows in multi_rows.values() for row in rows]
+    )
+    if _last_closed_verdict["closed"]:
+        _append_record(
+            "PAPER_FAST_PROBE_MARKET_CLOSED", phase="PREOPEN", **_last_closed_verdict
+        )
+        log("PAPER_FAST_PROBE_MARKET_CLOSED", level="WARN", **_last_closed_verdict)
+
     elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
     _append_record(
         "PAPER_FAST_PROBE_PREOPEN_DONE",
@@ -469,6 +497,7 @@ async def prepare() -> list[str]:
         elapsed_ms=elapsed_ms,
         selected_tickers=_prepared_tickers,
         markets=market_summaries,
+        market_closed=_last_closed_verdict,
     )
     log(
         "PAPER_FAST_PROBE_PREOPEN_DONE",
@@ -617,6 +646,51 @@ def load_persisted_open_candidates(
     return (path, restored) if restored else (None, [])
 
 
+def evaluate_market_closed(rows: list[dict]) -> dict[str, Any]:
+    """멀티시세 응답이 '오늘 세션이 없다'고 말하는지 판정한다.
+
+    휴장일에는 동시호가가 돌지 않아 예상체결 필드가 비고, 현재가·거래량 자리에
+    직전 거래일 값이 그대로 내려온다. 세 신호가 **모두** 일치할 때만 휴장으로
+    본다. 하나라도 어긋나면 개장으로 취급한다(fail-open).
+
+    ``any`` 로 판정하면 안 된다. 2026-08-13 개장일에도 ``hour_cls_code='0'`` 인
+    종목이 1개 있었고(거래정지로 추정), 그걸 휴장으로 오인하면 정상 거래일을
+    통째로 잃는다.
+    """
+    total = len(rows)
+    hour_cls_codes = sorted({str(row.get("hour_cls_code") or "") for row in rows})
+    expected_qty_zero = sum(1 for row in rows if _to_float(row.get("intr_antc_vol")) <= 0)
+    volumes = sorted(_to_float(row.get("acml_vol")) for row in rows)
+    median_volume = volumes[total // 2] if volumes else 0.0
+    evidence = {
+        "total_count": total,
+        "hour_cls_codes": hour_cls_codes,
+        "expected_qty_zero_count": expected_qty_zero,
+        "median_acml_vol": median_volume,
+    }
+
+    if total < MARKET_CLOSED_MIN_ROWS:
+        return {"closed": False, "reason": "SAMPLE_TOO_SMALL", **evidence}
+    if hour_cls_codes != [MARKET_CLOSED_HOUR_CLS]:
+        return {"closed": False, "reason": "HOUR_CLS_NOT_CLOSED", **evidence}
+    if expected_qty_zero != total:
+        return {"closed": False, "reason": "EXPECTED_QTY_PRESENT", **evidence}
+    if median_volume < MARKET_CLOSED_MIN_STALE_VOLUME:
+        # 거래량까지 0인 응답은 휴장이 아니라 응답 이상일 수 있다. 근거가 모자라면
+        # 막지 않는다.
+        return {"closed": False, "reason": "VOLUME_NOT_STALE", **evidence}
+    return {"closed": True, "reason": "STALE_SESSION", **evidence}
+
+
+def get_market_closed_verdict() -> dict[str, Any]:
+    """장전 프로브가 마지막으로 낸 휴장 판정. 실행 전이면 NOT_RUN."""
+    return dict(_last_closed_verdict)
+
+
+def market_closed_detected() -> bool:
+    return _last_closed_verdict.get("closed") is True
+
+
 def get_open_candidates() -> list[dict]:
     return [dict(candidate) for candidate in _open_candidates]
 
@@ -685,6 +759,28 @@ def compare_with_legacy(legacy_candidates: list[dict]) -> dict:
     return fields
 
 
+def _day_market_was_closed(lines: list[str]) -> bool:
+    """하루치 프로브 기록이 '그날 세션이 없었다'고 말하는지.
+
+    새 기록에는 장전 감지가 ``PAPER_FAST_PROBE_MARKET_CLOSED`` 로 남는다. 감지가
+    붙기 전 기록에는 그 표식이 없으므로 개장 멀티시세 응답으로 다시 판정한다.
+    """
+    rows: list[dict] = []
+    for line in lines:
+        if '"PAPER_FAST_PROBE_MARKET_CLOSED"' in line:
+            return True
+        if '"PAPER_FAST_PROBE_OPEN_MULTI"' not in line:
+            continue
+        try:
+            record = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        rows.extend((record.get("response") or {}).get("output") or [])
+    return bool(rows) and evaluate_market_closed(rows)["closed"]
+
+
 def shadow_validation_summary() -> dict:
     """Summarize distinct, timely open-vs-legacy shadow comparison days.
 
@@ -695,6 +791,7 @@ def shadow_validation_summary() -> dict:
     observations: list[tuple[str, dict]] = []
     skipped_untimely_days: list[str] = []
     skipped_incomplete_days: list[str] = []
+    skipped_closed_days: list[str] = []
     parse_error_lines = 0
     scan_file_limit = _shadow_scan_file_limit()
     directory = _probe_dir()
@@ -710,6 +807,13 @@ def shadow_validation_summary() -> dict:
         except OSError:
             skipped_incomplete_days.append(path.stem)
             continue
+        # 휴장일은 검증일이 아니다. 감지 로직이 붙기 전에 기록된 날(2026-08-17)도
+        # 파일에 남은 개장 멀티시세로 다시 판정해 계수에서 뺀다. 그러지 않으면
+        # 10일 게이트가 실제 표본보다 빨리 찬다.
+        if _day_market_was_closed(lines):
+            skipped_closed_days.append(path.stem)
+            continue
+
         completed_opens: list[datetime] = []
         compares: list[tuple[datetime, dict]] = []
         for line in lines:
@@ -771,6 +875,7 @@ def shadow_validation_summary() -> dict:
         "scan_file_limit": scan_file_limit,
         "skipped_untimely_days": skipped_untimely_days,
         "skipped_incomplete_days": skipped_incomplete_days,
+        "skipped_closed_days": skipped_closed_days,
         "parse_error_lines": parse_error_lines,
     }
 

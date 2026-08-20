@@ -104,6 +104,9 @@ EVENT_LABELS = {
         "PAPER Fast Path 장전 관측 완료(Paper Fast Probe Preopen Done)"
     ),
     "PAPER_FAST_PROBE_PREOPEN_SKIPPED": "PAPER Fast Path Preopen Skipped",
+    "PAPER_FAST_PROBE_MARKET_CLOSED": (
+        "PAPER Fast Path 휴장 감지(Paper Fast Probe Market Closed)"
+    ),
     "PAPER_FAST_PROBE_OPEN_MULTI": (
         "PAPER Fast Path 개장 멀티시세 관측(Paper Fast Probe Open Multi)"
     ),

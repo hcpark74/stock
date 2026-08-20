@@ -435,6 +435,7 @@ def test_shadow_validation_summary_counts_only_timely_complete_days(monkeypatch,
         "scan_file_limit": 32,
         "skipped_untimely_days": ["20260813"],
         "skipped_incomplete_days": [],
+        "skipped_closed_days": [],
         "parse_error_lines": 0,
     }
 
@@ -796,3 +797,317 @@ def test_load_persisted_open_candidates_skips_unknown_accepted_ticker(
     _restored_path, candidates = probe.load_persisted_open_candidates(now)
 
     assert [candidate["ticker"] for candidate in candidates] == ["005930"]
+
+
+# ── 휴장일 감지 (모의투자 전용) ─────────────────────────────────────────
+#
+# CTCA0903R(국내휴장일조회)이 모의투자 미지원이라 PAPER 는 평일 가드밖에 없다.
+# 2026-08-17(광복절 대체공휴일, 월)에 F1 이 60종목을 조회하고 주문까지 전송했다.
+# 장전 멀티시세 응답에 이미 판별 신호가 있으므로 추가 호출 없이 막는다.
+
+
+def _closed_row(ticker: str, *, stale_volume: int = 5_000_000) -> dict:
+    """휴장일 응답. 예상체결 필드가 비고 전일 거래량이 그대로 내려온다."""
+    return {
+        "inter_shrn_iscd": ticker,
+        "inter_kor_isnm": f"종목{ticker}",
+        "inter2_prpr": "10000",
+        "inter2_prdy_clpr": "10000",
+        "inter2_askp": "10000",
+        "hour_cls_code": "0",
+        "intr_antc_vol": "0",
+        "acml_vol": str(stale_volume),
+    }
+
+
+def _open_row(ticker: str, *, hour_cls: str = "B", expected_qty: int = 5_000) -> dict:
+    """개장일 응답. 동시호가가 돌아 예상체결수량이 있고 누적거래량은 작다."""
+    return {
+        "inter_shrn_iscd": ticker,
+        "inter_kor_isnm": f"종목{ticker}",
+        "inter2_prpr": "10300",
+        "inter2_prdy_clpr": "10000",
+        "inter2_askp": "10310",
+        "hour_cls_code": hour_cls,
+        "intr_antc_vol": str(expected_qty),
+        "acml_vol": "1500",
+    }
+
+
+def test_market_closed_detects_holiday_response():
+    """2026-08-17 실제 응답 형태: 전 종목 hour_cls_code='0', 예상수량 0, 전일 거래량."""
+    rows = [_closed_row(f"00{i:04d}") for i in range(30)]
+    verdict = probe.evaluate_market_closed(rows)
+    assert verdict["closed"] is True
+    assert verdict["reason"] == "STALE_SESSION"
+
+
+def test_market_open_response_is_never_flagged_closed():
+    rows = [_open_row(f"00{i:04d}") for i in range(30)]
+    assert probe.evaluate_market_closed(rows)["closed"] is False
+
+
+def test_single_halted_ticker_does_not_flag_the_whole_market():
+    """2026-08-13 개장일에도 hour_cls_code='0' 인 종목이 1개 있었다.
+
+    any 로 판정하면 정상 거래일을 휴장으로 오인해 그날 매매를 통째로 잃는다.
+    """
+    rows = [_open_row(f"00{i:04d}") for i in range(29)]
+    rows.append(_open_row("009999", hour_cls="0", expected_qty=0))
+    assert probe.evaluate_market_closed(rows)["closed"] is False
+
+
+def test_small_sample_never_declares_closed():
+    """표본이 얇으면 판단하지 않는다. 거래일을 놓치는 쪽이 더 큰 손실이다."""
+    rows = [_closed_row(f"00{i:04d}") for i in range(3)]
+    verdict = probe.evaluate_market_closed(rows)
+    assert verdict["closed"] is False
+    assert verdict["reason"] == "SAMPLE_TOO_SMALL"
+
+
+def test_empty_rows_never_declare_closed():
+    assert probe.evaluate_market_closed([])["closed"] is False
+
+
+def test_zero_volume_response_is_not_treated_as_holiday():
+    """거래량이 0으로만 내려오는 응답 이상은 휴장 근거가 아니다(fail-open)."""
+    rows = [_closed_row(f"00{i:04d}", stale_volume=0) for i in range(30)]
+    verdict = probe.evaluate_market_closed(rows)
+    assert verdict["closed"] is False
+    assert verdict["reason"] == "VOLUME_NOT_STALE"
+
+
+def test_expected_quantity_present_blocks_closed_verdict():
+    """예상체결수량이 하나라도 있으면 동시호가가 돈 것이다."""
+    rows = [_closed_row(f"00{i:04d}") for i in range(29)]
+    live = _closed_row("009999")
+    live["intr_antc_vol"] = "1000"
+    rows.append(live)
+    verdict = probe.evaluate_market_closed(rows)
+    assert verdict["closed"] is False
+    assert verdict["reason"] == "EXPECTED_QTY_PRESENT"
+
+
+def test_verdict_carries_evidence_for_the_log():
+    rows = [_closed_row(f"00{i:04d}") for i in range(30)]
+    verdict = probe.evaluate_market_closed(rows)
+    assert verdict["total_count"] == 30
+    assert verdict["hour_cls_codes"] == ["0"]
+    assert verdict["expected_qty_zero_count"] == 30
+    assert verdict["median_acml_vol"] == 5_000_000
+
+
+# 실제 응답 회귀 — 2026-08-17(광복절 대체공휴일) / 2026-08-18(정상 개장) 장전
+# 멀티시세에서 그대로 뽑은 12행이다. 합성 픽스처가 실제 스키마와 어긋나면
+# 판정기가 통과해도 운영에서 안 걸린다.
+
+_REAL_HOLIDAY_ROWS_20260817 = [
+    {"inter_shrn_iscd": "001210", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "23913143"},
+    {"inter_shrn_iscd": "005930", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "21669476"},
+    {"inter_shrn_iscd": "088350", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "14537788"},
+    {"inter_shrn_iscd": "073240", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "11897318"},
+    {"inter_shrn_iscd": "002990", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "10000380"},
+    {"inter_shrn_iscd": "092200", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "6544969"},
+    {"inter_shrn_iscd": "006340", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "5674735"},
+    {"inter_shrn_iscd": "005360", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "5512875"},
+    {"inter_shrn_iscd": "007110", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "4982802"},
+    {"inter_shrn_iscd": "047040", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "4858982"},
+    {"inter_shrn_iscd": "014160", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "4600312"},
+    {"inter_shrn_iscd": "000660", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "4520990"},
+]
+
+_REAL_TRADING_ROWS_20260818 = [
+    {"inter_shrn_iscd": "002820", "hour_cls_code": "B", "intr_antc_vol": "2526", "acml_vol": "22700"},
+    {"inter_shrn_iscd": "001520", "hour_cls_code": "B", "intr_antc_vol": "15834", "acml_vol": "10000"},
+    {"inter_shrn_iscd": "088350", "hour_cls_code": "B", "intr_antc_vol": "62862", "acml_vol": "6320"},
+    {"inter_shrn_iscd": "092200", "hour_cls_code": "B", "intr_antc_vol": "41810", "acml_vol": "4745"},
+    {"inter_shrn_iscd": "006340", "hour_cls_code": "B", "intr_antc_vol": "28392", "acml_vol": "2715"},
+    {"inter_shrn_iscd": "009830", "hour_cls_code": "B", "intr_antc_vol": "24154", "acml_vol": "2182"},
+    {"inter_shrn_iscd": "028670", "hour_cls_code": "B", "intr_antc_vol": "21532", "acml_vol": "2001"},
+    {"inter_shrn_iscd": "001740", "hour_cls_code": "B", "intr_antc_vol": "9924", "acml_vol": "1961"},
+    {"inter_shrn_iscd": "001550", "hour_cls_code": "B", "intr_antc_vol": "6934", "acml_vol": "1700"},
+    {"inter_shrn_iscd": "010690", "hour_cls_code": "B", "intr_antc_vol": "7374", "acml_vol": "1665"},
+    {"inter_shrn_iscd": "003350", "hour_cls_code": "B", "intr_antc_vol": "4942", "acml_vol": "1526"},
+    {"inter_shrn_iscd": "047040", "hour_cls_code": "B", "intr_antc_vol": "26535", "acml_vol": "1411"},
+]
+
+
+def test_real_20260817_holiday_response_is_detected():
+    verdict = probe.evaluate_market_closed(_REAL_HOLIDAY_ROWS_20260817)
+    assert verdict["closed"] is True
+    assert verdict["reason"] == "STALE_SESSION"
+
+
+def test_real_20260818_trading_response_is_not_flagged():
+    assert probe.evaluate_market_closed(_REAL_TRADING_ROWS_20260818)["closed"] is False
+
+
+@pytest.mark.asyncio
+async def test_prepare_flags_market_closed_and_records_evidence(monkeypatch, tmp_path):
+    """장전 프로브가 휴장을 판정하고 근거를 파일에 남긴다.
+
+    시장을 나눠 재면 각 시장 응답이 표본 하한(10행)에 못 미쳐 판정을 놓친다.
+    두 시장을 합쳐 한 표본으로 봐야 한다.
+    """
+
+    class FixedDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 8, 17, 8, 59, 45, tzinfo=probe.KST)
+
+    monkeypatch.setenv("KIS_MODE", "PAPER")
+    monkeypatch.setenv("PAPER_FAST_PROBE", "1")
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    monkeypatch.setattr(probe, "datetime", FixedDateTime)
+    probe._prepared_tickers = []
+
+    def closed_rows(prefix: str) -> list[dict]:
+        return [
+            {
+                "inter_shrn_iscd": f"{prefix}{i:04d}",
+                "inter_kor_isnm": f"종목{i}",
+                "inter2_prpr": "10000",
+                "inter2_prdy_clpr": "10000",
+                "inter2_askp": "10000",
+                "hour_cls_code": "0",
+                "intr_antc_vol": "0",
+                "prdy_ctrt": "1.5",
+                "acml_vol": "5000000",
+            }
+            for i in range(6)
+        ]
+
+    ranking = [_ranking_row(f"00{i:04d}", f"종목{i}", 10000) for i in range(6)]
+    get = AsyncMock(
+        side_effect=[
+            {"rt_cd": "0", "msg_cd": "OK", "output": ranking},
+            {"rt_cd": "0", "msg_cd": "OK", "output": closed_rows("00")},
+            {"rt_cd": "0", "msg_cd": "OK", "output": ranking},
+            {"rt_cd": "0", "msg_cd": "OK", "output": closed_rows("01")},
+        ]
+    )
+    monkeypatch.setattr(probe.kis_rest, "get", get)
+
+    await probe.prepare()
+
+    assert probe.market_closed_detected() is True
+    verdict = probe.get_market_closed_verdict()
+    assert verdict["reason"] == "STALE_SESSION"
+    assert verdict["total_count"] == 12
+
+    path = next(tmp_path.glob("*.jsonl"))
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    events = [record["event"] for record in records]
+    assert "PAPER_FAST_PROBE_MARKET_CLOSED" in events
+    assert records[-1]["market_closed"]["closed"] is True
+
+
+@pytest.mark.asyncio
+async def test_prepare_resets_stale_closed_verdict_between_days(monkeypatch, tmp_path):
+    """어제 휴장 판정이 남아 오늘 거래를 막으면 안 된다."""
+
+    class FixedDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 8, 18, 8, 59, 45, tzinfo=probe.KST)
+
+    monkeypatch.setenv("KIS_MODE", "PAPER")
+    monkeypatch.setenv("PAPER_FAST_PROBE", "1")
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    monkeypatch.setattr(probe, "datetime", FixedDateTime)
+    probe._last_closed_verdict = {"closed": True, "reason": "STALE_SESSION"}
+
+    ranking = [_ranking_row("006340", "대원전선", 14400)]
+    multi = [_multi_row("006340", "대원전선", 14400, 13730, expected_qty=300000)]
+    get = AsyncMock(
+        side_effect=[
+            {"rt_cd": "0", "msg_cd": "OK", "output": ranking},
+            {"rt_cd": "0", "msg_cd": "OK", "output": multi},
+            {"rt_cd": "0", "msg_cd": "OK", "output": ranking},
+            {"rt_cd": "0", "msg_cd": "OK", "output": multi},
+        ]
+    )
+    monkeypatch.setattr(probe.kis_rest, "get", get)
+
+    await probe.prepare()
+
+    assert probe.market_closed_detected() is False
+
+
+def _write_shadow_day(
+    directory, date: str, *, ts: str, closed: bool = False, rank1_match: bool = True
+) -> None:
+    """검증 집계가 하루로 세는 최소 기록(OPEN_DONE + SHADOW_COMPARE)을 만든다."""
+    records = []
+    if closed:
+        rows = [
+            {
+                "inter_shrn_iscd": f"00{i:04d}",
+                "hour_cls_code": "0",
+                "intr_antc_vol": "0",
+                "acml_vol": "5000000",
+            }
+            for i in range(12)
+        ]
+        records.append(
+            {
+                "event": "PAPER_FAST_PROBE_OPEN_MULTI",
+                "ts": f"{ts}+09:00",
+                "response": {"output": rows},
+            }
+        )
+    records.append(
+        {
+            "event": "PAPER_FAST_PROBE_OPEN_DONE",
+            "ts": f"{ts}+09:00",
+            "quality": {"ok": True, "reason": "COMPLETE"},
+        }
+    )
+    records.append(
+        {
+            "event": "PAPER_FAST_SHADOW_COMPARE",
+            "ts": f"{ts}+09:00",
+            "rank1_match": rank1_match,
+            "top3_overlap_count": 1,
+        }
+    )
+    (directory / f"{date}.jsonl").write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("shadow_flag", ["1"])
+def test_shadow_summary_excludes_days_the_market_was_closed(
+    monkeypatch, tmp_path, shadow_flag
+):
+    """휴장일을 검증일로 세면 10일 게이트가 실제보다 빨리 차 버린다.
+
+    2026-08-17(대체공휴일)은 감지 로직이 붙기 전에 기록돼 정상일처럼 남아 있다.
+    집계도 같은 판정기로 다시 걸러야 과거 기록이 계수를 부풀리지 않는다.
+    """
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    monkeypatch.setenv("PAPER_FAST_SHADOW", shadow_flag)
+    _write_shadow_day(tmp_path, "20260814", ts="2026-08-14T09:00:01")
+    _write_shadow_day(tmp_path, "20260817", ts="2026-08-17T09:00:01", closed=True)
+    _write_shadow_day(tmp_path, "20260818", ts="2026-08-18T09:00:01")
+
+    summary = probe.shadow_validation_summary()
+
+    assert summary["observed_dates"] == ["20260814", "20260818"]
+    assert summary["observed_days"] == 2
+    assert summary["skipped_closed_days"] == ["20260817"]
+
+
+def test_shadow_summary_counts_normal_days_unchanged(monkeypatch, tmp_path):
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    monkeypatch.setenv("PAPER_FAST_SHADOW", "1")
+    _write_shadow_day(tmp_path, "20260819", ts="2026-08-19T09:00:01")
+    _write_shadow_day(tmp_path, "20260820", ts="2026-08-20T09:00:01")
+
+    summary = probe.shadow_validation_summary()
+
+    assert summary["observed_days"] == 2
+    assert summary["skipped_closed_days"] == []

@@ -2264,3 +2264,73 @@ async def test_main_exits_and_releases_pid_when_ui_server_fails(monkeypatch):
     main.db.close.assert_awaited_once_with()
     main.kis_rest.close_client.assert_awaited_once_with()
     drain_audits.assert_awaited_once_with()
+
+
+# ── 모의투자 휴장일 감지 ────────────────────────────────────────────────
+#
+# CTCA0903R(국내휴장일조회)이 모의투자 미지원이라 PAPER 는 평일 가드밖에 없었다.
+# 2026-08-17(광복절 대체공휴일, 월)에 F1 이 60종목을 조회하고 주문까지 전송했고,
+# shadow 검증일 계수까지 오염됐다. 장전 프로브가 이를 08:59:45 에 막아야 한다.
+
+
+async def test_probe_market_closed_marks_the_day_and_skips_later_jobs(monkeypatch):
+    monkeypatch.setattr(main.paper_fast_probe, "prepare", AsyncMock(return_value=[]))
+    monkeypatch.setattr(main.paper_fast_probe, "market_closed_detected", lambda: True)
+    notify = AsyncMock()
+    monkeypatch.setattr(main.notifier, "send", notify)
+
+    await main.job_paper_fast_probe()
+
+    assert main._is_market_closed_today() is True
+    assert state_mod.get().day_skip is True
+    assert state_mod.get().close_reason == "MARKET_CLOSED"
+    notify.assert_awaited_once()
+
+    # 뒤따르는 F1 은 프로브도 f1_filter 도 건드리지 않고 빠져야 한다.
+    observe = AsyncMock(return_value=[])
+    legacy = AsyncMock(return_value=[])
+    monkeypatch.setattr(main.paper_fast_probe, "observe_open_boundary", observe)
+    monkeypatch.setattr(main.f1_filter, "run", legacy)
+
+    await main.job_f1()
+
+    observe.assert_not_awaited()
+    legacy.assert_not_awaited()
+
+
+async def test_probe_open_market_leaves_the_day_untouched(monkeypatch):
+    monkeypatch.setattr(main.paper_fast_probe, "prepare", AsyncMock(return_value=["005930"]))
+    monkeypatch.setattr(main.paper_fast_probe, "market_closed_detected", lambda: False)
+    notify = AsyncMock()
+    monkeypatch.setattr(main.notifier, "send", notify)
+
+    await main.job_paper_fast_probe()
+
+    assert main._is_market_closed_today() is False
+    assert state_mod.get().day_skip is False
+    notify.assert_not_awaited()
+
+
+async def test_probe_failure_never_marks_the_day_closed(monkeypatch):
+    """프로브가 터진 것과 휴장은 다르다. 예외를 휴장으로 읽으면 거래일을 잃는다."""
+    monkeypatch.setattr(
+        main.paper_fast_probe, "prepare", AsyncMock(side_effect=RuntimeError("boom"))
+    )
+    # 직전 실행의 판정이 남아 있어도 이번 실패에 끌어다 쓰면 안 된다.
+    monkeypatch.setattr(main.paper_fast_probe, "market_closed_detected", lambda: True)
+
+    await main.job_paper_fast_probe()
+
+    assert main._is_market_closed_today() is False
+    assert state_mod.get().day_skip is False
+
+
+async def test_market_closed_is_marked_once_per_day(monkeypatch):
+    """08:29 재확인 등으로 여러 번 불려도 알림은 한 번만 나가야 한다."""
+    notify = AsyncMock()
+    monkeypatch.setattr(main.notifier, "send", notify)
+
+    await main._mark_market_closed("20260817", source="FAST_PROBE")
+    await main._mark_market_closed("20260817", source="HOLIDAY_API")
+
+    assert notify.await_count == 1
