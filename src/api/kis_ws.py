@@ -135,6 +135,11 @@ def _parse_tick(raw: str) -> dict | None:
             "qty": qty,
             "exchange_time": exchange_time,
             "source_ts": _exchange_iso(exchange_time),
+            # 해석하지 않은 필드까지 순서 그대로 넘긴다. 체결강도·체결구분·
+            # 최우선호가 등의 인덱스는 KIS 공식 명세로 확인되기 전까지 해석하지
+            # 않지만, 버린 필드는 나중에 복원할 수 없으므로 캡처에는 남긴다.
+            # 매매 판단 경로는 이 값을 읽지 않는다.
+            "raw": fields,
         }
     except Exception:
         return None

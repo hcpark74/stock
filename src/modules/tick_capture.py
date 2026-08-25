@@ -29,7 +29,8 @@ from src.utils.logger import log
 KST = ZoneInfo("Asia/Seoul")
 
 WRITER_VERSION = "tick-writer-1"
-SCHEMA_VERSION = "tick-schema-1"
+# tick-schema-2: 미해석 WS 원시 필드 `raw` 추가. tick-schema-1 행에는 없다.
+SCHEMA_VERSION = "tick-schema-2"
 
 STRATEGY_TICK_DIR = os.getenv("STRATEGY_TICK_DIR", "data/strategy_ticks")
 _ENABLED = os.getenv("STRATEGY_TICK_CAPTURE_ENABLED", "1") == "1"
@@ -306,6 +307,9 @@ class TickCapture:
             "qty": tick.get("qty"),
             "source": source,
             "valid": tick.get("valid"),
+            # 미해석 WS 원시 필드. 공식 명세로 인덱스가 확인되면 과거분까지
+            # 소급 해석할 수 있다. REST 백업 틱에는 없으므로 None.
+            "raw": tick.get("raw"),
         }
         fh = self._fh_for(_hour_of(str(received_at)))
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")

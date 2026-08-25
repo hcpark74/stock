@@ -756,6 +756,9 @@ async def _handle_price_tick(
             "source": source,
             "valid": ts_valid,
             "ticker": ticker,
+            # 미해석 원시 필드(WS만 존재, REST 백업은 None). 관측 전용이며
+            # 청산 판단은 이 값을 읽지 않는다.
+            "raw": meta.get("raw"),
         })
     except Exception:  # noqa: BLE001 — 캡처는 관측 전용, 절대 전파하지 않는다
         pass
