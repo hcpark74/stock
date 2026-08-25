@@ -226,12 +226,24 @@ TELEGRAM_CHAT_ID=your_chat_id
 
 ### 3. 실행
 
+저장소 폴더의 **`stock.bat`을 더블클릭**하세요. 가상환경, `.env`, 실행 모드,
+중복 실행, 화면 포트를 차례로 점검한 뒤 실행합니다. 문제가 있으면 원인과
+해결 명령어를 화면에 보여주고 멈춥니다.
+
+실계좌(`REAL`) 모드일 때는 실행 전에 한 번 더 확인을 받습니다.
+
+로그는 창에 실시간으로 흐르면서 `data\logs\launcher_<날짜>_<시각>.log`에도
+남습니다. 중지하려면 창에서 Ctrl+C를 누르세요.
+
+명령어로 실행하려면 다음과 같이 합니다.
+
 ```powershell
 .\.venv\Scripts\Activate.ps1
 python main.py
 ```
 
-안전 재시작은 포지션과 미해결 주문이 없을 때만 실행됩니다.
+이미 실행 중인 봇을 재시작할 때는 `stock.bat`이 아니라 아래를 쓰세요. 포지션과
+미해결 주문이 없을 때만 실행됩니다.
 
 ```powershell
 .\scripts\restart_main.ps1 -WhatIf

@@ -21,7 +21,6 @@ $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $venvPython = Join-Path $repoRoot ".venv\Scripts\python.exe"
 $mainScript = Join-Path $repoRoot "main.py"
 $envPath = Join-Path $repoRoot ".env"
-$pidPath = Join-Path $repoRoot "main.pid"
 $logDir = Join-Path $repoRoot "data\logs"
 
 # 장 시간 안내용 상수. src/schedule_times.py의 값을 옮겨 적었다.
@@ -172,24 +171,27 @@ if ($envMap.ContainsKey("UI_PORT")) {
     }
 }
 
-function Get-RunningMain([string]$PidFile, [string]$ExpectedPython) {
-    if (-not (Test-Path -LiteralPath $PidFile -PathType Leaf)) { return $null }
-    $raw = (Get-Content -LiteralPath $PidFile -Raw).Trim()
-    $processId = 0
-    if (-not [int]::TryParse($raw, [ref]$processId)) { return $null }
-    if ($processId -le 0) { return $null }
-    $proc = Get-CimInstance Win32_Process `
-        -Filter "ProcessId = $processId" -ErrorAction SilentlyContinue
-    if (-not $proc) { return $null }
-    if (-not $proc.ExecutablePath) { return $null }
-    # PID는 재사용된다. 실행 파일이 이 저장소의 venv python인지 대조한다.
-    if ([System.IO.Path]::GetFullPath($proc.ExecutablePath) -ne $ExpectedPython) {
-        return $null
+function Get-RunningMain([string]$ExpectedPython) {
+    # main.py는 main.pid의 첫 바이트에 msvcrt 잠금을 건다(main.py의
+    # _try_lock_pid_file). 실행 중에는 Get-Content가 잠금 위반으로 실패하므로
+    # PID 파일을 읽지 않는다. 대신 이 저장소의 venv python이 main.py를 돌리고
+    # 있는지로 판정한다. 실행 파일 경로까지 대조하므로 PID 재사용에도 안전하고,
+    # 런처를 거치지 않고 띄운 봇도 잡아낸다.
+    $candidates = Get-CimInstance Win32_Process `
+        -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue
+    foreach ($proc in $candidates) {
+        if (-not $proc.ExecutablePath) { continue }
+        if ([System.IO.Path]::GetFullPath($proc.ExecutablePath) -ne $ExpectedPython) {
+            continue
+        }
+        if ($proc.CommandLine -and $proc.CommandLine -like "*main.py*") {
+            return $proc
+        }
     }
-    return $proc
+    return $null
 }
 
-$running = Get-RunningMain $pidPath $venvPython
+$running = Get-RunningMain $venvPython
 if ($running) {
     Write-Host ""
     Write-Host "  이미 실행 중입니다." -ForegroundColor Yellow
