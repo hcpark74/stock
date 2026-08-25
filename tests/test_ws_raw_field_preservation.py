@@ -135,12 +135,13 @@ async def test_f4_forwards_raw_from_ws_tick_to_capture(monkeypatch) -> None:
     from src.modules import f4_tracking
 
     captured = {}
-    monkeypatch.setattr(f4_tracking, "_price_observation_active", lambda: True)
+    monkeypatch.setattr(f4_tracking, "_price_observation_active", lambda *a, **k: True)
     monkeypatch.setattr(f4_tracking.live, "push_tick", lambda *a, **k: None)
     monkeypatch.setattr(f4_tracking.tick_capture, "enqueue",
                         lambda row: captured.update(row))
     monkeypatch.setattr(f4_tracking.state, "get",
-                        lambda: type("S", (), {"position_status": "CLOSED"})())
+                        lambda: type("S", (), {"position_status": "CLOSED",
+                                               "target_ticker": "005930"})())
 
     tick = kis_ws._parse_tick(_cnt_frame(extra=["A", "B"]))
     await f4_tracking._handle_price_tick(
@@ -155,12 +156,13 @@ async def test_f4_rest_tick_has_no_raw(monkeypatch) -> None:
     from src.modules import f4_tracking
 
     captured = {}
-    monkeypatch.setattr(f4_tracking, "_price_observation_active", lambda: True)
+    monkeypatch.setattr(f4_tracking, "_price_observation_active", lambda *a, **k: True)
     monkeypatch.setattr(f4_tracking.live, "push_tick", lambda *a, **k: None)
     monkeypatch.setattr(f4_tracking.tick_capture, "enqueue",
                         lambda row: captured.update(row))
     monkeypatch.setattr(f4_tracking.state, "get",
-                        lambda: type("S", (), {"position_status": "CLOSED"})())
+                        lambda: type("S", (), {"position_status": "CLOSED",
+                                               "target_ticker": "005930"})())
 
     await f4_tracking._handle_price_tick(
         10300.0, "005930", f4_tracking.SpikeFilter(),

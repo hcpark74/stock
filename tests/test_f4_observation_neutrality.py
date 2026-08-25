@@ -155,3 +155,74 @@ def test_capture_not_attached_without_target(monkeypatch):
     """종목이 없으면 붙일 대상이 없다."""
     _use(monkeypatch, _State(target_ticker=None, position_status="IDLE"))
     assert f4_tracking._should_attach_capture(f4_tracking.state.get()) is False
+
+
+# ── 종목 교체 방어 ───────────────────────────────────────────────────
+#
+# 관측이 F2 잠금 시점부터 시작되면서, F3가 후보를 교체할 때
+# (f3_entry.py:764 `s.target_ticker = picked["ticker"]`) 이미 떠 있는 구독이
+# 낡은 종목을 가리키게 됐다. 낡은 구독을 그대로 두면 다른 종목의 가격으로
+# 손절·트레일링을 판정한다. SpikeFilter는 ticker를 로깅에만 쓰므로 걸러주지
+# 않는다.
+
+
+def test_subscription_stops_when_target_switches(monkeypatch):
+    """F3가 후보를 바꾸면 낡은 구독은 끝나야 한다(재구독 유도)."""
+    _use(monkeypatch, _State(target_ticker="000660", position_status="ENTERING"))
+    assert f4_tracking._observation_should_continue("005930", NOON) is False
+
+
+def test_subscription_continues_for_current_target(monkeypatch):
+    """종목이 그대로면 구독을 유지한다."""
+    _use(monkeypatch, _State(target_ticker="005930", position_status="ENTERING"))
+    assert f4_tracking._observation_should_continue("005930", NOON) is True
+
+
+def test_subscription_stops_when_observation_window_closes(monkeypatch):
+    """관측 창이 닫히면 종목이 같아도 끝난다."""
+    _use(monkeypatch, _State(target_ticker="005930", position_status="IDLE"))
+    assert f4_tracking._observation_should_continue("005930", EVENING) is False
+
+
+async def test_stale_ticker_tick_never_reaches_stop_logic(monkeypatch):
+    """낡은 구독의 틱은 청산 판정·차트·캡처 어디에도 들어가지 않는다."""
+    calls = {"process": 0, "push": 0, "capture": 0}
+    st = _State(target_ticker="000660", position_status="HOLDING")
+    _use(monkeypatch, st)
+
+    async def _process(*a, **k):
+        calls["process"] += 1
+
+    monkeypatch.setattr(f4_tracking, "_process_tick", _process)
+    monkeypatch.setattr(f4_tracking.live, "push_tick",
+                        lambda *a, **k: calls.__setitem__("push", calls["push"] + 1))
+    monkeypatch.setattr(f4_tracking.tick_capture, "enqueue",
+                        lambda *a, **k: calls.__setitem__("capture", calls["capture"] + 1))
+
+    accepted = await f4_tracking._handle_price_tick(
+        10_000.0, "005930", f4_tracking.SpikeFilter(), source="ws",
+    )
+    assert accepted is False
+    assert calls == {"process": 0, "push": 0, "capture": 0}
+
+
+async def test_current_ticker_tick_still_processed(monkeypatch):
+    """정상 종목의 틱은 그대로 흘러야 한다 — 가드가 과하게 막으면 안 된다."""
+    calls = {"process": 0, "push": 0}
+    st = _State(target_ticker="005930", position_status="HOLDING")
+    _use(monkeypatch, st)
+
+    async def _process(*a, **k):
+        calls["process"] += 1
+
+    monkeypatch.setattr(f4_tracking, "_process_tick", _process)
+    monkeypatch.setattr(f4_tracking.live, "push_tick",
+                        lambda *a, **k: calls.__setitem__("push", calls["push"] + 1))
+    monkeypatch.setattr(f4_tracking.tick_capture, "enqueue", lambda *a, **k: None)
+
+    accepted = await f4_tracking._handle_price_tick(
+        10_000.0, "005930", f4_tracking.SpikeFilter(), source="ws",
+    )
+    assert accepted is True
+    assert calls["process"] == 1
+    assert calls["push"] == 1

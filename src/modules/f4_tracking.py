@@ -193,6 +193,19 @@ def _price_observation_active(now: datetime | None = None) -> bool:
     return entry_at.astimezone(KST).date() == now.date() and now < cutoff
 
 
+def _observation_should_continue(ticker: str, now: datetime | None = None) -> bool:
+    """이 종목의 구독을 유지할지 여부.
+
+    관측이 F2 잠금 시점부터 시작되면서 F3의 후보 교체
+    (f3_entry.py의 ``s.target_ticker = picked["ticker"]``)가 이미 떠 있는
+    구독보다 나중에 일어날 수 있게 됐다. 낡은 구독을 그대로 두면 **다른 종목의
+    가격으로 손절·트레일링을 판정한다** — SpikeFilter는 ticker를 로깅에만
+    쓰므로 걸러주지 않는다. 종목이 바뀌면 구독을 끝내고 run_forever가 새 종목으로
+    다시 붙게 한다.
+    """
+    return _price_observation_active(now) and state.get().target_ticker == ticker
+
+
 def _rest_backup_allowed(position_status: str) -> bool:
     """미보유 구간에서 REST 백업 폴링을 억제한다.
 
@@ -492,7 +505,7 @@ async def run() -> None:
 
     ws_task = asyncio.create_task(kis_ws.subscribe(
         ticker, on_tick,
-        stop_if=lambda: not _price_observation_active(),
+        stop_if=lambda: not _observation_should_continue(ticker),
         on_connection_change=on_connection_change,
     ))
     ws_health_task = asyncio.create_task(
@@ -784,7 +797,9 @@ async def _handle_price_tick(
     관측 창이 열려 있으면 가격은 저장하되, 주문 가능 로직과 VI 처리는
     HOLDING 상태에서만 실행한다. 처리했으면 True, 관측 종료면 False.
     """
-    if not _price_observation_active():
+    # 관측 창과 종목 일치를 함께 본다. 낡은 구독의 틱이 다른 종목의 손절
+    # 판정·차트·캡처로 흘러들지 않게 한다.
+    if not _observation_should_continue(ticker):
         return False
 
     live.push_tick(price, ticker=ticker)

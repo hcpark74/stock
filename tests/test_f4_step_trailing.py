@@ -1109,7 +1109,7 @@ async def test_ws_tick_after_close_only_records_price(monkeypatch):
     vi_watch = MagicMock()
     vi_watch.on_price = AsyncMock()
 
-    monkeypatch.setattr(f4, "_price_observation_active", lambda: True)
+    monkeypatch.setattr(f4, "_price_observation_active", lambda *a, **k: True)
     monkeypatch.setattr(f4, "_process_tick", process_tick)
     monkeypatch.setattr(f4.live, "push_tick", push_tick)
 
@@ -1133,7 +1133,7 @@ async def test_ws_tick_outside_observation_is_ignored(monkeypatch):
 
     process_tick = AsyncMock()
     push_tick = MagicMock()
-    monkeypatch.setattr(f4, "_price_observation_active", lambda: False)
+    monkeypatch.setattr(f4, "_price_observation_active", lambda *a, **k: False)
     monkeypatch.setattr(f4, "_process_tick", process_tick)
     monkeypatch.setattr(f4.live, "push_tick", push_tick)
 
