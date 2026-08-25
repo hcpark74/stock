@@ -108,3 +108,22 @@ def test_strategy_fingerprint_excludes_secrets(monkeypatch):
         assert release.strategy_fingerprint() == baseline
     finally:
         release.strategy_fingerprint.cache_clear()
+
+
+def test_strategy_fingerprint_ignores_launcher_env(monkeypatch):
+    """stock.bat 런처가 설정하는 환경변수는 지문을 바꾸지 않아야 한다.
+
+    런처(scripts/start_main.ps1)는 PYTHONUTF8/PYTHONUNBUFFERED만 설정한다.
+    여기에 전략 환경변수를 추가하면 지문이 바뀌어 PAPER 실적이 리셋된다.
+    """
+    monkeypatch.delenv("PYTHONUTF8", raising=False)
+    monkeypatch.delenv("PYTHONUNBUFFERED", raising=False)
+    release.strategy_fingerprint.cache_clear()
+    try:
+        baseline = release.strategy_fingerprint()
+        monkeypatch.setenv("PYTHONUTF8", "1")
+        monkeypatch.setenv("PYTHONUNBUFFERED", "1")
+        release.strategy_fingerprint.cache_clear()
+        assert release.strategy_fingerprint() == baseline
+    finally:
+        release.strategy_fingerprint.cache_clear()
