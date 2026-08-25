@@ -219,9 +219,7 @@ function applyStatus(d) {
       trackingStopBtn.textContent = _trackingStopPending
         ? '종료 중…'
         : manuallyStopped ? '추적 종료됨' : trackingActive ? '추적 종료' : '추적 완료';
-      trackingStopBtn.title = trackingActive
-        ? '매도 후 가격 관측을 즉시 종료합니다. 기존 차트 데이터는 유지됩니다.'
-        : '매도 후 가격 관측이 종료되었습니다.';
+      trackingStopBtn.title = trackingStopTooltip(trackingActive);
     }
   }
 
@@ -1468,9 +1466,38 @@ async function loadStatus() {
   } catch(e){}
 }
 
+function trackingStopTooltip(trackingActive) {
+  return trackingActive
+    ? '매도 후 가격 관측을 즉시 종료합니다. 남은 시간의 가격 수집이 중단되며 오늘은 되돌릴 수 없습니다.'
+    : '매도 후 가격 관측이 종료되었습니다.';
+}
+
+// 추적 종료 확인 문구. 관측을 그날 내내 되돌릴 수 없게 멈추므로, 남은 수집
+// 시간과 비가역성을 안심 문구보다 먼저 말한다. 실제로 이 버튼 때문에
+// 20260821·20260824의 가격 경로가 중간에 끊겨 검증 표본에서 빠졌다.
+function trackingStopConfirmText(nowMin, sessionEndMin) {
+  const p2 = n => String(n).padStart(2, '0');
+  const endLabel = p2(Math.floor(sessionEndMin / 60)) + ':' + p2(sessionEndMin % 60);
+  const left = Math.max(0, Math.round(sessionEndMin - nowMin));
+  if(left <= 0) {
+    return '매도 후 가격 추적을 종료할까요?\n\n'
+      + `관측 창(${endLabel})이 이미 지나 남은 수집 시간이 없습니다.\n\n`
+      + '이미 수집된 데이터와 차트는 유지됩니다.';
+  }
+  const h = Math.floor(left / 60), m = left % 60;
+  const span = h ? (m ? `${h}시간 ${m}분` : `${h}시간`) : `${m}분`;
+  return '매도 후 가격 추적을 종료할까요?\n\n'
+    + `남은 관측 시간 ${span}(${endLabel}까지)이 수집되지 않습니다.\n`
+    + '수집된 가격 경로는 전략 검증 데이터로 쓰이며,\n'
+    + '한 번 종료하면 오늘은 다시 시작할 수 없습니다.\n\n'
+    + '이미 수집된 데이터와 차트는 유지됩니다.';
+}
+
 async function stopPostCloseTracking() {
   if(_trackingStopPending || _lastStatus?.position_status !== 'CLOSED') return;
-  if(!confirm('매도 후 가격 추적을 종료할까요?\n이미 수집된 차트 데이터는 유지됩니다.')) return;
+  const kst = new Date(Date.now() + 9 * 3600 * 1000);
+  const nowMin = kst.getUTCHours() * 60 + kst.getUTCMinutes();
+  if(!confirm(trackingStopConfirmText(nowMin, _sessionEndMin))) return;
 
   _trackingStopPending = true;
   applyStatus(_lastStatus);
