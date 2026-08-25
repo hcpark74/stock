@@ -1,0 +1,157 @@
+"""관측 계층 중립화 — 트랙 A의 포지션 상태에서 가격 관측을 분리한다.
+
+지금은 `_price_observation_active()`가 `state.get()`(트랙 A)을 읽어 A가
+HOLDING/CLOSED가 아니면 False를 반환한다. 그래서 A가 진입하지 않은 날에는
+WS 구독도 틱 방송도 일어나지 않고, 하필 "A는 못 샀는데 B는 살 수 있는 날"의
+데이터가 통째로 비어버린다.
+
+관측을 종목 확정 시점부터 열되, 매매 판단과 유량 프로파일은 건드리지 않는다.
+"""
+
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+import pytest
+
+from src.modules import f4_tracking
+
+KST = ZoneInfo("Asia/Seoul")
+
+TODAY = "20260825"
+NOON = datetime(2026, 8, 25, 12, 0, tzinfo=KST)
+EVENING = datetime(2026, 8, 25, 16, 0, tzinfo=KST)
+
+
+class _State:
+    def __init__(self, **kw):
+        self.trading_date = kw.get("trading_date", TODAY)
+        self.target_ticker = kw.get("target_ticker")
+        self.position_status = kw.get("position_status", "IDLE")
+        self.entry_at = kw.get("entry_at")
+        self.post_close_tracking_stopped = kw.get("post_close_tracking_stopped", False)
+        self.trade_id = kw.get("trade_id", 0)
+
+
+@pytest.fixture(autouse=True)
+def _no_capture(monkeypatch):
+    """캡처 비활성 기본값 — cutoff가 F4_POST_CLOSE_OBSERVE_UNTIL을 타게 한다."""
+    monkeypatch.setattr(f4_tracking.tick_capture, "is_active", lambda: False)
+    monkeypatch.setattr(f4_tracking.tick_capture, "active_ticker", lambda: None)
+
+
+def _use(monkeypatch, st):
+    monkeypatch.setattr(f4_tracking.state, "get", lambda: st)
+
+
+# ── (a) 관측 게이트 확장 ─────────────────────────────────────────────
+
+
+def test_observes_after_target_locked_even_without_entry(monkeypatch):
+    """A가 미진입(IDLE)이어도 종목이 확정됐으면 관측한다 — 이 파일의 핵심."""
+    _use(monkeypatch, _State(target_ticker="005930", position_status="IDLE"))
+    assert f4_tracking._price_observation_active(NOON) is True
+
+
+def test_observes_while_entering(monkeypatch):
+    """진입 시도 중에도 관측은 열려 있어야 한다."""
+    _use(monkeypatch, _State(target_ticker="005930", position_status="ENTERING"))
+    assert f4_tracking._price_observation_active(NOON) is True
+
+
+def test_no_observation_without_target(monkeypatch):
+    """종목이 없으면 관측할 대상이 없다."""
+    _use(monkeypatch, _State(target_ticker=None, position_status="IDLE"))
+    assert f4_tracking._price_observation_active(NOON) is False
+
+
+def test_no_observation_after_session_cutoff(monkeypatch):
+    """관측 창을 넘기면 미진입 상태에서도 닫힌다(밤새 도는 것 방지)."""
+    _use(monkeypatch, _State(target_ticker="005930", position_status="IDLE"))
+    assert f4_tracking._price_observation_active(EVENING) is False
+
+
+def test_no_observation_for_stale_trading_date(monkeypatch):
+    """지난 거래일 상태가 남아 있으면 관측하지 않는다."""
+    _use(monkeypatch, _State(target_ticker="005930", position_status="IDLE",
+                             trading_date="20260824"))
+    assert f4_tracking._price_observation_active(NOON) is False
+
+
+# ── 보존 불변식 (기존 동작을 깨뜨리지 않는다) ────────────────────────
+
+
+def test_holding_observes_regardless_of_manual_stop(monkeypatch):
+    """보유 중에는 수동 종료 플래그가 관측을 끄지 못한다 — 손절 추적 보호."""
+    _use(monkeypatch, _State(target_ticker="005930", position_status="HOLDING",
+                             post_close_tracking_stopped=True))
+    assert f4_tracking._price_observation_active(NOON) is True
+
+
+def test_manual_stop_closes_observation_when_not_holding(monkeypatch):
+    """미보유 구간에서는 수동 종료가 관측을 닫는다."""
+    _use(monkeypatch, _State(target_ticker="005930", position_status="IDLE",
+                             post_close_tracking_stopped=True))
+    assert f4_tracking._price_observation_active(NOON) is False
+
+
+def test_closed_keeps_post_close_cutoff_when_capture_inactive(monkeypatch):
+    """CLOSED 경로는 기존 사후 관측 컷오프(기본 09:10)를 그대로 쓴다.
+
+    이 변경은 '미진입일 관측'만 연다. 청산 후 동작까지 바꾸면
+    test_f4_capture_wiring의 기존 계약이 깨진다.
+    """
+    _use(monkeypatch, _State(target_ticker="005930", position_status="CLOSED",
+                             entry_at="2026-08-25T09:05:00+09:00"))
+    assert f4_tracking._price_observation_active(NOON) is False
+
+
+def test_closed_after_cutoff_stops(monkeypatch):
+    """CLOSED + 창 종료 후에는 닫힌다."""
+    _use(monkeypatch, _State(target_ticker="005930", position_status="CLOSED",
+                             entry_at="2026-08-25T09:05:00+09:00"))
+    assert f4_tracking._price_observation_active(EVENING) is False
+
+
+def test_post_close_observation_active_still_requires_closed(monkeypatch):
+    """UI용 헬퍼는 CLOSED 전용이라는 의미를 유지해야 한다."""
+    _use(monkeypatch, _State(target_ticker="005930", position_status="IDLE"))
+    assert f4_tracking.post_close_observation_active(NOON) is False
+
+
+# ── (c) 유량 가드 ────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("status", ["IDLE", "ENTERING"])
+def test_rest_backup_suppressed_without_position(monkeypatch, status):
+    """보유가 없으면 보호할 손절이 없다. REST 폴링으로 유량을 태우지 않는다."""
+    _use(monkeypatch, _State(target_ticker="005930", position_status=status))
+    assert f4_tracking._rest_backup_allowed(status) is False
+
+
+@pytest.mark.parametrize("status", ["HOLDING", "EXITING"])
+def test_rest_backup_allowed_while_position_open(monkeypatch, status):
+    """보유·청산 중에는 기존대로 백업이 살아 있어야 한다."""
+    _use(monkeypatch, _State(target_ticker="005930", position_status=status))
+    assert f4_tracking._rest_backup_allowed(status) is True
+
+
+# ── (d) 거래 없는 날의 durable 캡처 ──────────────────────────────────
+
+
+def test_capture_attaches_without_trade_id(monkeypatch):
+    """거래가 없어도 종목이 확정됐으면 캡처를 붙인다 — 안 그러면 디스크에 안 남는다."""
+    _use(monkeypatch, _State(target_ticker="005930", position_status="IDLE"))
+    assert f4_tracking._should_attach_capture(f4_tracking.state.get()) is True
+
+
+def test_capture_attaches_when_holding_with_trade(monkeypatch):
+    """기존 경로(체결 후 부착)는 그대로 동작한다."""
+    _use(monkeypatch, _State(target_ticker="005930", position_status="HOLDING",
+                             trade_id=31))
+    assert f4_tracking._should_attach_capture(f4_tracking.state.get()) is True
+
+
+def test_capture_not_attached_without_target(monkeypatch):
+    """종목이 없으면 붙일 대상이 없다."""
+    _use(monkeypatch, _State(target_ticker=None, position_status="IDLE"))
+    assert f4_tracking._should_attach_capture(f4_tracking.state.get()) is False

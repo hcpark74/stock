@@ -132,17 +132,38 @@ def _get_observe_until() -> tuple[int, int]:
 
 
 def _price_observation_active(now: datetime | None = None) -> bool:
-    """Return whether F4 should keep collecting prices for the current trade."""
+    """확정된 종목의 가격을 계속 수집해야 하는지 반환한다.
+
+    관측은 트랙 A의 포지션이 아니라 "종목이 확정됐고 관측 창 안인가"로
+    결정된다. A가 진입하지 않은 날에도 가격 경로가 남아야 다른 전략 트랙과
+    사후 분석이 그날을 쓸 수 있다 — 하필 "A는 못 샀는데 B는 살 수 있는 날"이
+    두 전략을 비교하는 가장 의미 있는 날이다.
+
+    매매 판단은 이 함수와 무관하다. 청산 판정(_process_tick)은 호출부의
+    HOLDING 게이트 뒤에 그대로 남아 있다.
+    """
     global _invalid_entry_at_warned_value
     s = state.get()
     if s.position_status == "HOLDING":
-        return True
-    if s.position_status != "CLOSED" or not s.target_ticker or not s.entry_at:
-        return False
+        return True  # 보유 중엔 무조건 — 수동 종료도 손절 추적을 끄지 못한다
     if s.post_close_tracking_stopped:
+        return False
+    if not s.target_ticker:
         return False
 
     now = now or datetime.now(KST)
+
+    if s.position_status != "CLOSED":
+        # 미진입·진입중·청산중. 사후 관측 설정(F4_POST_CLOSE_OBSERVE_UNTIL)은
+        # "청산 이후"를 다루는 값이므로 여기 적용하지 않고 세션 종료까지 본다.
+        if s.trading_date and s.trading_date != now.strftime("%Y%m%d"):
+            return False  # 지난 거래일 잔여 상태로 관측을 되살리지 않는다
+        end_h, end_m = tick_capture.CAPTURE_UNTIL
+        return now < now.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+
+    # ── 이하 CLOSED 사후 관측: 기존 판정을 그대로 보존한다 ──
+    if not s.entry_at:
+        return False
     try:
         entry_at = datetime.fromisoformat(s.entry_at)
         if entry_at.tzinfo is None:
@@ -170,6 +191,29 @@ def _price_observation_active(now: datetime | None = None) -> bool:
         hour=cutoff_hm[0], minute=cutoff_hm[1], second=0, microsecond=0
     )
     return entry_at.astimezone(KST).date() == now.date() and now < cutoff
+
+
+def _rest_backup_allowed(position_status: str) -> bool:
+    """미보유 구간에서 REST 백업 폴링을 억제한다.
+
+    REST 백업의 목적은 WS 장애 시 손절 추적을 보호하는 것이다. 보유가 없으면
+    보호할 손절이 없다. 관측 창이 종목 확정 시점부터 열리면서 IDLE/ENTERING이
+    폴링 루프에 도달할 수 있게 됐는데, 그대로 두면 WS 장애 시 보유 등급
+    간격(F4_REST_POLL_INTERVAL_SEC=1.0)으로 폴링해 PAPER 초당 1건 예산을
+    통째로 소모하고 그날 A의 진입까지 막는다.
+    """
+    return position_status not in ("IDLE", "ENTERING")
+
+
+def _should_attach_capture(s: state.State) -> bool:
+    """durable 캡처를 붙일지 여부. 거래가 없는 날도 대상이다.
+
+    캡처는 trade_id를 Optional로 받고 price_path_manifests.trade_id도
+    nullable이므로, 체결이 없어도 (거래일, 종목, experiment_id)로 식별된다.
+    이 조건이 trade_id를 요구하면 A가 진입하지 않은 날의 가격 경로가 디스크에
+    전혀 남지 않는다.
+    """
+    return bool(s.target_ticker)
 
 
 def post_close_observation_active(now: datetime | None = None) -> bool:
@@ -335,8 +379,9 @@ async def run() -> None:
     시작 시점 상태가 CLOSED면(당일 거래 종료) 즉시 반환한다.
     """
     s = state.get()
-    # HOLDING 상태가 될 때까지 대기
-    while s.position_status not in ("HOLDING", "CLOSED"):
+    # 종목이 확정되거나 포지션이 열릴 때까지 대기. 종목만 잠겨도 관측을 시작해
+    # A가 진입하지 않는 날의 가격 경로를 확보한다.
+    while not (s.target_ticker or s.position_status in ("HOLDING", "CLOSED")):
         await asyncio.sleep(0.5)
         s = state.get()
 
@@ -352,16 +397,17 @@ async def run() -> None:
         await _run_dry_ticks(ticker, spike_filter)
         return
 
-    # 체결 종목의 durable 가격 경로 캡처에 idempotent하게 붙는다. F3가 체결
-    # 확정 시 이미 시작했으면 no-op이고, DB 복구된 HOLDING이면 여기서 이어쓴다.
-    if s.trade_id and s.position_status in ("HOLDING", "CLOSED"):
+    # durable 가격 경로 캡처에 idempotent하게 붙는다. F3가 체결 확정 시 이미
+    # 시작했으면 no-op이고, DB 복구된 HOLDING이면 여기서 이어쓴다. 체결이 없는
+    # 날에도 종목이 잠겼으면 붙어서 그날 가격 경로를 남긴다(trade_id=None).
+    if _should_attach_capture(s):
         try:
             from src.modules import baseline_experiment
 
             tick_capture.attach_or_resume(
                 datetime.now(KST).strftime("%Y%m%d"),
                 ticker,
-                s.trade_id,
+                s.trade_id or None,
                 baseline_experiment.active_experiment_id(),
                 s.entry_at,
             )
@@ -385,6 +431,8 @@ async def run() -> None:
         return (now_mono - last_ws_tick_at) >= F4_WS_STALE_SEC
 
     def should_poll_rest() -> bool:
+        if not _rest_backup_allowed(state.get().position_status):
+            return False
         if state.get().position_status == "CLOSED":
             if _capture_backup_active():
                 # 캡처용 저우선 백업(15:14까지). 주문 경로보다 항상 뒤로 밀린다.

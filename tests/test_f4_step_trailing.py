@@ -860,6 +860,9 @@ async def test_ws_health_monitor_suppresses_tick_idle_warnings_after_close(monke
 
     async def stop_after_sleep(_seconds):
         s.position_status = "IDLE"
+        # 관측은 더 이상 A의 포지션 상태에 묶여 있지 않다. 종목 잠금이 풀려야
+        # 관측 루프가 끝난다(일일 리셋 경로와 동일).
+        s.target_ticker = None
 
     monkeypatch.setattr(f4, "_OBSERVE_UNTIL", (9, 10))
     monkeypatch.setattr(f4.asyncio, "sleep", AsyncMock(side_effect=stop_after_sleep))
@@ -1197,6 +1200,9 @@ async def test_rest_backup_collects_after_close_without_running_stop_logic(monke
 
     async def stop_after_sleep(_seconds):
         s.position_status = "IDLE"
+        # 관측은 더 이상 A의 포지션 상태에 묶여 있지 않다. 종목 잠금이 풀려야
+        # 관측 루프가 끝난다(일일 리셋 경로와 동일).
+        s.target_ticker = None
 
     monkeypatch.setattr(f4, "datetime", FixedDateTime)
     monkeypatch.setattr(f4, "_OBSERVE_UNTIL", (9, 10))
@@ -1240,6 +1246,9 @@ async def test_rest_backup_is_disabled_by_default_after_close(monkeypatch):
     async def stop_after_sleep(seconds):
         assert seconds == 30.0
         s.position_status = "IDLE"
+        # 관측은 더 이상 A의 포지션 상태에 묶여 있지 않다. 종목 잠금이 풀려야
+        # 관측 루프가 끝난다(일일 리셋 경로와 동일).
+        s.target_ticker = None
 
     monkeypatch.setattr(f4, "datetime", FixedDateTime)
     monkeypatch.setattr(f4, "_OBSERVE_UNTIL", (9, 10))
