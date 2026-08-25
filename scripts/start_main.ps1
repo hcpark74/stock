@@ -258,3 +258,102 @@ if ($CheckOnly) {
     Write-Host ""
     exit 0
 }
+
+Write-Section "실행"
+
+New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+
+# 런처 로그는 실행마다 쌓인다. 최근 30개만 남긴다.
+# 새 파일을 곧 만들 것이므로 기존 29개까지만 남기고 지운다.
+Get-ChildItem -LiteralPath $logDir -Filter "launcher_*.log" -File `
+    -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -Skip 29 |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+
+$stamp = (Get-KstNow).ToString("yyyyMMdd_HHmmss")
+$consoleLog = Join-Path $logDir "launcher_$stamp.log"
+
+Write-Info "모드: $mode"
+Write-Info "화면: http://127.0.0.1:$uiPort"
+Write-Info "로그: $consoleLog"
+Write-Host ""
+Write-Host "  중지하려면 이 창에서 Ctrl+C를 누르세요." -ForegroundColor Yellow
+Write-Host ""
+
+# PYTHONUTF8/PYTHONUNBUFFERED는 _STRATEGY_ENV_PREFIXES 밖이라 지문에
+# 영향이 없다. 전략 환경변수(F1_~F5_, VI_, KIS_RATE_ 등)를 여기에
+# 추가하면 지문이 바뀌어 PAPER 실적이 리셋된다.
+$env:PYTHONUTF8 = "1"
+$env:PYTHONUNBUFFERED = "1"
+
+# main.py의 로그는 logging.StreamHandler() 기본값이라 stderr로 나온다.
+# Windows PowerShell 5.1은 네이티브 명령의 stderr를 NativeCommandError로
+# 감싸므로, $ErrorActionPreference="Stop"이면 첫 로그 줄에서 런처가 죽는다.
+# 실행 구간에서만 Continue로 낮추고 끝나면 되돌린다.
+$previousErrorAction = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+
+# PYTHONUTF8=1로 파이썬은 UTF-8을 내보내지만, PS 5.1은 콘솔 코드페이지
+# (기본 CP949)로 디코딩해 한글이 깨진다. 실행 구간에서만 UTF-8로 맞춘다.
+$previousOutputEncoding = [Console]::OutputEncoding
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
+# Tee-Object는 PS 5.1에서 -Encoding을 받지 못해 로그를 UTF-16으로 쓴다.
+# 사후 분석이 UTF-8 기준이므로 StreamWriter로 직접 tee한다. AutoFlush로
+# 화면과 파일이 같은 속도로 흐른다.
+$writer = [System.IO.StreamWriter]::new(
+    $consoleLog,
+    $false,
+    [System.Text.UTF8Encoding]::new($false)
+)
+$writer.AutoFlush = $true
+
+$exitCode = 0
+Push-Location -LiteralPath $repoRoot
+try {
+    # -u와 PYTHONUNBUFFERED로 버퍼링을 없애야 실시간으로 흘러간다.
+    # 2>&1로 트레이스백까지 파일에 남긴다. stderr 줄은 ErrorRecord로
+    # 들어오므로 문자열로 펴서 빨간 오류 서식과 위치 안내를 없앤다.
+    & $venvPython -u main.py 2>&1 | ForEach-Object {
+        $line = if ($_ -is [System.Management.Automation.ErrorRecord]) {
+            $_.ToString()
+        } else {
+            "$_"
+        }
+        Write-Host $line
+        $writer.WriteLine($line)
+    }
+    $exitCode = $LASTEXITCODE
+} finally {
+    Pop-Location
+    $writer.Dispose()
+    [Console]::OutputEncoding = $previousOutputEncoding
+    $ErrorActionPreference = $previousErrorAction
+}
+
+Write-Section "종료"
+
+$CTRL_C_EXIT = -1073741510  # 0xC000013A STATUS_CONTROL_C_EXIT
+
+if ($exitCode -eq 0) {
+    Write-Host "  정상 종료되었습니다." -ForegroundColor Green
+} elseif ($exitCode -eq $CTRL_C_EXIT) {
+    Write-Host "  Ctrl+C로 중단했습니다." -ForegroundColor Yellow
+} else {
+    Write-Host "  비정상 종료되었습니다 (종료 코드: $exitCode)" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  마지막 로그 15줄:" -ForegroundColor Yellow
+    Get-Content -LiteralPath $consoleLog -Tail 15 -ErrorAction SilentlyContinue |
+        ForEach-Object { Write-Host "    $_" }
+}
+
+Write-Host ""
+Write-Info "실행 로그: $consoleLog"
+Write-Info "이벤트 로그: $logDir\$((Get-KstNow).ToString('yyyyMMdd')).jsonl"
+Write-Host ""
+Write-Info "Ctrl+C로 중단하면 실행 로그의 마지막 몇 줄이 빠질 수 있습니다."
+Write-Info "사후 확인은 이벤트 로그(.jsonl)를 먼저 보세요."
+Write-Host ""
+
+exit $exitCode
