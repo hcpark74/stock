@@ -235,6 +235,13 @@ EVENT_LABELS = {
     "TICK_CAPTURE_MANIFEST_ERROR": "가격경로 manifest 오류(Tick Capture Manifest Error)",
     "TICK_CAPTURE_FINALIZE_ERROR": "가격경로 캡처 종료 오류(Tick Capture Finalize Error)",
     "TICK_CAPTURE_FINALIZED": "가격경로 캡처 최종화(Tick Capture Finalized)",
+    "TICK_CAPTURE_TARGET_SWITCHED": "가격경로 캡처 종목 전환(Tick Capture Target Switched)",
+    "TICK_CAPTURE_SWITCH_DRAIN_TIMEOUT": (
+        "가격경로 전환 마감 대기 초과(Tick Capture Switch Drain Timeout)"
+    ),
+    "TICK_CAPTURE_SWITCH_FINALIZE_SKIPPED": (
+        "가격경로 전환 마감 생략(Tick Capture Switch Finalize Skipped)"
+    ),
     "F4_SELL_ERROR": "F4 매도 오류(F4 Sell Error)",
     "F4_SELL_SUBMISSION_UNKNOWN": (
         "F4 매도 접수 여부 불명(F4 Sell Submission Unknown)"

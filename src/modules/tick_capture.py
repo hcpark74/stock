@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 from collections import deque
+from collections.abc import Awaitable
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -67,6 +68,7 @@ _VALID_REASONS = {
     "WS_LOSS",
     "INCOMPLETE_BEFORE_1515",
     "WRITER_ERROR",
+    "TARGET_SWITCHED",
 }
 
 
@@ -89,6 +91,7 @@ class TickCapture:
         experiment_id: str | None,
         entry_at: str | None,
         base_dir: str | Path = STRATEGY_TICK_DIR,
+        prior_finalize: Awaitable[object] | None = None,
     ) -> None:
         self.trade_date = trade_date
         self.ticker = ticker
@@ -117,6 +120,10 @@ class TickCapture:
         # 역전 검출용 마지막 정렬 기준 시각(거래소 시각 우선, 없으면 수신 시각).
         self._last_order_ts: str | None = None
         self._closed = False
+        # 같은 (거래일,종목)의 이전 인스턴스가 마감 중이면 그 flush를 기다린 뒤에만
+        # 복원 스캔을 돈다. 버퍼가 디스크에 없는 상태로 스캔하면 seq가 1부터 다시
+        # 매겨져 같은 chunk에 중복 행이 생긴다.
+        self._prior_finalize = prior_finalize
 
     # ── lifecycle ────────────────────────────────────────────────────
     def start(self) -> None:
@@ -147,8 +154,13 @@ class TickCapture:
             self._task = None
 
     async def _resume_off_loop(self) -> None:
-        """복원 스캔을 워커 스레드로 넘긴다. 실패해도 캡처를 멈추지 않는다."""
+        """복원 스캔을 워커 스레드로 넘긴다. 실패해도 캡처를 멈추지 않는다.
+
+        같은 종목의 선행 마감이 남아 있으면 먼저 기다린다. gzip 버퍼는 handle을
+        닫을 때 비워지므로, 기다리지 않으면 빈 파일을 읽고 seq를 0부터 다시 센다.
+        """
         try:
+            await self._await_prior_finalize()
             await asyncio.to_thread(self._resume_from_existing)
         except Exception as exc:  # noqa: BLE001 — 복원 실패가 캡처를 막지 않는다
             log(
@@ -159,6 +171,17 @@ class TickCapture:
             )
         finally:
             self._resumed = True
+
+    async def _await_prior_finalize(self) -> None:
+        """선행 인스턴스의 마감을 기다린다. 실패·취소는 복원을 막지 않는다."""
+        prior = self._prior_finalize
+        if prior is None:
+            return
+        self._prior_finalize = None
+        try:
+            await asyncio.shield(prior)  # type: ignore[arg-type]
+        except Exception:  # noqa: BLE001 — 선행 마감 실패는 그쪽에서 이미 기록
+            pass
 
     async def _await_resume(self) -> None:
         """복원이 끝날 때까지 기다린다(취소돼도 복원 자체는 완주시킨다).
@@ -432,6 +455,7 @@ class TickCapture:
             "PROCESS_SHUTDOWN",
             "WS_LOSS",
             "INCOMPLETE_BEFORE_1515",
+            "TARGET_SWITCHED",
         }
         if self._write_errors > 0:
             data_complete = 0
@@ -595,6 +619,57 @@ def active_ticker() -> str | None:
     return _capture.ticker if _capture is not None else None
 
 
+_switch_finalizers: set[asyncio.Task] = set()
+# 같은 종목으로 되돌아오는 전환(A→B→A)에서 새 인스턴스가 기다릴 선행 마감.
+_pending_switch_by_ticker: dict[str, asyncio.Task] = {}
+# 전환 마감 대기 상한. 종료 경로가 여기서 멈추면 DB close와 PID 해제가 함께 막혀
+# 다음 기동이 스테일 PID에 걸린다. 미완성 manifest가 멈춘 종료보다 낫다.
+SWITCH_DRAIN_TIMEOUT_SEC = 10.0
+
+
+def _finalize_detached(cap: TickCapture, reason: str) -> None:
+    """전환으로 떼어낸 캡처를 배경에서 마감한다. 진입 경로를 블로킹하지 않는다."""
+
+    async def _run() -> None:
+        try:
+            await cap.finalize(reason, reached_expected_close=False)
+        except Exception as exc:  # noqa: BLE001 — 마감 실패가 새 캡처를 막지 않는다
+            log(
+                "TICK_CAPTURE_FINALIZE_ERROR",
+                level="WARN",
+                ticker=cap.ticker,
+                error=repr(exc),
+            )
+
+    try:
+        task = asyncio.create_task(_run(), name=f"tick_capture_switch_{cap.ticker}")
+    except RuntimeError:
+        # 실행 중 루프가 없으면 시작 시 남긴 불완전 manifest가 증거로 남는다.
+        log(
+            "TICK_CAPTURE_SWITCH_FINALIZE_SKIPPED",
+            level="WARN",
+            ticker=cap.ticker,
+            reason=reason,
+        )
+        return
+    _switch_finalizers.add(task)
+    _pending_switch_by_ticker[cap.ticker] = task
+    task.add_done_callback(_switch_finalizers.discard)
+    task.add_done_callback(lambda t, tk=cap.ticker: _forget_pending_switch(tk, t))
+
+
+def _forget_pending_switch(ticker: str, task: asyncio.Task) -> None:
+    """더 최근 전환이 자리를 차지했으면 건드리지 않는다."""
+    if _pending_switch_by_ticker.get(ticker) is task:
+        _pending_switch_by_ticker.pop(ticker, None)
+
+
+async def drain_switch_finalizers() -> None:
+    """전환으로 예약된 마감을 모두 기다린다(프로세스 종료 정리용)."""
+    while _switch_finalizers:
+        await asyncio.gather(*list(_switch_finalizers), return_exceptions=True)
+
+
 def start(
     trade_date: str,
     ticker: str,
@@ -608,20 +683,37 @@ def start(
         return False
     try:
         if _capture is not None and _capture.ticker == ticker:
-            return True  # idempotent
-        if _capture is None:
-            _capture = TickCapture(
-                trade_date=trade_date,
-                ticker=ticker,
-                trade_id=trade_id,
-                experiment_id=experiment_id,
-                entry_at=entry_at,
-                base_dir=STRATEGY_TICK_DIR,
-            )
-            _capture.start()
-            log("TICK_CAPTURE_STARTED", level="INFO", ticker=ticker, trade_id=trade_id)
+            # idempotent — 같은 종목을 재시작하면 seq와 chunk가 끊긴다.
             return True
-        return False
+        if _capture is not None:
+            # F1이 잠근 종목과 F3 최종 선정·실제 체결 종목은 갈릴 수 있다. 낡은
+            # 캡처를 붙들고 있으면 enqueue 종목 필터가 실제 매매 종목의 틱을
+            # 전량 버리고, F4의 active_ticker 가드가 백업·finalize까지 막는다.
+            previous = _capture
+            _capture = None
+            log(
+                "TICK_CAPTURE_TARGET_SWITCHED",
+                level="WARN",
+                ticker=ticker,
+                previous_ticker=previous.ticker,
+                trade_id=trade_id,
+            )
+            _finalize_detached(previous, "TARGET_SWITCHED")
+        capture = TickCapture(
+            trade_date=trade_date,
+            ticker=ticker,
+            trade_id=trade_id,
+            experiment_id=experiment_id,
+            entry_at=entry_at,
+            base_dir=STRATEGY_TICK_DIR,
+            prior_finalize=_pending_switch_by_ticker.get(ticker),
+        )
+        capture.start()
+        # start()가 실패하면 배경 태스크 없는 인스턴스가 싱글턴에 남아 enqueue만
+        # 쌓인다. 기동에 성공한 뒤에만 배선한다.
+        _capture = capture
+        log("TICK_CAPTURE_STARTED", level="INFO", ticker=ticker, trade_id=trade_id)
+        return True
     except Exception as exc:  # noqa: BLE001 — 캡처 시작 실패가 진입을 막지 않는다
         log("TICK_CAPTURE_START_ERROR", level="WARN", ticker=ticker, error=repr(exc))
         return False
@@ -653,13 +745,28 @@ def mark_ws_disconnect() -> None:
 
 
 async def finalize(reason: str, *, reached_expected_close: bool) -> None:
-    """활성 캡처를 종료·최종화한다. 실패해도 예외를 올리지 않는다."""
+    """활성 캡처를 종료·최종화한다. 실패해도 예외를 올리지 않는다.
+
+    종목 전환으로 떼어낸 캡처의 마감까지 함께 기다린다. 종료 경로는 이 함수
+    하나만 부르고 곧바로 DB를 닫으므로, 여기서 기다리지 않으면 전환된 캡처의
+    manifest가 IN_PROGRESS로 남는다.
+    """
     global _capture
     cap = _capture
     _capture = None
-    if cap is None:
-        return
     try:
-        await cap.finalize(reason, reached_expected_close=reached_expected_close)
+        if cap is not None:
+            await cap.finalize(reason, reached_expected_close=reached_expected_close)
     except Exception as exc:  # noqa: BLE001
-        log("TICK_CAPTURE_FINALIZE_ERROR", level="WARN", ticker=cap.ticker, error=repr(exc))
+        log(
+            "TICK_CAPTURE_FINALIZE_ERROR",
+            level="WARN",
+            ticker=cap.ticker if cap is not None else None,
+            error=repr(exc),
+        )
+    try:
+        await asyncio.wait_for(
+            drain_switch_finalizers(), timeout=SWITCH_DRAIN_TIMEOUT_SEC
+        )
+    except Exception as exc:  # noqa: BLE001 — 종료가 여기서 막히면 안 된다
+        log("TICK_CAPTURE_SWITCH_DRAIN_TIMEOUT", level="WARN", error=repr(exc))
