@@ -8,6 +8,8 @@ KST = ZoneInfo("Asia/Seoul")
 _logger: logging.Logger | None = None
 
 EVENT_LABELS = {
+    "DB_TRACK_MIGRATION_START": "트랙 마이그레이션 시작(DB Track Migration Start)",
+    "DB_TRACK_MIGRATION_DONE": "트랙 마이그레이션 완료(DB Track Migration Done)",
     "DAILY_STATE_RESET": "새 거래일 상태 초기화(Daily State Reset)",
     "CATCHUP_START": "누락 작업 보완 시작(Catch-up Start)",
     "PROCESS_ALREADY_RUNNING": "이미 실행 중인 프로세스 감지(Process Already Running)",

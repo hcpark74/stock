@@ -1,8 +1,10 @@
 """SQLite 연결 관리 — DB_DESIGN.md §4 PRAGMA 설정"""
 
 import json
+import shutil
 import sqlite3
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import aiosqlite
@@ -27,7 +29,8 @@ async def init(db_path: str) -> None:
     await _conn.executescript("""
         CREATE TABLE IF NOT EXISTS trades (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            date         TEXT NOT NULL UNIQUE,
+            date         TEXT NOT NULL,
+            track        TEXT NOT NULL DEFAULT 'A',
             ticker       TEXT NOT NULL,
             name            TEXT,
             entry_price  REAL,
@@ -38,7 +41,8 @@ async def init(db_path: str) -> None:
             exit_at      TEXT,
             close_reason TEXT CHECK (close_reason IN (
                              'TRAILING','HARD_STOP',
-                             'TIMEOUT','SLIPPAGE_GUARD','ENTRY_FAIL','MANUAL'
+                             'TIMEOUT','SLIPPAGE_GUARD','ENTRY_FAIL','MANUAL',
+                             'SIGNAL_EXIT','INDICATOR_STOP','TRACK_HALTED'
                          )),
             pnl_pct      REAL,
             pnl_amount   REAL,
@@ -50,7 +54,8 @@ async def init(db_path: str) -> None:
             execution_mode TEXT,
             strategy_fingerprint TEXT,
             created_at   TEXT NOT NULL,
-            updated_at   TEXT NOT NULL
+            updated_at   TEXT NOT NULL,
+            UNIQUE (date, track)
         );
 
         CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(date);
@@ -334,6 +339,8 @@ async def init(db_path: str) -> None:
             COMMIT;
         """)
 
+    await _migrate_trades_track(db_path)
+
     # Backfill legacy CLOSED rows that predate complete close summaries.
     # Filled sell orders are the durable source of truth; cancelled orders can
     # still contain a valid partial fill, so the predicate is fill_qty > 0
@@ -373,6 +380,105 @@ async def init(db_path: str) -> None:
            AND exit_qty IS NOT NULL
     """)
     await _conn.commit()
+
+
+def _backup_db_file(db_path: str) -> str | None:
+    """재작성 전 DB 파일을 복사한다. WAL을 먼저 접어 최근 쓰기를 포함시킨다."""
+    if db_path == ":memory:":
+        return None
+    src_path = Path(db_path)
+    if not src_path.exists():
+        return None
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dst = src_path.with_name(f"{src_path.name}.pre_track_{stamp}")
+    shutil.copy2(src_path, dst)
+    return str(dst)
+
+
+async def _migrate_trades_track(db_path: str) -> None:
+    """UNIQUE(date) → UNIQUE(date, track). SQLite는 ALTER로 못 바꿔 재작성한다.
+
+    구 DB는 name·highest_step이 ALTER로 맨 뒤에 붙어 있어 컬럼 순서가 신규
+    스키마와 다르다. SELECT *로 옮기면 타입이 호환되는 자리끼리 조용히 뒤섞이므로
+    컬럼명을 전부 명시한다(§4.3).
+    """
+    async with _conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='trades'"
+    ) as cur:
+        row = await cur.fetchone()
+    if not row or "track" in (row["sql"] or ""):
+        return
+    # 앞선 마이그레이션 블록(예: orders.trigger_price 백필)이 열어 둔 쓰기
+    # 트랜잭션이 남아 있으면 이후 DDL이 "database table is locked"로 실패한다.
+    # 체크포인트 전에 먼저 커밋해 비운다.
+    await _conn.commit()
+    # 커서를 끝까지 소비하지 않고 남겨 두면 그 자체가 미종결 statement로 남아
+    # 뒤이은 CREATE/DROP TABLE을 "database table is locked"로 막는다(SQLite는
+    # 같은 커넥션에 열린 statement가 있으면 스키마 변경을 거부한다). async with로
+    # 확실히 finalize한다.
+    async with _conn.execute("PRAGMA wal_checkpoint(TRUNCATE)"):
+        pass
+    backup = _backup_db_file(db_path)
+    log("DB_TRACK_MIGRATION_START", level="WARN", backup=backup)
+    await _conn.executescript("""
+        PRAGMA foreign_keys = OFF;
+        BEGIN;
+        CREATE TABLE trades_track_migrated (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            date         TEXT NOT NULL,
+            track        TEXT NOT NULL DEFAULT 'A',
+            ticker       TEXT NOT NULL,
+            name         TEXT,
+            entry_price  REAL,
+            entry_qty    INTEGER,
+            entry_at     TEXT,
+            exit_price   REAL,
+            exit_qty     INTEGER,
+            exit_at      TEXT,
+            close_reason TEXT CHECK (close_reason IN (
+                             'TRAILING','HARD_STOP',
+                             'TIMEOUT','SLIPPAGE_GUARD','ENTRY_FAIL','MANUAL',
+                             'SIGNAL_EXIT','INDICATOR_STOP','TRACK_HALTED'
+                         )),
+            pnl_pct      REAL,
+            pnl_amount   REAL,
+            high_price   REAL,
+            highest_step REAL,
+            pyramided    INTEGER DEFAULT 0,
+            status       TEXT NOT NULL DEFAULT 'OPEN'
+                             CHECK (status IN ('OPEN','CLOSED','SKIPPED')),
+            execution_mode       TEXT,
+            strategy_fingerprint TEXT,
+            experiment_id        TEXT,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL,
+            UNIQUE (date, track)
+        );
+        INSERT INTO trades_track_migrated
+            (id, date, track, ticker, name, entry_price, entry_qty, entry_at,
+             exit_price, exit_qty, exit_at, close_reason, pnl_pct, pnl_amount,
+             high_price, highest_step, pyramided, status, execution_mode,
+             strategy_fingerprint, experiment_id, created_at, updated_at)
+        SELECT
+             id, date, 'A', ticker, name, entry_price, entry_qty, entry_at,
+             exit_price, exit_qty, exit_at, close_reason, pnl_pct, pnl_amount,
+             high_price, highest_step, pyramided, status, execution_mode,
+             strategy_fingerprint, experiment_id, created_at, updated_at
+          FROM trades;
+        DROP TABLE trades;
+        ALTER TABLE trades_track_migrated RENAME TO trades;
+        CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(date);
+        COMMIT;
+        PRAGMA foreign_keys = ON;
+    """)
+    async with _conn.execute("PRAGMA foreign_key_check") as cur:
+        violations = await cur.fetchall()
+    if violations:
+        raise RuntimeError(
+            f"trades 트랙 마이그레이션 후 FK 위반 {len(violations)}건. "
+            f"백업({backup})으로 복원하고 기동을 중단한다."
+        )
+    log("DB_TRACK_MIGRATION_DONE", level="WARN", backup=backup)
 
 
 def get() -> aiosqlite.Connection:
