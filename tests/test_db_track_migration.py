@@ -132,3 +132,21 @@ async def test_migration_is_skipped_when_already_migrated(tmp_path):
 
     # 두 번째 기동은 재작성하지 않으므로 백업이 늘지 않는다.
     assert len(list(tmp_path.glob("trading.db.pre_track_*"))) == 1
+
+
+async def test_two_tracks_can_skip_the_same_day(tmp_path):
+    await db.init(":memory:")
+    try:
+        await db.record_skip("20260826", "NO_TARGET", "A는 갭 미달")
+        await db.record_skip("20260826", "NO_TARGET", "B는 신호 없음", track="B")
+        conn = db.get()
+        async with conn.execute(
+            "SELECT track, detail FROM daily_skips WHERE date='20260826' "
+            "ORDER BY track"
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+    finally:
+        await db.close()
+
+    assert [r["track"] for r in rows] == ["A", "B"]
+    assert rows[1]["detail"] == "B는 신호 없음"

@@ -142,14 +142,16 @@ async def init(db_path: str) -> None:
 
         CREATE TABLE IF NOT EXISTS daily_skips (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            date       TEXT NOT NULL UNIQUE,
+            date       TEXT NOT NULL,
+            track      TEXT NOT NULL DEFAULT 'A',
             reason     TEXT NOT NULL CHECK (reason IN (
                            'NO_TARGET','GAP_CHANGED','ENTRY_FAIL',
                            'SLIPPAGE_GUARD','MANUAL','MARKET_CLOSED',
                            'VI_ACTIVE'
                        )),
             detail     TEXT,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            UNIQUE (date, track)
         );
 
         CREATE TABLE IF NOT EXISTS asset_snapshots (
@@ -318,22 +320,26 @@ async def init(db_path: str) -> None:
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='daily_skips'"
     ) as cur:
         row = await cur.fetchone()
-    if row and "VI_ACTIVE" not in (row["sql"] or ""):
+    sql = (row["sql"] or "") if row else ""
+    if row and ("VI_ACTIVE" not in sql or "track" not in sql):
         await _conn.executescript("""
             BEGIN;
             CREATE TABLE daily_skips_migrated (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                date       TEXT NOT NULL UNIQUE,
+                date       TEXT NOT NULL,
+                track      TEXT NOT NULL DEFAULT 'A',
                 reason     TEXT NOT NULL CHECK (reason IN (
                                'NO_TARGET','GAP_CHANGED','ENTRY_FAIL',
                                'SLIPPAGE_GUARD','MANUAL','MARKET_CLOSED',
                                'VI_ACTIVE'
                            )),
                 detail     TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                UNIQUE (date, track)
             );
             INSERT INTO daily_skips_migrated
-                SELECT id, date, reason, detail, created_at FROM daily_skips;
+                (id, date, track, reason, detail, created_at)
+                SELECT id, date, 'A', reason, detail, created_at FROM daily_skips;
             DROP TABLE daily_skips;
             ALTER TABLE daily_skips_migrated RENAME TO daily_skips;
             COMMIT;
@@ -1455,24 +1461,26 @@ async def get_price_path_manifest(
     return dict(row) if row else None
 
 
-async def get_skip_by_date(date: str) -> dict | None:
-    """해당 날짜의 daily_skips 행 반환. 없으면 None."""
+async def get_skip_by_date(date: str, track: str = "A") -> dict | None:
+    """해당 날짜·트랙의 daily_skips 행 반환. 없으면 None."""
     conn = get()
     async with conn.execute(
-        "SELECT * FROM daily_skips WHERE date=?", (date,)
+        "SELECT * FROM daily_skips WHERE date=? AND track=?", (date, track)
     ) as cur:
         row = await cur.fetchone()
     return dict(row) if row else None
 
 
-async def record_skip(date: str, reason: str, detail: str = "") -> None:
-    """daily_skips INSERT. 같은 날짜 중복 시 무시 (OR IGNORE)."""
+async def record_skip(
+    date: str, reason: str, detail: str = "", track: str = "A"
+) -> None:
+    """daily_skips INSERT. 같은 (날짜, 트랙) 중복 시 무시 (OR IGNORE)."""
     now = _now()
     conn = get()
     await conn.execute(
-        """INSERT OR IGNORE INTO daily_skips (date, reason, detail, created_at)
-           VALUES (?, ?, ?, ?)""",
-        (date, reason, detail, now),
+        """INSERT OR IGNORE INTO daily_skips (date, track, reason, detail, created_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (date, track, reason, detail, now),
     )
     await conn.commit()
 
