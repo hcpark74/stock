@@ -867,14 +867,19 @@ async def get_known_sell_order_ids(trade_id: int) -> set[str]:
     return {str(row["kis_order_id"]) for row in rows}
 
 
-async def get_unresolved_exit_intent(date: str) -> dict | None:
-    """상태 파일 갱신 직전 장애를 DB 주문 의도에서 복구한다."""
+async def get_unresolved_exit_intent(date: str, track: str = "A") -> dict | None:
+    """상태 파일 갱신 직전 장애를 DB 주문 의도에서 복구한다.
+
+    트랙 스코프가 없으면 A의 청산 재시도 창(EXITING + pending_exit=None)에서
+    재시작이 겹칠 때 A가 B의 매도 주문을 인수한다(§4.4).
+    """
     conn = get()
     async with conn.execute(
         """SELECT o.*
                FROM orders o
                JOIN trades t ON t.id=o.trade_id
               WHERE t.date=?
+                AND t.track=?
                 AND o.order_type='SELL'
                 AND o.client_order_id IS NOT NULL
                 AND o.status IN ('PENDING','PARTIAL_FILL')
@@ -883,7 +888,7 @@ async def get_unresolved_exit_intent(date: str) -> dict | None:
                 )
               ORDER BY o.id DESC
               LIMIT 1""",
-        (date,),
+        (date, track),
     ) as cur:
         row = await cur.fetchone()
     return dict(row) if row else None
