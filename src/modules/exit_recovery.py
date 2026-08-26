@@ -68,7 +68,7 @@ def _intent_from_order_row(row: dict, *, fallback_reason: str | None = None) -> 
     }
 
 
-async def merge_db_intent(data: dict, date: str) -> dict:
+async def merge_db_intent(data: dict, date: str, track: str = "A") -> dict:
     """DB로 상태 파일의 빈 필드만 보완한다.
 
     전송 순서는 상태 파일 -> DB이므로 같은 client_order_id에서는 상태 파일이
@@ -76,7 +76,7 @@ async def merge_db_intent(data: dict, date: str) -> dict:
     역행시키지 않게 상태 값을 마지막에 병합한다.
     """
     try:
-        row = await db.get_unresolved_exit_intent(date)
+        row = await db.get_unresolved_exit_intent(date, track=track)
     except Exception as exc:
         log(
             "EXIT_ORDER_DB_DEGRADED",

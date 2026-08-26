@@ -1,8 +1,10 @@
 # 멀티 트랙 전략 병행 운용 설계
 
-> **상태**: 설계 확정 — 데이터 수집 선행 작업 구현 완료, 트랙 구현 대기
+> **상태**: 설계 확정 — 트랙 모델·DB 스키마·집계 스코프(§3 중 §3.4 제외, §4, §6.1) 구현 완료.
+> §3.4(트랙 B 전용 `SpikeFilter` 인스턴스)는 트랙 B 틱 소비자가 아직 없어 미구현. 그림자·승격 대기
 > **작성일**: 2026-08-25
-> **갱신일**: 2026-08-25 (KIS WS 명세 확정 반영, §11 신설)
+> **갱신일**: 2026-08-26 (전체 브랜치 리뷰 반영 — 마이그레이션 FK 게이트 수정·준비도 게이트 트랙 스코프,
+> 지문 회전 `d4435896a8a2`→`40d999a0ab66`)
 > **관련 문서**: [PRD.md](../../PRD.md), [DB_DESIGN.md](../../DB_DESIGN.md), [UI_DESIGN.md](../../UI_DESIGN.md)
 
 ## 1. 목표
@@ -230,7 +232,8 @@ SQLite는 FK가 켜진 상태의 `DROP TABLE`을 암묵적 `DELETE`로 처리하
 #### 절차
 
 ```sql
-PRAGMA foreign_keys = OFF;
+PRAGMA foreign_key_check;          -- (1) 재작성 전 위반 다중집합을 떠 둔다
+PRAGMA foreign_keys = OFF;         -- 트랜잭션 안에서는 no-op이라 BEGIN 밖에서
 BEGIN;
   CREATE TABLE trades_new (... 기존 컬럼 전부 + track, UNIQUE(date, track));
   INSERT INTO trades_new (id, date, ticker, name, ..., experiment_id, track)
@@ -238,19 +241,28 @@ BEGIN;
   DROP TABLE trades;
   ALTER TABLE trades_new RENAME TO trades;
   CREATE INDEX idx_trades_date ON trades(date);
-COMMIT;
-PRAGMA foreign_key_check;
-PRAGMA foreign_keys = ON;
+  PRAGMA foreign_key_check;        -- (2) COMMIT '이전'. (1)보다 늘었으면 ROLLBACK
+COMMIT;                            -- 또는 ROLLBACK
+PRAGMA foreign_keys = ON;          -- 예외가 나도 반드시 되돌린다(try/finally)
 ```
 
 `id`를 보존해 넣으므로 FK 참조는 그대로 유효하다.
 
 #### 필수 안전장치
 
-1. **마이그레이션 직전 DB 파일 백업 복사.** 타협 대상이 아니다
+1. **마이그레이션 직전 DB 파일 백업 복사.** 타협 대상이 아니다. WAL을 먼저 접되
+   `wal_checkpoint`의 `busy`를 로그에 남긴다 — `busy=1`이면 백업이 (유효하지만) 조금 오래된
+   스냅샷이다
 2. **필요할 때만 실행.** `sqlite_master`의 `sql`에 `track`이 없을 때만. `daily_skips`
-   재구축(db.py:311)과 같은 감지 패턴
-3. **`foreign_key_check` 통과 후에만 정상 기동.** 위반 시 백업으로 복원하고 기동 중단
+   재구축과 같은 감지 패턴
+3. **`foreign_key_check`는 COMMIT 이전에.** 커밋 뒤에 검사하면 위반을 막지 못하고 이미
+   durable해진 사실을 보고할 뿐이다. 더구나 조기 반환(2) 때문에 재기동 시에는 검사 자체가
+   다시 돌지 않아, "백업으로 복원하라"는 안내가 같은 실패를 되풀이시킨다
+4. **판정 기준은 "위반이 있는가"가 아니라 "위반이 늘었는가".** 인자 없는
+   `foreign_key_check`는 DB 전체를 훑으므로 이 마이그레이션과 무관한 테이블의 고아까지
+   잡힌다. 재작성은 `id`를 보존하므로 위반을 새로 만들 수 없고, 발견되는 위반은 FK 강제
+   이전에 쓰인 구 DB의 잔재다. 그대로면 WARN(백업 복원으로 해결되지 않는다는 문구 포함),
+   늘어났을 때만 ROLLBACK 후 `RuntimeError`로 기동 중단
 
 #### 컬럼 순서 함정 — `SELECT *` 금지
 
@@ -298,10 +310,28 @@ dict가 있으면 `exit_recovery.py:92`의 `client_order_id` 비교에서 걸러
 
 - `trades` UPDATE 3곳(`mark_pyramided`, `update_trade_progress`, `close_trade`)은 전부
   `WHERE id=?` 기준 — 트랙 안전
-- `get_order_by_kis_id`(db.py:527)는 `kis_order_id`가 유니크 인덱스를 가짐 — 트랙 안전
+- `get_order_by_kis_id`는 **KIS가 주문번호를 발급**하므로 트랙 안전이다. 한 계좌 안의 두
+  트랙이 같은 `odno`를 받을 수 없어 트랙 필터 없이도 교차 오염이 생기지 않는다.
+  *유니크 인덱스 때문이 아니다* — `db.py`의 `idx_orders_kis_order_id`는 UNIQUE가 아닌
+  평범한 인덱스이고(`UNIQUE (date, kis_order_id)`는 `entry_order_attempts`의 제약이다),
+  쿼리의 `ORDER BY o.id DESC LIMIT 1` 자체가 중복 행을 전제한다.
+  **전제**: 앞으로 `kis_order_id`를 로컬에서 합성하거나 재사용하는 코드가 생기면 이
+  안전성은 깨지므로 그때는 `track` 필터가 필수가 된다
 - `price_path_manifests`의 `UNIQUE (trade_date, ticker, experiment_id)`(db.py:253)는 B가 다른
   `experiment_id`를 쓰는 한 충돌하지 않는다. **A와 B가 같은 `experiment_id`를 쓰는 구성은
   기동 시 검증으로 금지한다**
+
+### 4.7 실전 전환 게이트는 트랙 A 전용
+
+`readiness._clean_paper_trade_count()`는 `KIS_MODE=REAL` 허용 여부를 정하는 돈 게이트다
+(하한 20건, 운영자가 낮출 수 없다). 트랙 B가 `trades`에 쓰기 시작하면 B의 PAPER 실적이
+A의 실탄 자격으로 흘러들 수 있으므로 쿼리에 `AND t.track='A'`를 **리터럴로** 박는다.
+파라미터가 아닌 이유는 이 게이트가 트랙 A 실행 경로의 자격만을 판정하기 때문이다.
+트랙 B의 실탄 승격 기준은 §6.3 승격 단계가 따로 정한다.
+
+`src/readiness.py`는 `release._STRATEGY_FILES`에 없으므로 이 수정은 전략 지문을 바꾸지 않는다.
+
+---
 
 ## 5. 섹션 ③ — 예산 분배와 불변식 감사
 
@@ -765,8 +795,19 @@ JS 테스트도 있다(`tests/js/`). `price_flow_checks.js`는 기존 가격흐�
 | `3acdac2` | 관측 계층 중립화 + 유량 가드 + 캡처 부착 완화 | §3.3·§3.5·§3.6 |
 | `d7fd48f` | 종목 교체 시 낡은 구독 중단 | §3.7 |
 | `8909761` | 다건 프레임 전량 파싱 | §11.2 |
+| `7f5362a` | trades 재작성 — `track` 컬럼 + `(date, track)` UNIQUE + `close_reason` CHECK 확장 | §4.1·§4.3·§4.5 |
+| `06b615a` | `daily_skips` 트랙 스코프 | §4.1 |
+| `1b73639` | 거래 조회·주문 멱등성 트랙 스코프 | §4.2 |
+| `8ee0086` | `get_unresolved_exit_intent` 트랙 교차 오염 수정 | §4.4 |
+| `6db1599` | 트랙별 상태 + 하위호환 영속화 | §3.1·§3.2 |
+| `67be433` | `/api/stats`·`/api/history`·개선 쿼리 트랙 스코프 | §6.1 |
+| `cf9481a` | 리뷰 수정 — 재작성 FK 게이트를 COMMIT 이전으로·증분 판정, 준비도 게이트 트랙 A 한정 | §4.3·§4.7 |
 
-미착수: §4(DB 스키마·마이그레이션), §5(예산·불변식), §6(승격), §7(봉/지표), §8(트랙 UI).
+완료: §3.1·§3.2(트랙 모델·영속화), §3.3·§3.5~§3.7(관측 계층 중립화·재구독), §4(DB 스키마·마이그레이션),
+§6.1(집계 쿼리 트랙 스코프).
+
+미착수: §3.4(트랙 B 전용 `SpikeFilter` — 트랙 B 틱 소비자가 없어 붙일 곳이 없다),
+§5(예산·불변식), §6.2~§6.5(그림자·승격), §7(봉/지표), §8(트랙 UI).
 
 ### 12.1 아직 실장 검증되지 않았다
 
@@ -776,3 +817,28 @@ JS 테스트도 있다(`tests/js/`). `price_flow_checks.js`는 기존 가격흐�
 - A 미진입일에 `F4_REST_BACKUP_START` 이후 실제 REST 호출이 없는지 (§3.5)
 - 후보 교체가 일어난 날 재구독이 기록되는지 (§3.7)
 - 다건 프레임이 실제로 오는지, 온다면 하루 몇 건인지 (§11.2)
+
+### 12.2 배포 리허설과 지문 회전 (Task 7, 2026-08-26)
+
+운영 DB(`data/db/trading.db`, `-wal`·`-shm` 포함)를 사본으로 떠서 `db.init()` 마이그레이션을
+리허설했다. 사본은 워크트리 안(`.superpowers/sdd/2026-08-26-multi-track-foundation/`)에서만
+다뤘고, 운영 파일은 열지 않았다 — 리허설 전후 `trading.db`의 MD5가 동일함을 확인했다.
+
+| 항목 | 마이그레이션 전 | 마이그레이션 후 |
+|---|---|---|
+| `trades` 총 행 수 | 31 | 31 |
+| `track='A'` 행 수 | — (컬럼 없음) | 31 |
+| `PRAGMA foreign_key_check` | — | 위반 0건 |
+| `trailing_shadow_comparisons` 행 수 | 6 | 6 |
+
+행 수 보존, 전량 `track='A'`, FK 위반 0건, `ON DELETE CASCADE` 대상인 shadow 비교 행도 그대로
+보존됐다 — §4.3 마이그레이션이 운영 데이터에 안전하게 적용됨을 확인했다. 리허설 사본과
+`rehearsal.db.pre_track_*` 백업, 사이드카 파일은 검증 직후 전부 삭제했다.
+
+`strategy_fingerprint()`는 `src/db.py`·`src/state.py`를 포함한 전략 파일 해시라 이번
+마이그레이션 코드 자체가 지문을 회전시킨다: `main`의 `f864e8a95ba2` → 리허설 시점
+`d4435896a8a2` → 리뷰 수정 반영 후 **`40d999a0ab66`**(브랜치 최종). 배포 후 `experiment_id`는
+`baseline-40d999a0ab66`으로 바뀐다. **이전 실험의 40거래일 paired 수집은 여기서 끊기고 0부터
+다시 시작한다** — Plan 3의 그림자 승격 기록은 이 새 실험 ID 위에서 쌓인다. 준비도의 무결
+PAPER 20건 근거도 같은 이유로 0부터 다시 쌓인다(`src/readiness.py`는 전략 파일이 아니므로
+§4.7의 트랙 스코프 수정 자체는 지문을 건드리지 않는다).

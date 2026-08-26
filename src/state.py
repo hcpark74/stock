@@ -1,8 +1,9 @@
 import asyncio
+import dataclasses
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -46,6 +47,45 @@ def get() -> State:
     return _state
 
 
+@dataclass
+class TrackState:
+    """트랙 A 이외 트랙의 포지션 상태.
+
+    trading_date·target_ticker·target_candidates·day_skip은 갖지 않는다 —
+    종목과 후보는 F1/F2가 정하는 트랙 공유 자산이다(§3.1).
+    """
+    entry_price: float | None = None
+    entry_at: str | None = None
+    entry_qty: int | None = None
+    remaining_qty: int | None = None
+    high_price: float | None = None
+    position_status: str = "IDLE"
+    close_reason: str | None = None
+    order_id: str | None = None
+    trade_id: int = 0
+    pending_entry: dict | None = None
+    pending_exit: dict | None = None
+
+
+_tracks: dict[str, TrackState] = {}
+
+
+def track(name: str) -> TrackState:
+    """트랙 상태를 반환한다. 없으면 IDLE로 만든다."""
+    return _tracks.setdefault(name, TrackState())
+
+
+def all_tracks() -> dict[str, TrackState]:
+    """감사·UI용 순회. 트랙 A는 get()이며 여기 포함되지 않는다.
+
+    dict만 새로 만든 얕은 복사다. **값은 살아 있는 TrackState 객체**이므로
+    필드를 고치면 실제 트랙 상태가 바뀐다. 읽기 전용으로만 쓸 것.
+    깊은 복사를 하지 않는 것은 의도다 — 감사·UI 화면이 실제 상태와 조용히
+    어긋난 스냅샷을 보여주는 쪽이 더 나쁘다.
+    """
+    return dict(_tracks)
+
+
 def _clear_for_trading_day(date_str: str) -> None:
     live.clear_tick_history()
     _state.trading_date = date_str
@@ -68,6 +108,7 @@ def _clear_for_trading_day(date_str: str) -> None:
     _state.pending_entry = None
     _state.pending_exit = None
     _state.post_close_tracking_stopped = False
+    _tracks.clear()
 
 
 async def ensure_trading_day(date_str: str) -> bool:
@@ -296,6 +337,9 @@ async def persist(state_dir: str, date_str: str) -> None:
         "pending_entry": _state.pending_entry,
         "pending_exit": _state.pending_exit,
         "post_close_tracking_stopped": _state.post_close_tracking_stopped,
+        "tracks": {
+            name: asdict(track_state) for name, track_state in _tracks.items()
+        },
     }
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(dst)
@@ -363,3 +407,14 @@ def restore_from(data: dict) -> None:
     _state.post_close_tracking_stopped = bool(
         data.get("post_close_tracking_stopped", False)
     )
+
+    _tracks.clear()
+    tracks = data.get("tracks")
+    if isinstance(tracks, dict):
+        allowed = {f.name for f in dataclasses.fields(TrackState)}
+        for name, payload in tracks.items():
+            if not isinstance(payload, dict):
+                continue
+            _tracks[name] = TrackState(
+                **{k: v for k, v in payload.items() if k in allowed}
+            )

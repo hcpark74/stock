@@ -1,8 +1,11 @@
 """SQLite 연결 관리 — DB_DESIGN.md §4 PRAGMA 설정"""
 
 import json
+import shutil
 import sqlite3
+from collections import Counter
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import aiosqlite
@@ -27,7 +30,8 @@ async def init(db_path: str) -> None:
     await _conn.executescript("""
         CREATE TABLE IF NOT EXISTS trades (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            date         TEXT NOT NULL UNIQUE,
+            date         TEXT NOT NULL,
+            track        TEXT NOT NULL DEFAULT 'A',
             ticker       TEXT NOT NULL,
             name            TEXT,
             entry_price  REAL,
@@ -38,7 +42,8 @@ async def init(db_path: str) -> None:
             exit_at      TEXT,
             close_reason TEXT CHECK (close_reason IN (
                              'TRAILING','HARD_STOP',
-                             'TIMEOUT','SLIPPAGE_GUARD','ENTRY_FAIL','MANUAL'
+                             'TIMEOUT','SLIPPAGE_GUARD','ENTRY_FAIL','MANUAL',
+                             'SIGNAL_EXIT','INDICATOR_STOP','TRACK_HALTED'
                          )),
             pnl_pct      REAL,
             pnl_amount   REAL,
@@ -50,7 +55,8 @@ async def init(db_path: str) -> None:
             execution_mode TEXT,
             strategy_fingerprint TEXT,
             created_at   TEXT NOT NULL,
-            updated_at   TEXT NOT NULL
+            updated_at   TEXT NOT NULL,
+            UNIQUE (date, track)
         );
 
         CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(date);
@@ -137,14 +143,16 @@ async def init(db_path: str) -> None:
 
         CREATE TABLE IF NOT EXISTS daily_skips (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            date       TEXT NOT NULL UNIQUE,
+            date       TEXT NOT NULL,
+            track      TEXT NOT NULL DEFAULT 'A',
             reason     TEXT NOT NULL CHECK (reason IN (
                            'NO_TARGET','GAP_CHANGED','ENTRY_FAIL',
                            'SLIPPAGE_GUARD','MANUAL','MARKET_CLOSED',
                            'VI_ACTIVE'
                        )),
             detail     TEXT,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            UNIQUE (date, track)
         );
 
         CREATE TABLE IF NOT EXISTS asset_snapshots (
@@ -306,33 +314,40 @@ async def init(db_path: str) -> None:
             WHERE trigger_price IS NULL
               AND order_price IS NOT NULL"""
     )
-    # 기존 DB 마이그레이션: daily_skips.reason CHECK 확장 — SQLite는 CHECK 변경이
-    # 불가하므로 재구축. record_skip이 INSERT OR IGNORE라 구 제약에 걸리면
-    # 에러 없이 기록만 누락되기 때문에 반드시 맞춰야 한다.
+    # 기존 DB 마이그레이션: daily_skips.reason CHECK 확장 + track 컬럼 백필
+    # (기존 행은 전부 'A', UNIQUE도 (date) → (date, track)). SQLite는 CHECK·UNIQUE
+    # 변경이 불가하므로 재구축한다. record_skip이 INSERT OR IGNORE라 구 제약에
+    # 걸리면 에러 없이 기록만 누락되기 때문에 반드시 맞춰야 한다.
     async with _conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='daily_skips'"
     ) as cur:
         row = await cur.fetchone()
-    if row and "VI_ACTIVE" not in (row["sql"] or ""):
+    sql = (row["sql"] or "") if row else ""
+    if row and ("VI_ACTIVE" not in sql or "track" not in sql):
         await _conn.executescript("""
             BEGIN;
             CREATE TABLE daily_skips_migrated (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                date       TEXT NOT NULL UNIQUE,
+                date       TEXT NOT NULL,
+                track      TEXT NOT NULL DEFAULT 'A',
                 reason     TEXT NOT NULL CHECK (reason IN (
                                'NO_TARGET','GAP_CHANGED','ENTRY_FAIL',
                                'SLIPPAGE_GUARD','MANUAL','MARKET_CLOSED',
                                'VI_ACTIVE'
                            )),
                 detail     TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                UNIQUE (date, track)
             );
             INSERT INTO daily_skips_migrated
-                SELECT id, date, reason, detail, created_at FROM daily_skips;
+                (id, date, track, reason, detail, created_at)
+                SELECT id, date, 'A', reason, detail, created_at FROM daily_skips;
             DROP TABLE daily_skips;
             ALTER TABLE daily_skips_migrated RENAME TO daily_skips;
             COMMIT;
         """)
+
+    await _migrate_trades_track(db_path)
 
     # Backfill legacy CLOSED rows that predate complete close summaries.
     # Filled sell orders are the durable source of truth; cancelled orders can
@@ -373,6 +388,161 @@ async def init(db_path: str) -> None:
            AND exit_qty IS NOT NULL
     """)
     await _conn.commit()
+
+
+def _backup_db_file(db_path: str) -> str | None:
+    """재작성 전 DB 파일을 복사한다. WAL을 먼저 접어 최근 쓰기를 포함시킨다."""
+    if db_path == ":memory:":
+        return None
+    src_path = Path(db_path)
+    if not src_path.exists():
+        return None
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dst = src_path.with_name(f"{src_path.name}.pre_track_{stamp}")
+    shutil.copy2(src_path, dst)
+    return str(dst)
+
+
+_TRADES_REWRITE_STEPS = (
+    """
+    CREATE TABLE trades_track_migrated (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        date         TEXT NOT NULL,
+        track        TEXT NOT NULL DEFAULT 'A',
+        ticker       TEXT NOT NULL,
+        name         TEXT,
+        entry_price  REAL,
+        entry_qty    INTEGER,
+        entry_at     TEXT,
+        exit_price   REAL,
+        exit_qty     INTEGER,
+        exit_at      TEXT,
+        close_reason TEXT CHECK (close_reason IN (
+                         'TRAILING','HARD_STOP',
+                         'TIMEOUT','SLIPPAGE_GUARD','ENTRY_FAIL','MANUAL',
+                         'SIGNAL_EXIT','INDICATOR_STOP','TRACK_HALTED'
+                     )),
+        pnl_pct      REAL,
+        pnl_amount   REAL,
+        high_price   REAL,
+        highest_step REAL,
+        pyramided    INTEGER DEFAULT 0,
+        status       TEXT NOT NULL DEFAULT 'OPEN'
+                         CHECK (status IN ('OPEN','CLOSED','SKIPPED')),
+        execution_mode       TEXT,
+        strategy_fingerprint TEXT,
+        experiment_id        TEXT,
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL,
+        UNIQUE (date, track)
+    )
+    """,
+    """
+    INSERT INTO trades_track_migrated
+        (id, date, track, ticker, name, entry_price, entry_qty, entry_at,
+         exit_price, exit_qty, exit_at, close_reason, pnl_pct, pnl_amount,
+         high_price, highest_step, pyramided, status, execution_mode,
+         strategy_fingerprint, experiment_id, created_at, updated_at)
+    SELECT
+         id, date, 'A', ticker, name, entry_price, entry_qty, entry_at,
+         exit_price, exit_qty, exit_at, close_reason, pnl_pct, pnl_amount,
+         high_price, highest_step, pyramided, status, execution_mode,
+         strategy_fingerprint, experiment_id, created_at, updated_at
+      FROM trades
+    """,
+    "DROP TABLE trades",
+    "ALTER TABLE trades_track_migrated RENAME TO trades",
+    "CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(date)",
+)
+
+
+async def _fk_violations() -> Counter:
+    """DB 전체의 FK 위반을 (table, rowid, parent, fkid) 다중집합으로 센다.
+
+    인자 없는 `PRAGMA foreign_key_check`는 DB 전체를 훑으므로 이 마이그레이션과
+    무관한 테이블의 위반까지 잡힌다. 그래서 개수만이 아니라 행 자체를 비교해
+    "재작성이 새로 만든 위반"만 골라낼 수 있게 한다.
+    """
+    async with _conn.execute("PRAGMA foreign_key_check") as cur:
+        rows = await cur.fetchall()
+    return Counter(tuple(r) for r in rows)
+
+
+async def _migrate_trades_track(db_path: str) -> None:
+    """UNIQUE(date) → UNIQUE(date, track). SQLite는 ALTER로 못 바꿔 재작성한다.
+
+    구 DB는 name·highest_step이 ALTER로 맨 뒤에 붙어 있어 컬럼 순서가 신규
+    스키마와 다르다. SELECT *로 옮기면 타입이 호환되는 자리끼리 조용히 뒤섞이므로
+    컬럼명을 전부 명시한다(§4.3).
+
+    FK 검사는 SQLite가 문서화한 테이블 재작성 절차대로 **COMMIT 이전**에 돌린다.
+    커밋 뒤에 검사하면 위반을 막지 못하고 이미 durable해진 사실을 보고할 뿐이다.
+    또 재작성은 `id`를 그대로 보존하므로 위반을 새로 만들 수 없다 — FK 강제 이전에
+    쓰인 구 DB의 고아 행은 재작성 전부터 있던 것이다. 그래서 재작성 전 위반
+    다중집합을 떠 두고 **늘어났을 때만** 실패시킨다. 그대로면 WARN으로 남긴다
+    (백업 복원은 도움이 되지 않는 상황이므로 운영자를 그리로 보내지 않는다).
+    """
+    async with _conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='trades'"
+    ) as cur:
+        row = await cur.fetchone()
+    if not row or "track" in (row["sql"] or ""):
+        return
+    # 앞선 마이그레이션 블록(예: orders.trigger_price 백필)이 열어 둔 쓰기
+    # 트랜잭션이 남아 있으면 이후 DDL이 "database table is locked"로 실패한다.
+    # 체크포인트 전에 먼저 커밋해 비운다.
+    await _conn.commit()
+    # 커서를 끝까지 소비하지 않고 남겨 두면 그 자체가 미종결 statement로 남아
+    # 뒤이은 CREATE/DROP TABLE을 "database table is locked"로 막는다(SQLite는
+    # 같은 커넥션에 열린 statement가 있으면 스키마 변경을 거부한다). async with로
+    # 확실히 finalize한다.
+    # busy=1이면 WAL이 접히지 않아 백업 사본이 (유효하지만) 조금 오래된
+    # 스냅샷이다. 배포 로그에서 바로 보이도록 결과를 남긴다.
+    async with _conn.execute("PRAGMA wal_checkpoint(TRUNCATE)") as cur:
+        checkpoint = await cur.fetchone()
+    checkpoint_result = tuple(checkpoint) if checkpoint else None
+    backup = _backup_db_file(db_path)
+    log(
+        "DB_TRACK_MIGRATION_START",
+        level="WARN",
+        backup=backup,
+        wal_checkpoint=checkpoint_result,
+    )
+    pre_existing = await _fk_violations()
+    # PRAGMA foreign_keys는 트랜잭션 안에서 no-op이므로 BEGIN 밖에서 끈다.
+    # 중간에 예외가 나도 커넥션이 FK 강제 OFF로 남지 않게 finally로 되돌린다.
+    await _conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        await _conn.execute("BEGIN")
+        for statement in _TRADES_REWRITE_STEPS:
+            await _conn.execute(statement)
+        after = await _fk_violations()
+        introduced = after - pre_existing
+        if introduced:
+            await _conn.rollback()
+            raise RuntimeError(
+                f"trades 트랙 마이그레이션이 FK 위반 {sum(introduced.values())}건을 "
+                f"새로 만들어 롤백했다. 백업({backup})은 그대로 유효하다."
+            )
+        await _conn.commit()
+    finally:
+        # PRAGMA foreign_keys는 트랜잭션 안에서 no-op이다. 재작성 도중 아무 예외나
+        # 났을 때도 FK 강제가 확실히 살아나도록 먼저 트랜잭션을 정리한다.
+        if _conn.in_transaction:
+            await _conn.rollback()
+        await _conn.execute("PRAGMA foreign_keys = ON")
+    if pre_existing:
+        log(
+            "DB_TRACK_MIGRATION_PREEXISTING_FK_VIOLATIONS",
+            level="WARN",
+            count=sum(pre_existing.values()),
+            tables=sorted({str(t[0]) for t in pre_existing}),
+            note=(
+                "이 위반은 재작성 이전부터 있던 것이다(FK 강제 이전 데이터). "
+                "마이그레이션이 만든 것이 아니므로 백업 복원으로는 해결되지 않는다."
+            ),
+        )
+    log("DB_TRACK_MIGRATION_DONE", level="WARN", backup=backup)
 
 
 def get() -> aiosqlite.Connection:
@@ -438,7 +608,7 @@ def _asset_holdings_from_raw(raw_json: str | None) -> list[dict]:
 
 async def open_trade(
     date: str, ticker: str, entry_price: float, entry_qty: int,
-    name: str | None = None,
+    name: str | None = None, track: str = "A",
 ) -> int:
     """Insert a trade and return its id. Existing same-day trades are reused."""
     import os
@@ -461,12 +631,13 @@ async def open_trade(
     try:
         async with conn.execute(
             """INSERT INTO trades
-                   (date, ticker, name, entry_price, entry_qty, entry_at,
+                   (date, track, ticker, name, entry_price, entry_qty, entry_at,
                     status, execution_mode, strategy_fingerprint, experiment_id,
                     created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?)""",
             (
                 date,
+                track,
                 ticker,
                 name,
                 entry_price,
@@ -483,7 +654,7 @@ async def open_trade(
         await conn.commit()
         return trade_id
     except sqlite3.IntegrityError:
-        existing = await get_trade_by_date(date)
+        existing = await get_trade_by_date(date, track=track)
         if existing is None:
             raise
         if existing.get("ticker") != ticker:
@@ -503,7 +674,7 @@ async def open_trade(
         return int(existing["id"])
 
 
-async def get_trade_by_date(date: str) -> dict | None:
+async def get_trade_by_date(date: str, track: str = "A") -> dict | None:
     conn = get()
     async with conn.execute(
         """SELECT t.*,
@@ -517,8 +688,8 @@ async def get_trade_by_date(date: str) -> dict | None:
                       0
                   ) AS confirmed_entry_qty
              FROM trades t
-            WHERE t.date=?""",
-        (date,),
+            WHERE t.date=? AND t.track=?""",
+        (date, track),
     ) as cur:
         row = await cur.fetchone()
     return dict(row) if row else None
@@ -754,14 +925,19 @@ async def get_known_sell_order_ids(trade_id: int) -> set[str]:
     return {str(row["kis_order_id"]) for row in rows}
 
 
-async def get_unresolved_exit_intent(date: str) -> dict | None:
-    """상태 파일 갱신 직전 장애를 DB 주문 의도에서 복구한다."""
+async def get_unresolved_exit_intent(date: str, track: str = "A") -> dict | None:
+    """상태 파일 갱신 직전 장애를 DB 주문 의도에서 복구한다.
+
+    트랙 스코프가 없으면 A의 청산 재시도 창(EXITING + pending_exit=None)에서
+    재시작이 겹칠 때 A가 B의 매도 주문을 인수한다(§4.4).
+    """
     conn = get()
     async with conn.execute(
         """SELECT o.*
                FROM orders o
                JOIN trades t ON t.id=o.trade_id
               WHERE t.date=?
+                AND t.track=?
                 AND o.order_type='SELL'
                 AND o.client_order_id IS NOT NULL
                 AND o.status IN ('PENDING','PARTIAL_FILL')
@@ -770,7 +946,7 @@ async def get_unresolved_exit_intent(date: str) -> dict | None:
                 )
               ORDER BY o.id DESC
               LIMIT 1""",
-        (date,),
+        (date, track),
     ) as cur:
         row = await cur.fetchone()
     return dict(row) if row else None
@@ -1349,24 +1525,26 @@ async def get_price_path_manifest(
     return dict(row) if row else None
 
 
-async def get_skip_by_date(date: str) -> dict | None:
-    """해당 날짜의 daily_skips 행 반환. 없으면 None."""
+async def get_skip_by_date(date: str, track: str = "A") -> dict | None:
+    """해당 날짜·트랙의 daily_skips 행 반환. 없으면 None."""
     conn = get()
     async with conn.execute(
-        "SELECT * FROM daily_skips WHERE date=?", (date,)
+        "SELECT * FROM daily_skips WHERE date=? AND track=?", (date, track)
     ) as cur:
         row = await cur.fetchone()
     return dict(row) if row else None
 
 
-async def record_skip(date: str, reason: str, detail: str = "") -> None:
-    """daily_skips INSERT. 같은 날짜 중복 시 무시 (OR IGNORE)."""
+async def record_skip(
+    date: str, reason: str, detail: str = "", track: str = "A"
+) -> None:
+    """daily_skips INSERT. 같은 (날짜, 트랙) 중복 시 무시 (OR IGNORE)."""
     now = _now()
     conn = get()
     await conn.execute(
-        """INSERT OR IGNORE INTO daily_skips (date, reason, detail, created_at)
-           VALUES (?, ?, ?, ?)""",
-        (date, reason, detail, now),
+        """INSERT OR IGNORE INTO daily_skips (date, track, reason, detail, created_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (date, track, reason, detail, now),
     )
     await conn.commit()
 

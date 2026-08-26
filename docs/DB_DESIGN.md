@@ -45,7 +45,9 @@ erDiagram
     TRADES {
         integer id PK
         text date UK
+        text track UK
         text ticker
+        text name
         real entry_price
         integer entry_qty
         text entry_at
@@ -61,6 +63,7 @@ erDiagram
         text status
         text execution_mode
         text strategy_fingerprint
+        text experiment_id
         text created_at
         text updated_at
     }
@@ -114,6 +117,7 @@ erDiagram
     DAILY_SKIPS {
         integer id PK
         text date UK
+        text track UK
         text reason
         text detail
         text created_at
@@ -142,15 +146,17 @@ erDiagram
 
 ### 3-1. `trades` — 일별 거래 마스터
 
-하루 최대 1건. 진입부터 청산까지 라이프사이클 전체.
+거래일·트랙마다 최대 1건. 진입부터 청산까지 라이프사이클 전체.
 
 ```sql
 CREATE TABLE IF NOT EXISTS trades (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
 
     -- 식별
-    date         TEXT NOT NULL UNIQUE,          -- 'YYYYMMDD'
+    date         TEXT NOT NULL,                 -- 'YYYYMMDD'
+    track        TEXT NOT NULL DEFAULT 'A',     -- 전략 트랙 ('A'=기존 전략)
     ticker       TEXT NOT NULL,                 -- 종목코드 (예: '005930')
+    name         TEXT,                          -- 종목명
 
     -- 진입
     entry_price  REAL,                          -- 가중평균 체결가 (피라미딩 포함)
@@ -162,9 +168,9 @@ CREATE TABLE IF NOT EXISTS trades (
     exit_qty     INTEGER,                       -- 총 청산 수량
     exit_at      TEXT,                          -- ISO8601 KST
     close_reason TEXT CHECK (close_reason IN (
-                     'TRAILING','HARD_STOP','BEP_STOP',
-                     'TIMEOUT','SLIPPAGE_GUARD','ENTRY_FAIL',
-                     'MANUAL'
+                     'TRAILING','HARD_STOP',
+                     'TIMEOUT','SLIPPAGE_GUARD','ENTRY_FAIL','MANUAL',
+                     'SIGNAL_EXIT','INDICATOR_STOP','TRACK_HALTED'
                  )),
 
     -- 손익
@@ -173,6 +179,7 @@ CREATE TABLE IF NOT EXISTS trades (
 
     -- 추적
     high_price   REAL,                          -- 보유 중 최고가 (Trailing 기준)
+    highest_step REAL,                          -- 도달한 최고 트레일링 단계
     pyramided    INTEGER DEFAULT 0,             -- 2차 매수 실행 여부 (0/1)
 
     -- 상태
@@ -181,13 +188,26 @@ CREATE TABLE IF NOT EXISTS trades (
 
     execution_mode TEXT,                       -- PAPER/REAL 실적 구분
     strategy_fingerprint TEXT,                 -- 핵심 전략 코드 내용 지문
+    experiment_id  TEXT,                       -- 진입 당시 활성 기준선 실험 ID
 
     created_at   TEXT NOT NULL,
-    updated_at   TEXT NOT NULL
+    updated_at   TEXT NOT NULL,
+
+    UNIQUE (date, track)                        -- 트랙별로 하루 1건
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(date);
 ```
+
+`UNIQUE (date, track)`은 구 스키마의 `date UNIQUE`를 대체한다. 구 DB는 기동 시
+테이블 재작성으로 옮기며 기존 행은 전부 `track='A'`로 보존한다. 재작성은
+SQLite가 문서화한 절차를 따라 `PRAGMA foreign_key_check`를 COMMIT **이전**에
+돌리고, 재작성이 새로 만든 위반이 있을 때만 롤백 후 기동을 중단한다. 재작성은
+`id`를 그대로 옮기므로 FK 위반을 새로 만들 수 없다 — FK 강제 이전에 쓰인 구
+DB의 고아 행은 WARN으로만 남긴다(백업 복원으로 해결되지 않는다).
+
+`close_reason`의 뒤 3개(`SIGNAL_EXIT`, `INDICATOR_STOP`, `TRACK_HALTED`)는 트랙 B용
+청산 사유다. CHECK는 SQLite에서 ALTER로 못 바꾸므로 위 재작성 때 함께 넓혔다.
 
 #### 컬럼 보충
 
@@ -196,7 +216,8 @@ CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(date);
 | `entry_price` | 1차+2차 체결가 가중평균. 2차 없으면 1차 그대로 |
 | `pnl_amount` | `(exit_price − entry_price) × exit_qty` 단순 계산 |
 | `pyramided` | F3에서 2차 30% 매수가 체결됐으면 1 |
-| `execution_mode` | 진입 당시 `KIS_MODE`; 준비도 계산은 PAPER만 인정 |
+| `track` | 전략 트랙. 기존 전략은 `'A'`, 신규 병행 전략은 `'B'`. 집계·조회는 트랙 스코프가 기본 |
+| `execution_mode` | 진입 당시 `KIS_MODE`; 준비도 계산은 트랙 A의 PAPER만 인정 |
 | `strategy_fingerprint` | 동일 전략 코드와 비밀값 제외 유효 환경설정의 PAPER 실적만 집계하기 위한 지문 |
 
 ---
@@ -269,7 +290,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_client_order_id
 
 ### 3-2-1. `entry_order_attempts` — 체결 전 진입 주문 감사
 
-체결 전에는 당일 `trades` 행을 만들 수 없다. 무체결 취소 뒤 다른 후보가 체결될 수 있고 `trades.date`가 UNIQUE이기 때문이다. 따라서 KIS가 접수한 진입 주문은 상태 파일을 먼저 저장한 다음 이 독립 테이블에 즉시 기록한다.
+체결 전에는 당일 `trades` 행을 만들 수 없다. 무체결 취소 뒤 다른 후보가 체결될 수 있고 `trades`는 `(date, track)`이 UNIQUE — 즉 트랙마다 하루 1건뿐이라 미체결 시도를 여러 건 담을 수 없기 때문이다. 따라서 KIS가 접수한 진입 주문은 상태 파일을 먼저 저장한 다음 이 독립 테이블에 즉시 기록한다.
 
 - 식별·갱신 키: `(date, kis_order_id)` UNIQUE. 프로세스 로컬 `id`를 복구 키로 사용하지 않는다.
 - 상태: `PENDING`, `CANCELLED`, `PARTIAL_FILL`, `FILLED`, `UNCERTAIN`
@@ -354,23 +375,32 @@ CREATE INDEX IF NOT EXISTS idx_partial_exits_trade_id ON partial_exits(trade_id)
 
 ### 3-4. `daily_skips` — 당일 거래 스킵 이력
 
-거래 없이 스킵된 날 기록. F1 NO_TARGET, 슬리피지 즉시 청산 등.
+트랙별로 거래 없이 스킵된 날 기록. F1 NO_TARGET, 슬리피지 즉시 청산 등.
 
 ```sql
 CREATE TABLE IF NOT EXISTS daily_skips (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    date       TEXT NOT NULL UNIQUE,            -- 'YYYYMMDD'
+    date       TEXT NOT NULL,                   -- 'YYYYMMDD'
+    track      TEXT NOT NULL DEFAULT 'A',       -- 전략 트랙
     reason     TEXT NOT NULL CHECK (reason IN (
                    'NO_TARGET',                 -- F1 필터 통과 종목 없음
                    'GAP_CHANGED',               -- F3 갭 재검증 실패
                    'ENTRY_FAIL',                -- F3 미체결
                    'SLIPPAGE_GUARD',            -- F3 슬리피지 초과
-                   'MANUAL'                     -- 수동 스킵
+                   'MANUAL',                    -- 수동 스킵
+                   'MARKET_CLOSED',             -- 휴장일
+                   'VI_ACTIVE'                  -- VI 발동으로 진입 포기
                )),
     detail     TEXT,                            -- 부가 정보 (JSON 문자열)
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+
+    UNIQUE (date, track)                        -- 트랙별로 하루 1건
 );
 ```
+
+`record_skip`이 `INSERT OR IGNORE`라 구 CHECK 제약에 걸려도 에러 없이 기록만
+누락된다. 그래서 `reason` 확장과 `track` 백필은 기동 시 `daily_skips` 재구축으로
+반영한다(기존 행은 전부 `track='A'`).
 
 ---
 
