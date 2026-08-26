@@ -952,16 +952,17 @@ async def api_f1() -> JSONResponse:
 
 
 @app.get("/api/history")
-async def api_history(limit: int = 60) -> JSONResponse:
+async def api_history(limit: int = 60, track: str = "A") -> JSONResponse:
     try:
         conn = db.get()
         async with conn.execute(
-            """SELECT date, ticker, name, entry_price, exit_price,
+            """SELECT date, track, ticker, name, entry_price, exit_price,
                       pnl_pct, close_reason, highest_step, pyramided, status
                FROM trades
+               WHERE track=?
                ORDER BY date DESC
                LIMIT ?""",
-            (limit,),
+            (track, limit),
         ) as cur:
             rows = await cur.fetchall()
         result = [dict(r) for r in rows]
@@ -975,7 +976,7 @@ async def api_history(limit: int = 60) -> JSONResponse:
 
 
 @app.get("/api/stats")
-async def api_stats() -> JSONResponse:
+async def api_stats(track: str = "A") -> JSONResponse:
     try:
         conn = db.get()
 
@@ -987,7 +988,8 @@ async def api_stats() -> JSONResponse:
                 AVG(pnl_pct) as avg_pnl,
                 MIN(pnl_pct) as max_loss,
                 MAX(pnl_pct) as max_gain
-               FROM trades WHERE status='CLOSED'"""
+               FROM trades WHERE status='CLOSED' AND track=?""",
+            (track,),
         ) as cur:
             agg = dict(await cur.fetchone())
 
@@ -996,8 +998,9 @@ async def api_stats() -> JSONResponse:
             """SELECT close_reason,
                       COUNT(*) as n,
                       AVG(pnl_pct) as avg_pnl
-               FROM trades WHERE status='CLOSED'
-               GROUP BY close_reason"""
+               FROM trades WHERE status='CLOSED' AND track=?
+               GROUP BY close_reason""",
+            (track,),
         ) as cur:
             rows = await cur.fetchall()
         by_reason = {
@@ -1009,8 +1012,9 @@ async def api_stats() -> JSONResponse:
             """SELECT substr(date,1,6) as ym,
                       COUNT(*) as n,
                       SUM(pnl_pct) as sum_pnl
-               FROM trades WHERE status='CLOSED'
-               GROUP BY ym ORDER BY ym"""
+               FROM trades WHERE status='CLOSED' AND track=?
+               GROUP BY ym ORDER BY ym""",
+            (track,),
         ) as cur:
             rows = await cur.fetchall()
         monthly = [
@@ -1021,8 +1025,9 @@ async def api_stats() -> JSONResponse:
             """SELECT pyramided,
                       COUNT(*) as n,
                       AVG(pnl_pct) as avg_pnl
-               FROM trades WHERE status='CLOSED'
-               GROUP BY pyramided"""
+               FROM trades WHERE status='CLOSED' AND track=?
+               GROUP BY pyramided""",
+            (track,),
         ) as cur:
             rows = await cur.fetchall()
         by_pyramided = {
@@ -1043,8 +1048,9 @@ async def api_stats() -> JSONResponse:
                   END as step_bucket,
                   COUNT(*) as n,
                   AVG(pnl_pct) as avg_pnl
-               FROM trades WHERE status='CLOSED'
-               GROUP BY step_bucket"""
+               FROM trades WHERE status='CLOSED' AND track=?
+               GROUP BY step_bucket""",
+            (track,),
         ) as cur:
             rows = await cur.fetchall()
         by_step = {
@@ -1056,8 +1062,9 @@ async def api_stats() -> JSONResponse:
                       COUNT(*) as n,
                       AVG(pnl_pct) as avg_pnl
                FROM trades
-               WHERE status='CLOSED' AND entry_at IS NOT NULL
-               GROUP BY hour ORDER BY hour"""
+               WHERE status='CLOSED' AND entry_at IS NOT NULL AND track=?
+               GROUP BY hour ORDER BY hour""",
+            (track,),
         ) as cur:
             rows = await cur.fetchall()
         by_entry_hour = [
@@ -1389,13 +1396,14 @@ def _improve_from_rows(
 
 
 @app.get("/api/improve")
-async def api_improve() -> JSONResponse:
+async def api_improve(track: str = "A") -> JSONResponse:
     try:
         conn = db.get()
         async with conn.execute(
             """SELECT date, ticker, name, entry_price, high_price, highest_step,
                       pnl_pct, close_reason, entry_at, exit_at
-               FROM trades WHERE status='CLOSED' ORDER BY date"""
+               FROM trades WHERE status='CLOSED' AND track=? ORDER BY date""",
+            (track,),
         ) as cur:
             trades = [dict(r) for r in await cur.fetchall()]
         async with conn.execute(
@@ -1404,10 +1412,15 @@ async def api_improve() -> JSONResponse:
                FROM orders o
                JOIN trades t ON t.id = o.trade_id
                WHERE o.status IN ('FILLED', 'PARTIAL_FILL')
-                 AND COALESCE(t.close_reason, '') != 'MANUAL'"""
+                 AND COALESCE(t.close_reason, '') != 'MANUAL'
+                 AND t.track=?""",
+            (track,),
         ) as cur:
             orders = [dict(r) for r in await cur.fetchall()]
-        async with conn.execute("SELECT date, reason FROM daily_skips ORDER BY date, id") as cur:
+        async with conn.execute(
+            "SELECT date, reason FROM daily_skips WHERE track=? ORDER BY date, id",
+            (track,),
+        ) as cur:
             skip_rows = [dict(r) for r in await cur.fetchall()]
         skips: dict[str, int] = {}
         for row in skip_rows:
