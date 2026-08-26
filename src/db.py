@@ -550,7 +550,7 @@ def _asset_holdings_from_raw(raw_json: str | None) -> list[dict]:
 
 async def open_trade(
     date: str, ticker: str, entry_price: float, entry_qty: int,
-    name: str | None = None,
+    name: str | None = None, track: str = "A",
 ) -> int:
     """Insert a trade and return its id. Existing same-day trades are reused."""
     import os
@@ -573,12 +573,13 @@ async def open_trade(
     try:
         async with conn.execute(
             """INSERT INTO trades
-                   (date, ticker, name, entry_price, entry_qty, entry_at,
+                   (date, track, ticker, name, entry_price, entry_qty, entry_at,
                     status, execution_mode, strategy_fingerprint, experiment_id,
                     created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?)""",
             (
                 date,
+                track,
                 ticker,
                 name,
                 entry_price,
@@ -595,7 +596,7 @@ async def open_trade(
         await conn.commit()
         return trade_id
     except sqlite3.IntegrityError:
-        existing = await get_trade_by_date(date)
+        existing = await get_trade_by_date(date, track=track)
         if existing is None:
             raise
         if existing.get("ticker") != ticker:
@@ -615,7 +616,7 @@ async def open_trade(
         return int(existing["id"])
 
 
-async def get_trade_by_date(date: str) -> dict | None:
+async def get_trade_by_date(date: str, track: str = "A") -> dict | None:
     conn = get()
     async with conn.execute(
         """SELECT t.*,
@@ -629,8 +630,8 @@ async def get_trade_by_date(date: str) -> dict | None:
                       0
                   ) AS confirmed_entry_qty
              FROM trades t
-            WHERE t.date=?""",
-        (date,),
+            WHERE t.date=? AND t.track=?""",
+        (date, track),
     ) as cur:
         row = await cur.fetchone()
     return dict(row) if row else None
