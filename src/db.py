@@ -3,6 +3,7 @@
 import json
 import shutil
 import sqlite3
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -313,9 +314,10 @@ async def init(db_path: str) -> None:
             WHERE trigger_price IS NULL
               AND order_price IS NOT NULL"""
     )
-    # 기존 DB 마이그레이션: daily_skips.reason CHECK 확장 — SQLite는 CHECK 변경이
-    # 불가하므로 재구축. record_skip이 INSERT OR IGNORE라 구 제약에 걸리면
-    # 에러 없이 기록만 누락되기 때문에 반드시 맞춰야 한다.
+    # 기존 DB 마이그레이션: daily_skips.reason CHECK 확장 + track 컬럼 백필
+    # (기존 행은 전부 'A', UNIQUE도 (date) → (date, track)). SQLite는 CHECK·UNIQUE
+    # 변경이 불가하므로 재구축한다. record_skip이 INSERT OR IGNORE라 구 제약에
+    # 걸리면 에러 없이 기록만 누락되기 때문에 반드시 맞춰야 한다.
     async with _conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='daily_skips'"
     ) as cur:
@@ -401,12 +403,84 @@ def _backup_db_file(db_path: str) -> str | None:
     return str(dst)
 
 
+_TRADES_REWRITE_STEPS = (
+    """
+    CREATE TABLE trades_track_migrated (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        date         TEXT NOT NULL,
+        track        TEXT NOT NULL DEFAULT 'A',
+        ticker       TEXT NOT NULL,
+        name         TEXT,
+        entry_price  REAL,
+        entry_qty    INTEGER,
+        entry_at     TEXT,
+        exit_price   REAL,
+        exit_qty     INTEGER,
+        exit_at      TEXT,
+        close_reason TEXT CHECK (close_reason IN (
+                         'TRAILING','HARD_STOP',
+                         'TIMEOUT','SLIPPAGE_GUARD','ENTRY_FAIL','MANUAL',
+                         'SIGNAL_EXIT','INDICATOR_STOP','TRACK_HALTED'
+                     )),
+        pnl_pct      REAL,
+        pnl_amount   REAL,
+        high_price   REAL,
+        highest_step REAL,
+        pyramided    INTEGER DEFAULT 0,
+        status       TEXT NOT NULL DEFAULT 'OPEN'
+                         CHECK (status IN ('OPEN','CLOSED','SKIPPED')),
+        execution_mode       TEXT,
+        strategy_fingerprint TEXT,
+        experiment_id        TEXT,
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL,
+        UNIQUE (date, track)
+    )
+    """,
+    """
+    INSERT INTO trades_track_migrated
+        (id, date, track, ticker, name, entry_price, entry_qty, entry_at,
+         exit_price, exit_qty, exit_at, close_reason, pnl_pct, pnl_amount,
+         high_price, highest_step, pyramided, status, execution_mode,
+         strategy_fingerprint, experiment_id, created_at, updated_at)
+    SELECT
+         id, date, 'A', ticker, name, entry_price, entry_qty, entry_at,
+         exit_price, exit_qty, exit_at, close_reason, pnl_pct, pnl_amount,
+         high_price, highest_step, pyramided, status, execution_mode,
+         strategy_fingerprint, experiment_id, created_at, updated_at
+      FROM trades
+    """,
+    "DROP TABLE trades",
+    "ALTER TABLE trades_track_migrated RENAME TO trades",
+    "CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(date)",
+)
+
+
+async def _fk_violations() -> Counter:
+    """DB 전체의 FK 위반을 (table, rowid, parent, fkid) 다중집합으로 센다.
+
+    인자 없는 `PRAGMA foreign_key_check`는 DB 전체를 훑으므로 이 마이그레이션과
+    무관한 테이블의 위반까지 잡힌다. 그래서 개수만이 아니라 행 자체를 비교해
+    "재작성이 새로 만든 위반"만 골라낼 수 있게 한다.
+    """
+    async with _conn.execute("PRAGMA foreign_key_check") as cur:
+        rows = await cur.fetchall()
+    return Counter(tuple(r) for r in rows)
+
+
 async def _migrate_trades_track(db_path: str) -> None:
     """UNIQUE(date) → UNIQUE(date, track). SQLite는 ALTER로 못 바꿔 재작성한다.
 
     구 DB는 name·highest_step이 ALTER로 맨 뒤에 붙어 있어 컬럼 순서가 신규
     스키마와 다르다. SELECT *로 옮기면 타입이 호환되는 자리끼리 조용히 뒤섞이므로
     컬럼명을 전부 명시한다(§4.3).
+
+    FK 검사는 SQLite가 문서화한 테이블 재작성 절차대로 **COMMIT 이전**에 돌린다.
+    커밋 뒤에 검사하면 위반을 막지 못하고 이미 durable해진 사실을 보고할 뿐이다.
+    또 재작성은 `id`를 그대로 보존하므로 위반을 새로 만들 수 없다 — FK 강제 이전에
+    쓰인 구 DB의 고아 행은 재작성 전부터 있던 것이다. 그래서 재작성 전 위반
+    다중집합을 떠 두고 **늘어났을 때만** 실패시킨다. 그대로면 WARN으로 남긴다
+    (백업 복원은 도움이 되지 않는 상황이므로 운영자를 그리로 보내지 않는다).
     """
     async with _conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='trades'"
@@ -422,67 +496,51 @@ async def _migrate_trades_track(db_path: str) -> None:
     # 뒤이은 CREATE/DROP TABLE을 "database table is locked"로 막는다(SQLite는
     # 같은 커넥션에 열린 statement가 있으면 스키마 변경을 거부한다). async with로
     # 확실히 finalize한다.
-    async with _conn.execute("PRAGMA wal_checkpoint(TRUNCATE)"):
-        pass
+    # busy=1이면 WAL이 접히지 않아 백업 사본이 (유효하지만) 조금 오래된
+    # 스냅샷이다. 배포 로그에서 바로 보이도록 결과를 남긴다.
+    async with _conn.execute("PRAGMA wal_checkpoint(TRUNCATE)") as cur:
+        checkpoint = await cur.fetchone()
+    checkpoint_result = tuple(checkpoint) if checkpoint else None
     backup = _backup_db_file(db_path)
-    log("DB_TRACK_MIGRATION_START", level="WARN", backup=backup)
-    await _conn.executescript("""
-        PRAGMA foreign_keys = OFF;
-        BEGIN;
-        CREATE TABLE trades_track_migrated (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            date         TEXT NOT NULL,
-            track        TEXT NOT NULL DEFAULT 'A',
-            ticker       TEXT NOT NULL,
-            name         TEXT,
-            entry_price  REAL,
-            entry_qty    INTEGER,
-            entry_at     TEXT,
-            exit_price   REAL,
-            exit_qty     INTEGER,
-            exit_at      TEXT,
-            close_reason TEXT CHECK (close_reason IN (
-                             'TRAILING','HARD_STOP',
-                             'TIMEOUT','SLIPPAGE_GUARD','ENTRY_FAIL','MANUAL',
-                             'SIGNAL_EXIT','INDICATOR_STOP','TRACK_HALTED'
-                         )),
-            pnl_pct      REAL,
-            pnl_amount   REAL,
-            high_price   REAL,
-            highest_step REAL,
-            pyramided    INTEGER DEFAULT 0,
-            status       TEXT NOT NULL DEFAULT 'OPEN'
-                             CHECK (status IN ('OPEN','CLOSED','SKIPPED')),
-            execution_mode       TEXT,
-            strategy_fingerprint TEXT,
-            experiment_id        TEXT,
-            created_at   TEXT NOT NULL,
-            updated_at   TEXT NOT NULL,
-            UNIQUE (date, track)
-        );
-        INSERT INTO trades_track_migrated
-            (id, date, track, ticker, name, entry_price, entry_qty, entry_at,
-             exit_price, exit_qty, exit_at, close_reason, pnl_pct, pnl_amount,
-             high_price, highest_step, pyramided, status, execution_mode,
-             strategy_fingerprint, experiment_id, created_at, updated_at)
-        SELECT
-             id, date, 'A', ticker, name, entry_price, entry_qty, entry_at,
-             exit_price, exit_qty, exit_at, close_reason, pnl_pct, pnl_amount,
-             high_price, highest_step, pyramided, status, execution_mode,
-             strategy_fingerprint, experiment_id, created_at, updated_at
-          FROM trades;
-        DROP TABLE trades;
-        ALTER TABLE trades_track_migrated RENAME TO trades;
-        CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(date);
-        COMMIT;
-        PRAGMA foreign_keys = ON;
-    """)
-    async with _conn.execute("PRAGMA foreign_key_check") as cur:
-        violations = await cur.fetchall()
-    if violations:
-        raise RuntimeError(
-            f"trades 트랙 마이그레이션 후 FK 위반 {len(violations)}건. "
-            f"백업({backup})으로 복원하고 기동을 중단한다."
+    log(
+        "DB_TRACK_MIGRATION_START",
+        level="WARN",
+        backup=backup,
+        wal_checkpoint=checkpoint_result,
+    )
+    pre_existing = await _fk_violations()
+    # PRAGMA foreign_keys는 트랜잭션 안에서 no-op이므로 BEGIN 밖에서 끈다.
+    # 중간에 예외가 나도 커넥션이 FK 강제 OFF로 남지 않게 finally로 되돌린다.
+    await _conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        await _conn.execute("BEGIN")
+        for statement in _TRADES_REWRITE_STEPS:
+            await _conn.execute(statement)
+        after = await _fk_violations()
+        introduced = after - pre_existing
+        if introduced:
+            await _conn.rollback()
+            raise RuntimeError(
+                f"trades 트랙 마이그레이션이 FK 위반 {sum(introduced.values())}건을 "
+                f"새로 만들어 롤백했다. 백업({backup})은 그대로 유효하다."
+            )
+        await _conn.commit()
+    finally:
+        # PRAGMA foreign_keys는 트랜잭션 안에서 no-op이다. 재작성 도중 아무 예외나
+        # 났을 때도 FK 강제가 확실히 살아나도록 먼저 트랜잭션을 정리한다.
+        if _conn.in_transaction:
+            await _conn.rollback()
+        await _conn.execute("PRAGMA foreign_keys = ON")
+    if pre_existing:
+        log(
+            "DB_TRACK_MIGRATION_PREEXISTING_FK_VIOLATIONS",
+            level="WARN",
+            count=sum(pre_existing.values()),
+            tables=sorted({str(t[0]) for t in pre_existing}),
+            note=(
+                "이 위반은 재작성 이전부터 있던 것이다(FK 강제 이전 데이터). "
+                "마이그레이션이 만든 것이 아니므로 백업 복원으로는 해결되지 않는다."
+            ),
         )
     log("DB_TRACK_MIGRATION_DONE", level="WARN", backup=backup)
 

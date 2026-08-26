@@ -1,6 +1,8 @@
 """구 DB → 트랙 재작성 마이그레이션. 컬럼 정렬·FK 보존·백업."""
 import sqlite3
 
+import pytest
+
 from src import db
 
 # 구 DB 모양: name·highest_step이 ALTER로 맨 뒤에 붙어 있다.
@@ -150,3 +152,141 @@ async def test_two_tracks_can_skip_the_same_day(tmp_path):
 
     assert [r["track"] for r in rows] == ["A", "B"]
     assert rows[1]["detail"] == "B는 신호 없음"
+
+
+# FK 강제가 켜지기 전에 쓰인 구 DB에는 고아 orders.trade_id가 남아 있을 수 있다.
+_LEGACY_ORDERS = """
+CREATE TABLE orders (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_id        INTEGER NOT NULL REFERENCES trades(id),
+    kis_order_id    TEXT,
+    order_type      TEXT NOT NULL CHECK (order_type  IN ('BUY','SELL')),
+    order_phase     TEXT NOT NULL CHECK (order_phase IN (
+                        'FIRST_BUY','PYRAMID_BUY','PARTIAL_SELL',
+                        'CLOSE_SELL','TIMEOUT_SELL','SLIPPAGE_SELL','CANCEL'
+                    )),
+    ticker          TEXT NOT NULL,
+    name            TEXT,
+    order_qty       INTEGER NOT NULL,
+    order_price     REAL,
+    trigger_price   REAL,
+    fill_price      REAL,
+    fill_qty        INTEGER,
+    fill_latency_ms INTEGER,
+    status          TEXT NOT NULL DEFAULT 'PENDING'
+                        CHECK (status IN (
+                            'PENDING','FILLED','PARTIAL_FILL',
+                            'CANCELLED','FAILED'
+                        )),
+    ordered_at      TEXT NOT NULL,
+    filled_at       TEXT,
+    error_code      TEXT,
+    error_msg       TEXT
+)
+"""
+
+
+def _add_orphan_order(path, trade_id: int) -> None:
+    """구 DB에 주문 1건을 심는다. FK 강제 전이라 고아여도 들어간다."""
+    conn = sqlite3.connect(path)
+    conn.executescript(_LEGACY_ORDERS)
+    conn.execute(
+        """INSERT INTO orders
+               (trade_id, kis_order_id, order_type, order_phase, ticker,
+                order_qty, status, ordered_at)
+           VALUES (?, '0000111222', 'BUY', 'FIRST_BUY', '005930',
+                   10, 'FILLED', '2026-08-14T09:01:00+09:00')""",
+        (trade_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _trades_schema_sql(path) -> str:
+    conn = sqlite3.connect(path)
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='trades'"
+        ).fetchone()
+    finally:
+        conn.close()
+    return (row[0] if row else "") or ""
+
+
+async def test_preexisting_fk_violation_does_not_abort_startup(tmp_path):
+    """재작성이 만든 게 아닌 위반으로는 기동을 막지 않는다(1회차·2회차 모두)."""
+    path = tmp_path / "trading.db"
+    _make_legacy_db(path)
+    _add_orphan_order(path, trade_id=4242)   # trades에 없는 id
+
+    await db.init(str(path))                 # 1회차 — 재작성이 실제로 일어난다
+    try:
+        conn = db.get()
+        async with conn.execute("SELECT track FROM trades WHERE id=7") as cur:
+            assert (await cur.fetchone())["track"] == "A"
+        async with conn.execute("PRAGMA foreign_key_check") as cur:
+            still_violating = await cur.fetchall()
+    finally:
+        await db.close()
+
+    # 위반은 그대로 남아 있다(마이그레이션이 고칠 수 있는 대상이 아니다).
+    # 그래도 기동은 성공했다.
+    assert len(still_violating) == 1
+    assert "track" in _trades_schema_sql(path)
+
+    await db.init(str(path))                 # 2회차 — 조기 반환 경로
+    await db.close()
+
+    assert len(list(tmp_path.glob("trading.db.pre_track_*"))) == 1
+
+
+async def test_introduced_fk_violation_rolls_back_and_aborts(monkeypatch, tmp_path):
+    """재작성이 새 위반을 만들면 COMMIT 전에 롤백하고 기동을 중단한다."""
+    path = tmp_path / "trading.db"
+    _make_legacy_db(path)
+    _add_orphan_order(path, trade_id=7)       # 정상 참조 — 사전 위반 없음
+
+    sabotage = db._TRADES_REWRITE_STEPS + (
+        """INSERT INTO orders
+               (trade_id, kis_order_id, order_type, order_phase, ticker,
+                order_qty, status, ordered_at)
+           VALUES (9999, '0000999999', 'SELL', 'CLOSE_SELL', '005930',
+                   10, 'FILLED', '2026-08-14T09:05:00+09:00')""",
+    )
+    monkeypatch.setattr(db, "_TRADES_REWRITE_STEPS", sabotage)
+
+    with pytest.raises(RuntimeError, match="새로 만들어 롤백했다"):
+        await db.init(str(path))
+    try:
+        conn = db.get()
+        # finally 절이 FK 강제를 되돌려 놓았다.
+        async with conn.execute("PRAGMA foreign_keys") as cur:
+            assert (await cur.fetchone())[0] == 1
+    finally:
+        await db.close()
+
+    # 롤백됐으므로 구 스키마 그대로다.
+    assert "track" not in _trades_schema_sql(path)
+
+
+async def test_rewrite_failure_still_restores_foreign_key_enforcement(
+    monkeypatch, tmp_path
+):
+    """재작성 중 임의의 예외가 나도 커넥션이 FK 강제 OFF로 남지 않는다."""
+    path = tmp_path / "trading.db"
+    _make_legacy_db(path)
+
+    broken = db._TRADES_REWRITE_STEPS[:1] + ("SELECT * FROM no_such_table",)
+    monkeypatch.setattr(db, "_TRADES_REWRITE_STEPS", broken)
+
+    with pytest.raises(sqlite3.OperationalError):
+        await db.init(str(path))
+    try:
+        conn = db.get()
+        async with conn.execute("PRAGMA foreign_keys") as cur:
+            assert (await cur.fetchone())[0] == 1
+        assert conn.in_transaction is False
+    finally:
+        await db.close()
+
+    assert "track" not in _trades_schema_sql(path)

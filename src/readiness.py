@@ -41,11 +41,18 @@ def _check(
 
 
 async def _clean_paper_trade_count(fingerprint: str) -> int:
+    """트랙 A의 무결한 PAPER 청산 건수. REAL 전환 게이트의 근거다.
+
+    `track='A'`는 파라미터가 아니라 리터럴이다. 이 게이트는 트랙 A 실행 경로의
+    실전 자격만을 판정하므로, 트랙 B가 쌓은 PAPER 실적이 A의 실탄 자격으로
+    흘러들어가서는 안 된다.
+    """
     conn = db.get()
     async with conn.execute(
         """SELECT COUNT(*) AS cnt
              FROM trades t
             WHERE t.status='CLOSED'
+              AND t.track='A'
               AND t.execution_mode='PAPER'
               AND t.strategy_fingerprint=?
               AND t.entry_qty > 0

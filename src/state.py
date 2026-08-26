@@ -76,7 +76,13 @@ def track(name: str) -> TrackState:
 
 
 def all_tracks() -> dict[str, TrackState]:
-    """감사·UI용 순회. 트랙 A는 get()이며 여기 포함되지 않는다."""
+    """감사·UI용 순회. 트랙 A는 get()이며 여기 포함되지 않는다.
+
+    dict만 새로 만든 얕은 복사다. **값은 살아 있는 TrackState 객체**이므로
+    필드를 고치면 실제 트랙 상태가 바뀐다. 읽기 전용으로만 쓸 것.
+    깊은 복사를 하지 않는 것은 의도다 — 감사·UI 화면이 실제 상태와 조용히
+    어긋난 스냅샷을 보여주는 쪽이 더 나쁘다.
+    """
     return dict(_tracks)
 
 
