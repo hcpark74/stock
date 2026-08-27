@@ -9,6 +9,7 @@
 (main.py는 _STRATEGY_FILES에 있어 수정하면 트랙 A의 지문이 돈다).
 """
 
+import asyncio
 import json
 import os
 from collections import deque
@@ -16,6 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from src.api import kis_minute_bars
+from src import live, state
 from src.modules import tick_capture
 from src.utils.logger import log
 from src.utils.spike_filter import SpikeFilter
@@ -44,6 +47,9 @@ def bars_path(date: str, ticker: str) -> Path:
 
 def reset() -> None:
     """테스트 전용 — 모든 인메모리 상태를 비운다."""
+    for task in _workers.values():
+        task.cancel()
+    _workers.clear()
     _queue.clear()
     _series.clear()
     _filters.clear()
@@ -183,6 +189,7 @@ def _consume(tick: dict) -> None:
         bar = _new_bar(when.replace(second=0, microsecond=0), price)
         minutes[minute] = bar
     _apply(bar, tick, price)
+    ensure_worker(key[0], key[1])
     _dirty.add(key)
 
 
@@ -208,3 +215,119 @@ def _flush() -> None:
                 "TRACK_B_BAR_WRITE_ERROR", level="WARN",
                 ticker=ticker, date=date, error=repr(exc),
             )
+
+
+_CORRECT_INTERVAL_SEC = 60.0
+_IDLE_STOP_SEC = 600.0
+_workers: dict[tuple[str, str], asyncio.Task] = {}
+
+
+def should_correct(now: datetime, *, a_holding: bool, ws_stale: bool) -> bool:
+    """분봉 API를 지금 호출해도 되는가.
+
+    두 창에서 막는다. 09:00~09:11은 A의 진입 창이고, A가 보유 중인데 WS가
+    끊긴 구간은 A의 REST 백업이 PAPER 초당 1건 예산을 쓰고 있는 때다.
+    """
+    if kis_minute_bars.in_forbidden_window(now):
+        return False
+    return not (a_holding and ws_stale)
+
+
+def _merge_official(bar: dict | None, official: dict) -> dict:
+    """공식 분봉으로 OHLCV를 대체한다. 틱 파생값과 카운터는 보존한다."""
+    if bar is None:
+        bar = {
+            "date": official["date"], "time": official["time"],
+            "tick_count": 0, "spike_dropped": 0,
+            # 분봉 API는 틱 파생값을 주지 않는다. 없음을 없음으로 남긴다.
+            "tick_derived": None,
+        }
+    bar["open"] = official["open"]
+    bar["high"] = official["high"]
+    bar["low"] = official["low"]
+    bar["close"] = official["close"]
+    bar["volume"] = official["volume"]
+    bar["confirmed"] = True
+    return bar
+
+
+async def correct_once(
+    date: str,
+    ticker: str,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """공식 분봉 한 페이지로 당일 봉을 정정한다. 정정한 봉 수를 돌려준다."""
+    when = now or datetime.now(KST)
+    a_holding = state.get().position_status == "HOLDING"
+    if not should_correct(when, a_holding=a_holding, ws_stale=not live.ws_connected):
+        return 0
+
+    try:
+        response = await kis_minute_bars.fetch_minute_bars(ticker)
+        official, issues = kis_minute_bars.parse_minute_bars(response)
+    except kis_minute_bars.MinuteBarError as exc:
+        log("TRACK_B_CORRECTION_FAILED", level="WARN", ticker=ticker, error=repr(exc))
+        return 0
+    except Exception as exc:  # noqa: BLE001 — 정정 실패가 집계를 멈추면 안 된다
+        log("TRACK_B_CORRECTION_ERROR", level="WARN", ticker=ticker, error=repr(exc))
+        return 0
+
+    minutes = _series.setdefault((date, ticker), {})
+    corrected = 0
+    for row in official:
+        if row["date"] != date:
+            continue
+        minute = row["time"][:4] + "00"
+        minutes[minute] = _merge_official(minutes.get(minute), {**row, "time": minute})
+        corrected += 1
+
+    if corrected:
+        _dirty.add((date, ticker))
+        _flush()
+        log(
+            "TRACK_B_BARS_CORRECTED", level="INFO",
+            ticker=ticker, date=date, corrected=corrected, issues=issues,
+        )
+    return corrected
+
+
+async def worker(date: str, ticker: str) -> None:
+    """1분 주기로 봉을 확정하고 정정한다. 틱이 끊기면 스스로 끝난다."""
+    idle = 0.0
+    try:
+        while idle < _IDLE_STOP_SEC:
+            await asyncio.sleep(_CORRECT_INTERVAL_SEC)
+            pending = len(_queue)
+            drain()
+            idle = 0.0 if pending else idle + _CORRECT_INTERVAL_SEC
+            await correct_once(date, ticker)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log("TRACK_B_WORKER_DEAD", level="CRIT", ticker=ticker, error=repr(exc))
+    finally:
+        # 마지막 배출도 실패할 수 있다. 워커 종료 경로에서 예외를 올리면
+        # 태스크가 unretrieved exception으로 남는다.
+        try:
+            drain()
+        except Exception:  # noqa: BLE001
+            pass
+        _workers.pop((date, ticker), None)
+
+
+def ensure_worker(date: str, ticker: str) -> None:
+    """실행 중인 이벤트 루프가 있으면 워커를 지연 생성한다.
+
+    main.py에 기동 배선을 넣지 않기 위해서다 — main.py는 _STRATEGY_FILES에
+    있어 수정하면 트랙 A의 전략 지문이 돈다.
+    """
+    key = (date, ticker)
+    task = _workers.get(key)
+    if task is not None and not task.done():
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _workers[key] = loop.create_task(worker(date, ticker), name=f"track_b_bars_{ticker}")
