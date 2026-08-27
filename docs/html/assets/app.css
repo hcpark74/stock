@@ -310,7 +310,16 @@ tr:hover td{background:var(--s2);}
    높이가 CSS에 없으면 canvas의 height 속성이 곧 레이아웃 높이가 되고,
    barsResize가 거기에 DPR을 곱해 되쓰는 순간 갱신할 때마다 캔버스가
    커지는 폭주가 생긴다. */
-.bars-chart canvas { width: 100%; display: block; box-sizing: border-box; }
+.bars-chart canvas { width: 100%; display: block; box-sizing: border-box; cursor: crosshair; }
 #bars-price { height: 240px; }
-#bars-macd { height: 120px; margin-top: 4px; }
-.bars-sub { font-size: 11px; color: #787b86; margin-bottom: 4px; }
+#bars-volume { height: 64px; margin-top: 2px; }
+#bars-macd { height: 120px; margin-top: 2px; }
+/* 요약과 십자선 판독을 한 줄에 나눠 놓는다. min-height로 자리를 미리 잡아
+   마우스를 올렸다 뗄 때 아래 캔버스가 흔들리지 않게 한다. */
+.bars-head { display: flex; align-items: baseline; justify-content: space-between;
+             gap: 12px; margin-bottom: 4px; min-height: 15px; }
+.bars-sub { font-size: 11px; color: var(--mu); white-space: nowrap; }
+.bars-readout { font-family: var(--mn); font-size: 11px; color: var(--tx);
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bars-up { color: var(--up); }
+.bars-dn { color: var(--dn); }

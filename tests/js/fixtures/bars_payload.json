@@ -1,0 +1,1226 @@
+{
+ "date": "20260827",
+ "ticker": "006340",
+ "track": "B",
+ "bars": [
+  {
+   "date": "20260827",
+   "time": "090100",
+   "open": 14560.0,
+   "high": 14570.0,
+   "low": 14410.0,
+   "close": 14470.0,
+   "volume": 114505.0,
+   "confirmed": false,
+   "tick_count": 1088,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 103.33,
+    "askp1": 14480.0,
+    "bidp1": 14460.0,
+    "total_askp_rsqn": 16444.0,
+    "total_bidp_rsqn": 19751.0,
+    "vol_by_ccld": {
+     "5": 81779.0,
+     "1": 32726.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "090200",
+   "open": 14475.0,
+   "high": 14480.0,
+   "low": 14230.0,
+   "close": 14250.0,
+   "volume": 193185.0,
+   "confirmed": false,
+   "tick_count": 2128,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 84.83,
+    "askp1": 14280.0,
+    "bidp1": 14260.0,
+    "total_askp_rsqn": 16287.0,
+    "total_bidp_rsqn": 20351.0,
+    "vol_by_ccld": {
+     "1": 56114.0,
+     "5": 137071.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "090300",
+   "open": 14250.0,
+   "high": 14410.0,
+   "low": 14150.0,
+   "close": 14210.0,
+   "volume": 156728.0,
+   "confirmed": false,
+   "tick_count": 1662,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 82.02,
+    "askp1": 14230.0,
+    "bidp1": 14200.0,
+    "total_askp_rsqn": 12063.0,
+    "total_bidp_rsqn": 20648.0,
+    "vol_by_ccld": {
+     "5": 94963.0,
+     "1": 61765.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "090400",
+   "open": 14210.0,
+   "high": 14350.0,
+   "low": 14190.0,
+   "close": 14260.0,
+   "volume": 106737.0,
+   "confirmed": false,
+   "tick_count": 1252,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 82.25,
+    "askp1": 14300.0,
+    "bidp1": 14270.0,
+    "total_askp_rsqn": 17988.0,
+    "total_bidp_rsqn": 32640.0,
+    "vol_by_ccld": {
+     "5": 57320.0,
+     "1": 49417.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "090500",
+   "open": 14300.0,
+   "high": 14370.0,
+   "low": 14260.0,
+   "close": 14320.0,
+   "volume": 101701.0,
+   "confirmed": false,
+   "tick_count": 1100,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 82.59,
+    "askp1": 14320.0,
+    "bidp1": 14310.0,
+    "total_askp_rsqn": 24092.0,
+    "total_bidp_rsqn": 27508.0,
+    "vol_by_ccld": {
+     "1": 46906.0,
+     "5": 54795.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "090600",
+   "open": 14320.0,
+   "high": 14330.0,
+   "low": 14190.0,
+   "close": 14290.0,
+   "volume": 107332.0,
+   "confirmed": false,
+   "tick_count": 1117,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 80.18,
+    "askp1": 14290.0,
+    "bidp1": 14280.0,
+    "total_askp_rsqn": 23526.0,
+    "total_bidp_rsqn": 18084.0,
+    "vol_by_ccld": {
+     "1": 38783.0,
+     "5": 68549.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "090700",
+   "open": 14290.0,
+   "high": 14320.0,
+   "low": 14260.0,
+   "close": 14270.0,
+   "volume": 47352.0,
+   "confirmed": false,
+   "tick_count": 538,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 79.31,
+    "askp1": 14280.0,
+    "bidp1": 14270.0,
+    "total_askp_rsqn": 38010.0,
+    "total_bidp_rsqn": 41538.0,
+    "vol_by_ccld": {
+     "1": 17327.0,
+     "5": 30025.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "090800",
+   "open": 14280.0,
+   "high": 14310.0,
+   "low": 14260.0,
+   "close": 14270.0,
+   "volume": 42000.0,
+   "confirmed": false,
+   "tick_count": 473,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 78.18,
+    "askp1": 14280.0,
+    "bidp1": 14270.0,
+    "total_askp_rsqn": 47819.0,
+    "total_bidp_rsqn": 38388.0,
+    "vol_by_ccld": {
+     "1": 13525.0,
+     "5": 28475.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "090900",
+   "open": 14270.0,
+   "high": 14280.0,
+   "low": 14230.0,
+   "close": 14240.0,
+   "volume": 28557.0,
+   "confirmed": false,
+   "tick_count": 449,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 76.52,
+    "askp1": 14240.0,
+    "bidp1": 14230.0,
+    "total_askp_rsqn": 39629.0,
+    "total_bidp_rsqn": 59375.0,
+    "vol_by_ccld": {
+     "5": 23720.0,
+     "1": 4837.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "091000",
+   "open": 14230.0,
+   "high": 14240.0,
+   "low": 14140.0,
+   "close": 14180.0,
+   "volume": 88658.0,
+   "confirmed": false,
+   "tick_count": 749,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 73.89,
+    "askp1": 14200.0,
+    "bidp1": 14190.0,
+    "total_askp_rsqn": 18421.0,
+    "total_bidp_rsqn": 38659.0,
+    "vol_by_ccld": {
+     "5": 63503.0,
+     "1": 25155.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "091100",
+   "open": 14185.0,
+   "high": 14230.0,
+   "low": 14180.0,
+   "close": 14200.0,
+   "volume": 39598.0,
+   "confirmed": false,
+   "tick_count": 321,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 73.6,
+    "askp1": 14200.0,
+    "bidp1": 14190.0,
+    "total_askp_rsqn": 20156.0,
+    "total_bidp_rsqn": 54466.0,
+    "vol_by_ccld": {
+     "5": 24282.0,
+     "1": 15316.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "091200",
+   "open": 14200.0,
+   "high": 14220.0,
+   "low": 14170.0,
+   "close": 14210.0,
+   "volume": 37183.0,
+   "confirmed": false,
+   "tick_count": 380,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 74.7,
+    "askp1": 14220.0,
+    "bidp1": 14210.0,
+    "total_askp_rsqn": 31304.0,
+    "total_bidp_rsqn": 36700.0,
+    "vol_by_ccld": {
+     "1": 21684.0,
+     "5": 15499.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "091300",
+   "open": 14210.0,
+   "high": 14400.0,
+   "low": 14210.0,
+   "close": 14390.0,
+   "volume": 130345.0,
+   "confirmed": false,
+   "tick_count": 1203,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 82.41,
+    "askp1": 14400.0,
+    "bidp1": 14390.0,
+    "total_askp_rsqn": 37200.0,
+    "total_bidp_rsqn": 9601.0,
+    "vol_by_ccld": {
+     "5": 32125.0,
+     "1": 98220.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "091400",
+   "open": 14390.0,
+   "high": 14400.0,
+   "low": 14270.0,
+   "close": 14290.0,
+   "volume": 49885.0,
+   "confirmed": false,
+   "tick_count": 641,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 81.2,
+    "askp1": 14290.0,
+    "bidp1": 14270.0,
+    "total_askp_rsqn": 14794.0,
+    "total_bidp_rsqn": 21746.0,
+    "vol_by_ccld": {
+     "5": 32484.0,
+     "1": 17401.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "091500",
+   "open": 14300.0,
+   "high": 14410.0,
+   "low": 14230.0,
+   "close": 14410.0,
+   "volume": 66830.0,
+   "confirmed": false,
+   "tick_count": 629,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 83.99,
+    "askp1": 14410.0,
+    "bidp1": 14400.0,
+    "total_askp_rsqn": 67527.0,
+    "total_bidp_rsqn": 2391.0,
+    "vol_by_ccld": {
+     "1": 45682.0,
+     "5": 21148.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "091600",
+   "open": 14410.0,
+   "high": 14480.0,
+   "low": 14310.0,
+   "close": 14420.0,
+   "volume": 103295.0,
+   "confirmed": false,
+   "tick_count": 1159,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 88.55,
+    "askp1": 14440.0,
+    "bidp1": 14430.0,
+    "total_askp_rsqn": 75932.0,
+    "total_bidp_rsqn": 11673.0,
+    "vol_by_ccld": {
+     "1": 73227.0,
+     "5": 30068.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "091700",
+   "open": 14440.0,
+   "high": 14440.0,
+   "low": 14320.0,
+   "close": 14320.0,
+   "volume": 62621.0,
+   "confirmed": false,
+   "tick_count": 731,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 87.22,
+    "askp1": 14330.0,
+    "bidp1": 14320.0,
+    "total_askp_rsqn": 14563.0,
+    "total_bidp_rsqn": 14212.0,
+    "vol_by_ccld": {
+     "1": 21714.0,
+     "5": 40907.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "091800",
+   "open": 14320.0,
+   "high": 14350.0,
+   "low": 14220.0,
+   "close": 14230.0,
+   "volume": 48291.0,
+   "confirmed": false,
+   "tick_count": 710,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 85.14,
+    "askp1": 14250.0,
+    "bidp1": 14230.0,
+    "total_askp_rsqn": 16865.0,
+    "total_bidp_rsqn": 57829.0,
+    "vol_by_ccld": {
+     "1": 9931.0,
+     "5": 38360.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "091900",
+   "open": 14240.0,
+   "high": 14270.0,
+   "low": 14220.0,
+   "close": 14240.0,
+   "volume": 28198.0,
+   "confirmed": false,
+   "tick_count": 367,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 84.82,
+    "askp1": 14240.0,
+    "bidp1": 14230.0,
+    "total_askp_rsqn": 11580.0,
+    "total_bidp_rsqn": 70466.0,
+    "vol_by_ccld": {
+     "5": 17239.0,
+     "1": 10959.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "092000",
+   "open": 14240.0,
+   "high": 14280.0,
+   "low": 14230.0,
+   "close": 14250.0,
+   "volume": 28368.0,
+   "confirmed": false,
+   "tick_count": 248,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 85.24,
+    "askp1": 14250.0,
+    "bidp1": 14240.0,
+    "total_askp_rsqn": 9366.0,
+    "total_bidp_rsqn": 75361.0,
+    "vol_by_ccld": {
+     "5": 12705.0,
+     "1": 15663.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "092100",
+   "open": 14250.0,
+   "high": 14260.0,
+   "low": 14230.0,
+   "close": 14240.0,
+   "volume": 27022.0,
+   "confirmed": false,
+   "tick_count": 304,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 84.09,
+    "askp1": 14240.0,
+    "bidp1": 14230.0,
+    "total_askp_rsqn": 13046.0,
+    "total_bidp_rsqn": 88079.0,
+    "vol_by_ccld": {
+     "1": 5069.0,
+     "5": 21953.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "092200",
+   "open": 14230.0,
+   "high": 14240.0,
+   "low": 14200.0,
+   "close": 14210.0,
+   "volume": 38318.0,
+   "confirmed": false,
+   "tick_count": 475,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 82.4,
+    "askp1": 14220.0,
+    "bidp1": 14210.0,
+    "total_askp_rsqn": 14226.0,
+    "total_bidp_rsqn": 68725.0,
+    "vol_by_ccld": {
+     "5": 31939.0,
+     "1": 6379.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "092300",
+   "open": 14220.0,
+   "high": 14220.0,
+   "low": 14140.0,
+   "close": 14150.0,
+   "volume": 71977.0,
+   "confirmed": false,
+   "tick_count": 724,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 78.92,
+    "askp1": 14150.0,
+    "bidp1": 14140.0,
+    "total_askp_rsqn": 23973.0,
+    "total_bidp_rsqn": 45716.0,
+    "vol_by_ccld": {
+     "1": 8149.0,
+     "5": 63828.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "092400",
+   "open": 14150.0,
+   "high": 14220.0,
+   "low": 14140.0,
+   "close": 14200.0,
+   "volume": 40637.0,
+   "confirmed": false,
+   "tick_count": 344,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 79.8,
+    "askp1": 14210.0,
+    "bidp1": 14200.0,
+    "total_askp_rsqn": 18503.0,
+    "total_bidp_rsqn": 30876.0,
+    "vol_by_ccld": {
+     "1": 24226.0,
+     "5": 16411.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "092500",
+   "open": 14200.0,
+   "high": 14210.0,
+   "low": 14150.0,
+   "close": 14150.0,
+   "volume": 14756.0,
+   "confirmed": false,
+   "tick_count": 253,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 79.27,
+    "askp1": 14160.0,
+    "bidp1": 14150.0,
+    "total_askp_rsqn": 25402.0,
+    "total_bidp_rsqn": 53912.0,
+    "vol_by_ccld": {
+     "5": 12045.0,
+     "1": 2711.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "092600",
+   "open": 14160.0,
+   "high": 14160.0,
+   "low": 14110.0,
+   "close": 14110.0,
+   "volume": 39502.0,
+   "confirmed": false,
+   "tick_count": 519,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 77.41,
+    "askp1": 14120.0,
+    "bidp1": 14110.0,
+    "total_askp_rsqn": 18822.0,
+    "total_bidp_rsqn": 45305.0,
+    "vol_by_ccld": {
+     "1": 3558.0,
+     "5": 35944.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "092700",
+   "open": 14120.0,
+   "high": 14190.0,
+   "low": 14100.0,
+   "close": 14190.0,
+   "volume": 36297.0,
+   "confirmed": false,
+   "tick_count": 267,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 77.94,
+    "askp1": 14190.0,
+    "bidp1": 14180.0,
+    "total_askp_rsqn": 22744.0,
+    "total_bidp_rsqn": 31040.0,
+    "vol_by_ccld": {
+     "1": 19897.0,
+     "5": 16400.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "092800",
+   "open": 14190.0,
+   "high": 14190.0,
+   "low": 14180.0,
+   "close": 14190.0,
+   "volume": 9573.0,
+   "confirmed": false,
+   "tick_count": 131,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 77.97,
+    "askp1": 14190.0,
+    "bidp1": 14180.0,
+    "total_askp_rsqn": 27838.0,
+    "total_bidp_rsqn": 35140.0,
+    "vol_by_ccld": {
+     "1": 4393.0,
+     "5": 5180.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "092900",
+   "open": 14190.0,
+   "high": 14190.0,
+   "low": 14180.0,
+   "close": 14190.0,
+   "volume": 13351.0,
+   "confirmed": false,
+   "tick_count": 128,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 77.81,
+    "askp1": 14190.0,
+    "bidp1": 14180.0,
+    "total_askp_rsqn": 30048.0,
+    "total_bidp_rsqn": 37491.0,
+    "vol_by_ccld": {
+     "1": 4673.0,
+     "5": 8678.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "093000",
+   "open": 14190.0,
+   "high": 14190.0,
+   "low": 14100.0,
+   "close": 14110.0,
+   "volume": 38974.0,
+   "confirmed": false,
+   "tick_count": 363,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 76.14,
+    "askp1": 14120.0,
+    "bidp1": 14110.0,
+    "total_askp_rsqn": 25445.0,
+    "total_bidp_rsqn": 29824.0,
+    "vol_by_ccld": {
+     "1": 3825.0,
+     "5": 35149.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "093100",
+   "open": 14110.0,
+   "high": 14120.0,
+   "low": 14050.0,
+   "close": 14050.0,
+   "volume": 37970.0,
+   "confirmed": false,
+   "tick_count": 369,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 74.86,
+    "askp1": 14060.0,
+    "bidp1": 14050.0,
+    "total_askp_rsqn": 8490.0,
+    "total_bidp_rsqn": 38165.0,
+    "vol_by_ccld": {
+     "5": 32048.0,
+     "1": 5922.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "093200",
+   "open": 14055.0,
+   "high": 14090.0,
+   "low": 14040.0,
+   "close": 14060.0,
+   "volume": 28677.0,
+   "confirmed": false,
+   "tick_count": 264,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 74.92,
+    "askp1": 14070.0,
+    "bidp1": 14060.0,
+    "total_askp_rsqn": 13423.0,
+    "total_bidp_rsqn": 44723.0,
+    "vol_by_ccld": {
+     "1": 12801.0,
+     "5": 15876.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "093300",
+   "open": 14060.0,
+   "high": 14070.0,
+   "low": 14040.0,
+   "close": 14040.0,
+   "volume": 19227.0,
+   "confirmed": false,
+   "tick_count": 175,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 74.87,
+    "askp1": 14050.0,
+    "bidp1": 14040.0,
+    "total_askp_rsqn": 19192.0,
+    "total_bidp_rsqn": 44608.0,
+    "vol_by_ccld": {
+     "5": 11409.0,
+     "1": 7818.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "093400",
+   "open": 14050.0,
+   "high": 14050.0,
+   "low": 14010.0,
+   "close": 14030.0,
+   "volume": 38932.0,
+   "confirmed": false,
+   "tick_count": 295,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 74.55,
+    "askp1": 14040.0,
+    "bidp1": 14030.0,
+    "total_askp_rsqn": 11501.0,
+    "total_bidp_rsqn": 35914.0,
+    "vol_by_ccld": {
+     "1": 13929.0,
+     "5": 25003.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "093500",
+   "open": 14030.0,
+   "high": 14040.0,
+   "low": 14000.0,
+   "close": 14010.0,
+   "volume": 27923.0,
+   "confirmed": false,
+   "tick_count": 247,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 74.77,
+    "askp1": 14040.0,
+    "bidp1": 14020.0,
+    "total_askp_rsqn": 13796.0,
+    "total_bidp_rsqn": 33824.0,
+    "vol_by_ccld": {
+     "5": 14082.0,
+     "1": 13841.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "093600",
+   "open": 14040.0,
+   "high": 14080.0,
+   "low": 14000.0,
+   "close": 14080.0,
+   "volume": 19427.0,
+   "confirmed": false,
+   "tick_count": 226,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 75.47,
+    "askp1": 14080.0,
+    "bidp1": 14070.0,
+    "total_askp_rsqn": 13558.0,
+    "total_bidp_rsqn": 31914.0,
+    "vol_by_ccld": {
+     "1": 14332.0,
+     "5": 5095.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "093700",
+   "open": 14070.0,
+   "high": 14080.0,
+   "low": 14010.0,
+   "close": 14030.0,
+   "volume": 17654.0,
+   "confirmed": false,
+   "tick_count": 249,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 74.98,
+    "askp1": 14030.0,
+    "bidp1": 14020.0,
+    "total_askp_rsqn": 12229.0,
+    "total_bidp_rsqn": 40900.0,
+    "vol_by_ccld": {
+     "5": 14359.0,
+     "1": 3295.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "093800",
+   "open": 14020.0,
+   "high": 14030.0,
+   "low": 14000.0,
+   "close": 14000.0,
+   "volume": 22265.0,
+   "confirmed": false,
+   "tick_count": 155,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 75.08,
+    "askp1": 14010.0,
+    "bidp1": 14000.0,
+    "total_askp_rsqn": 9655.0,
+    "total_bidp_rsqn": 42225.0,
+    "vol_by_ccld": {
+     "5": 11800.0,
+     "1": 10465.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "093900",
+   "open": 14010.0,
+   "high": 14070.0,
+   "low": 14000.0,
+   "close": 14040.0,
+   "volume": 21913.0,
+   "confirmed": false,
+   "tick_count": 222,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 75.07,
+    "askp1": 14040.0,
+    "bidp1": 14030.0,
+    "total_askp_rsqn": 14915.0,
+    "total_bidp_rsqn": 36873.0,
+    "vol_by_ccld": {
+     "1": 9286.0,
+     "5": 12627.0
+    },
+    "corrected": false
+   }
+  },
+  {
+   "date": "20260827",
+   "time": "094000",
+   "open": 14040.0,
+   "high": 14070.0,
+   "low": 14030.0,
+   "close": 14070.0,
+   "volume": 13777.0,
+   "confirmed": false,
+   "tick_count": 134,
+   "spike_dropped": 0,
+   "tick_derived": {
+    "cttr": 75.56,
+    "askp1": 14070.0,
+    "bidp1": 14060.0,
+    "total_askp_rsqn": 16505.0,
+    "total_bidp_rsqn": 38602.0,
+    "vol_by_ccld": {
+     "1": 10285.0,
+     "5": 3492.0
+    },
+    "corrected": false
+   }
+  }
+ ],
+ "indicators": {
+  "sma": [
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   14286.0,
+   14274.5,
+   14272.5,
+   14269.5,
+   14266.5,
+   14258.0,
+   14249.0,
+   14245.0,
+   14241.0,
+   14238.5,
+   14235.0,
+   14227.5,
+   14220.0,
+   14202.5,
+   14189.5,
+   14169.5,
+   14152.5,
+   14138.0,
+   14126.5,
+   14116.5,
+   14107.5
+  ],
+  "macd": [
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": null,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": -49.37721656627946,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": -47.426130432260834,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": -45.35703297190594,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": -43.21905595343014,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": -47.43324426142317,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": -54.980733741915174,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": -59.46972710991213,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": -63.904468613502104,
+    "signal": null,
+    "hist": null
+   },
+   {
+    "macd": -67.44844593268499,
+    "signal": -53.179561731479325,
+    "hist": -14.268884201205665
+   },
+   {
+    "macd": -71.05186467640124,
+    "signal": -56.754022320463704,
+    "hist": -14.297842355937533
+   },
+   {
+    "macd": -67.48130255621982,
+    "signal": -58.899478367614925,
+    "hist": -8.581824188604891
+   },
+   {
+    "macd": -67.9034398973181,
+    "signal": -60.70027067355556,
+    "hist": -7.203169223762536
+   },
+   {
+    "macd": -69.85350829963318,
+    "signal": -62.53091819877108,
+    "hist": -7.322590100862094
+   },
+   {
+    "macd": -67.39440510144959,
+    "signal": -63.50361557930678,
+    "hist": -3.8907895221428106
+   },
+   {
+    "macd": -62.306567494881165,
+    "signal": -63.264205962421656,
+    "hist": 0.957638467540491
+   }
+  ]
+ },
+ "meta": {
+  "bar_count": 40,
+  "confirmed_count": 0,
+  "spike_dropped": 0,
+  "tick_derived_missing": 0,
+  "sma_period": 20,
+  "macd": {
+   "fast": 12,
+   "slow": 26,
+   "signal": 9
+  },
+  "source": "file"
+ }
+}

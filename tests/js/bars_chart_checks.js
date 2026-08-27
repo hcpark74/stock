@@ -25,6 +25,9 @@ eval(extract('barsMacdDomain'));
 eval(extract('barsTimeIndex'));
 eval(extract('barsCandleWidth'));
 eval(extract('barsYAt'));
+eval(extract('barsVolumeDomain'));
+eval(extract('barsIndexAtX'));
+eval(extract('barsTimeTicks'));
 
 let failures = 0;
 const check = (label, cond) => {
@@ -111,6 +114,62 @@ const BARS = [
 {
   const y = barsYAt(5, {min: 5, max: 5}, 10, 200);
   check('zero-width domain does not produce NaN', Number.isFinite(y));
+}
+
+// 거래량 축은 0에서 시작한다 — 밑을 자르면 막대 길이 비교가 거짓말이 된다
+{
+  const d = barsVolumeDomain([{volume: 10}, {volume: 40}, {volume: 25}]);
+  check('volume domain starts at zero', d.min === 0);
+  check('volume domain covers the tallest bar', d.max >= 40);
+  const empty = barsVolumeDomain([]);
+  check('empty volume domain is finite', Number.isFinite(empty.max) && empty.max > empty.min);
+  const missing = barsVolumeDomain([{volume: null}, {}]);
+  check('missing volume does not invert the domain', missing.max > missing.min);
+}
+
+// x → 봉 인덱스는 barsTimeIndex의 역함수여야 한다 (십자선이 짚는 봉)
+{
+  const rows = [{}, {}, {}, {}, {}];
+  let roundTrip = true;
+  for (let i = 0; i < rows.length; i++) {
+    const x = barsTimeIndex(rows, i, 500, 50);
+    if (barsIndexAtX(x, 500, 50, rows.length) !== i) roundTrip = false;
+  }
+  check('index at x round-trips through barsTimeIndex', roundTrip);
+  check('left of the chart clamps to the first bar', barsIndexAtX(0, 500, 50, 5) === 0);
+  check('right of the chart clamps to the last bar', barsIndexAtX(9999, 500, 50, 5) === 4);
+  check('zero width does not produce NaN', Number.isFinite(barsIndexAtX(10, 0, 50, 5)));
+  check('no bars still gives a valid index', barsIndexAtX(100, 500, 50, 0) === 0);
+}
+
+// 시간 눈금은 겹치지 않을 간격만 고르고, 봉이 빠져도 어긋나지 않는다
+{
+  const day = [];
+  for (let m = 0; m < 360; m++) {
+    const hh = String(9 + Math.floor(m / 60)).padStart(2, '0');
+    const mm = String(m % 60).padStart(2, '0');
+    day.push({time: hh + mm + '00'});
+  }
+  const wide = barsTimeTicks(day, 1400, 56);
+  check('tight chart does not label every minute', wide.length < 30);
+  check('tight chart still labels something', wide.length > 1);
+  const gapPx = (1400 / day.length) * (wide[1].index - wide[0].index);
+  check('labels are at least the minimum gap apart', gapPx >= 56);
+  check('labels read as HH:MM', /^\d\d:\d\d$/.test(wide[0].label));
+  check('label matches its own bar time',
+    wide[0].label.replace(':', '') === day[wide[0].index].time.slice(0, 4));
+
+  // 봉이 빠진 구간이 있어도 라벨은 그 봉의 실제 시각을 따른다
+  const holes = [{time: '090000'}, {time: '091500'}, {time: '093000'}, {time: '100000'}];
+  const t = barsTimeTicks(holes, 600, 56);
+  check('gapped series labels every surviving round minute', t.length === 4);
+  check('gapped series keeps time and index aligned',
+    t.every(x => x.label.replace(':', '') === holes[x.index].time.slice(0, 4)));
+
+  check('no bars gives no ticks', barsTimeTicks([], 600, 56).length === 0);
+  check('zero width gives no ticks', barsTimeTicks(holes, 0, 56).length === 0);
+  check('malformed time is skipped, not guessed',
+    barsTimeTicks([{time: 'zzzz'}, {time: '100000'}], 600, 56).length === 1);
 }
 
 if (failures) { console.error(`\n${failures} check(s) failed`); process.exit(1); }

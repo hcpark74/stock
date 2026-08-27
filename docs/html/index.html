@@ -5,7 +5,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="assets/app.css?v=20260827-track-b">
+<link rel="stylesheet" href="assets/app.css?v=20260828-axis-vol">
 
 <!-- TOP BAR -->
 <div class="tb">
@@ -147,8 +147,12 @@
           </div>
           <canvas id="price-flow" width="760" height="180"></canvas>
           <div class="bars-chart">
-            <div class="bars-sub" id="bars-sub">봉 수집 대기</div>
+            <div class="bars-head">
+              <div class="bars-sub" id="bars-sub">봉 수집 대기</div>
+              <div class="bars-readout" id="bars-readout"></div>
+            </div>
             <canvas id="bars-price" width="760" height="240"></canvas>
+            <canvas id="bars-volume" width="760" height="64"></canvas>
             <canvas id="bars-macd" width="760" height="120"></canvas>
           </div>
         </div>
@@ -393,4 +397,4 @@
 </div>
 
 <script src="assets/app.js?v=20260825-tracking-warning"></script>
-<script src="assets/bars_chart.js?v=20260827-track-b2"></script>
+<script src="assets/bars_chart.js?v=20260828-axis-vol"></script>
