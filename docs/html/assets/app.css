@@ -303,3 +303,9 @@ tr:hover td{background:var(--s2);}
   .scards.asset-cards{grid-template-columns:repeat(2,minmax(0,1fr));}
   .view-head{flex-direction:column;}
 }
+
+/* 트랙 B 봉·지표 차트 — 트랙 A 틱 차트 아래에 세로로 쌓는다 */
+.bars-chart { margin-top: 10px; }
+.bars-chart canvas { width: 100%; display: block; }
+#bars-macd { margin-top: 4px; }
+.bars-sub { font-size: 11px; color: #787b86; margin-bottom: 4px; }
