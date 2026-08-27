@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -101,7 +102,28 @@ _ASSET_CACHE_LOCK = asyncio.Lock()
 _ASSET_LAST_ERROR: dict | None = None
 _BAL_TR = {"REAL": "TTTC8434R", "PAPER": "VTTC8434R"}
 
-app = FastAPI(title="Daily1 Trading UI", docs_url=None, redoc_url=None)
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """트랙 B 관측 계층의 기동·종료 배선.
+
+    main.py가 아니라 여기에 두는 이유는 두 가지다. main.py는
+    `src/release.py`의 _STRATEGY_FILES에 있어 손대면 트랙 A의 전략 지문이
+    돌고(짝 성과 표본이 초기화된다) 이 파일은 그 목록 밖이다. 그리고
+    main.py가 uvicorn을 loop="none"으로 봇의 이벤트 루프 안에서 태스크로
+    돌리므로, 이 훅은 틱을 처리하는 것과 같은 루프에서 실행된다.
+    """
+    bars.install()
+    bars.start()
+    try:
+        yield
+    finally:
+        bars.stop()
+
+
+app = FastAPI(
+    title="Daily1 Trading UI", docs_url=None, redoc_url=None, lifespan=_lifespan
+)
 
 
 # ─── 상태/선정 요약 헬퍼 ───────────────────────────────────────────────
@@ -954,6 +976,13 @@ async def api_f1() -> JSONResponse:
 
 _BARS_DATE_RE = re.compile(r"^\d{8}$")
 _BARS_TICKER_RE = re.compile(r"^[A-Za-z0-9]{1,12}$")
+# 정규장 1분 봉은 하루 391개다. 그 몇 배 위를 상한으로 둔다 — 이 위의 기간은
+# 오타이지 의도가 아니다.
+_BARS_MAX_PERIOD = 2000
+
+
+def _valid_period(value: int) -> bool:
+    return 1 <= value <= _BARS_MAX_PERIOD
 
 
 @app.get("/api/bars")
@@ -971,16 +1000,21 @@ async def api_bars(
     지표를 브라우저가 아니라 여기서 계산한다 — 전략 판정과 차트가 같은 순수
     함수를 타야 "차트는 신호인데 봇은 안 샀다"는 혼란이 없다.
 
-    `date`·`ticker`는 파일 경로 조합에 쓰이므로 형식을 검증한다 — 검증 실패는
-    200과 빈 배열로 조용히 처리하되 `meta.source`를 "invalid"로 남겨 원인을
-    드러낸다 (UI가 30초마다 폴링하므로 에러를 내면 안 된다).
+    `date`·`ticker`는 파일 경로 조합에 쓰이고, 네 기간(`sma`/`fast`/`slow`/
+    `signal`)은 indicators가 0 이하에서 ValueError를 올리므로 함께 검증한다 —
+    검증 실패는 200과 빈 배열로 조용히 처리하되 `meta.source`를 "invalid"로
+    남겨 원인을 드러낸다 (UI가 30초마다 폴링하므로 에러를 내면 안 된다).
     """
     trade_date = date or datetime.now(KST).strftime("%Y%m%d")
     target = ticker or (state.get().target_ticker or "")
 
     rows: list = []
     source = "empty"
-    if not _BARS_DATE_RE.match(trade_date) or (target and not _BARS_TICKER_RE.match(target)):
+    if (
+        not _BARS_DATE_RE.match(trade_date)
+        or (target and not _BARS_TICKER_RE.match(target))
+        or not all(_valid_period(p) for p in (sma, fast, slow, signal))
+    ):
         source = "invalid"
     elif target:
         rows = bars.series(trade_date, target)

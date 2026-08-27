@@ -120,6 +120,77 @@ async def test_correction_creates_bars_the_tick_stream_missed(monkeypatch):
     assert rows[1]["confirmed"] is True
 
 
+async def test_the_minute_still_in_progress_is_never_merged(monkeypatch):
+    """진행 중인 분의 공식 봉은 부분값이다 — 병합하면 거짓 확정 + 이중 계상.
+
+    09:40:30에 0940을 부분 OHLCV로 덮고 confirmed=True로 찍으면, 그 분의
+    남은 틱이 공식 거래량 위에 다시 더해진다. 장 마지막 분은 다음 폴링이
+    없어 영구히 틀린 채로 남는다.
+    """
+    bars.on_tick(_tick(14570, minute="0939", qty=10))
+    bars.on_tick(_tick(14600, minute="0940", qty=7))
+    bars.drain()
+
+    async def fake_fetch(ticker, *, hour_cursor=""):
+        return {"rt_cd": "0", "output2": [
+            _official("093900", 14500, 14700, 14450, 14650, 800),
+            _official("094000", 14650, 14660, 14640, 14655, 12),   # 미완성
+        ]}
+
+    monkeypatch.setattr(bars.kis_minute_bars, "fetch_minute_bars", fake_fetch)
+
+    corrected = await bars.correct_once(
+        "20260827", "006340", now=datetime(2026, 8, 27, 9, 40, 30, tzinfo=KST)
+    )
+
+    rows = {r["time"]: r for r in bars.series("20260827", "006340")}
+    assert corrected == 1
+    assert rows["093900"]["close"] == 14650.0
+    assert rows["093900"]["confirmed"] is True
+    # 진행 중인 분은 틱 집계값 그대로, 미확정 그대로.
+    assert rows["094000"]["close"] == 14600.0
+    assert rows["094000"]["volume"] == 7.0
+    assert rows["094000"]["confirmed"] is False
+
+
+async def test_restore_also_skips_the_minute_still_in_progress(monkeypatch):
+    async def fake_day(ticker, *, max_pages=20):
+        return [
+            {"date": "20260827", "time": "093900",
+             "open": 14500.0, "high": 14700.0, "low": 14450.0,
+             "close": 14650.0, "volume": 800.0},
+            {"date": "20260827", "time": "094000",
+             "open": 14650.0, "high": 14660.0, "low": 14640.0,
+             "close": 14655.0, "volume": 12.0},
+        ], {"empty_bar": 0, "field_missing": 0}
+
+    monkeypatch.setattr(bars.kis_minute_bars, "fetch_day_bars", fake_day)
+
+    restored = await bars.restore_day(
+        "20260827", "006340", now=datetime(2026, 8, 27, 9, 40, 30, tzinfo=KST)
+    )
+
+    assert restored == 1
+    assert [r["time"] for r in bars.series("20260827", "006340")] == ["093900"]
+
+
+async def test_correcting_a_past_day_merges_every_minute(monkeypatch):
+    # 오늘이 아닌 날짜에는 "진행 중인 분"이 없다.
+    async def fake_fetch(ticker, *, hour_cursor=""):
+        return {"rt_cd": "0", "output2": [
+            _official("093900", 14500, 14700, 14450, 14650, 800),
+            _official("094000", 14650, 14660, 14640, 14655, 12),
+        ]}
+
+    monkeypatch.setattr(bars.kis_minute_bars, "fetch_minute_bars", fake_fetch)
+
+    corrected = await bars.correct_once(
+        "20260827", "006340", now=datetime(2026, 8, 28, 9, 40, 30, tzinfo=KST)
+    )
+
+    assert corrected == 2
+
+
 async def test_a_failed_fetch_leaves_the_bars_untouched(monkeypatch):
     bars.on_tick(_tick(14570))
     bars.drain()

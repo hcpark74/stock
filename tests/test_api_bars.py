@@ -136,3 +136,57 @@ def test_bad_date_format_is_rejected_without_an_error():
     assert body["bars"] == []
     assert body["indicators"]["sma"] == []
     assert body["meta"]["source"] == "invalid"
+
+
+@pytest.mark.parametrize(
+    "period_param",
+    ["sma", "fast", "slow", "signal"],
+)
+def test_a_non_positive_indicator_period_is_rejected_without_an_error(period_param):
+    # indicators.sma/ema는 period<=0에서 ValueError를 올린다. UI가 30초마다
+    # 폴링하므로 500이 나가면 안 된다.
+    for m in range(30):
+        bars._series.setdefault(("20260827", "006340"), {})[f"09{m:02d}00"] = _row(
+            m, 14500 + m * 10
+        )
+
+    res = client.get(
+        "/api/bars",
+        params={"date": "20260827", "ticker": "006340", period_param: 0},
+    )
+    body = res.json()
+
+    assert res.status_code == 200
+    assert body["bars"] == []
+    assert body["indicators"]["sma"] == []
+    assert body["indicators"]["macd"] == []
+    assert body["meta"]["source"] == "invalid"
+
+
+@pytest.mark.parametrize("period_param", ["sma", "fast", "slow", "signal"])
+def test_a_negative_or_absurd_indicator_period_is_rejected(period_param):
+    for m in range(30):
+        bars._series.setdefault(("20260827", "006340"), {})[f"09{m:02d}00"] = _row(
+            m, 14500 + m * 10
+        )
+
+    for value in (-1, 10_000_000):
+        res = client.get(
+            "/api/bars",
+            params={"date": "20260827", "ticker": "006340", period_param: value},
+        )
+
+        assert res.status_code == 200
+        assert res.json()["meta"]["source"] == "invalid"
+
+
+def test_the_server_lifespan_installs_and_starts_the_bar_collector():
+    """관측 계층의 유일한 프로덕션 기동 지점이다 (FINDING 1)."""
+    assert bars.on_tick not in tick_capture._tick_listeners
+
+    with TestClient(app):
+        assert bars.on_tick in tick_capture._tick_listeners
+        assert bars._supervisor is not None
+        assert not bars._supervisor.done()
+
+    assert bars._supervisor is None

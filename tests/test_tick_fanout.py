@@ -45,8 +45,20 @@ def test_listener_runs_even_when_no_capture_is_attached():
     assert len(seen) == 1
 
 
-def test_a_raising_listener_does_not_break_the_others_or_the_caller():
+def test_a_raising_listener_does_not_break_the_others_or_the_caller(monkeypatch):
+    # 이 브랜치에서 가장 중요한 주장이다 — 트랙 B의 예외가 트랙 A의 durable
+    # 틱 캡처를 끊으면 안 된다. 그래서 캡처 대역을 붙여 놓고 그 enqueue가
+    # 실제로 틱을 받았는지 단언한다(눈으로 보는 검증 대신).
     seen = []
+    captured = []
+
+    class _StubCapture:
+        ticker = "006340"
+
+        def enqueue(self, tick):
+            captured.append(tick)
+
+    monkeypatch.setattr(tick_capture, "_capture", _StubCapture())
 
     def boom(_tick):
         raise RuntimeError("listener exploded")
@@ -57,6 +69,8 @@ def test_a_raising_listener_does_not_break_the_others_or_the_caller():
     tick_capture.enqueue(_tick())   # 예외가 새어 나오면 실패
 
     assert len(seen) == 1
+    assert len(captured) == 1
+    assert captured[0]["price"] == 14570.0
 
 
 def test_clear_removes_every_listener():
