@@ -95,3 +95,44 @@ def test_indicator_periods_are_configurable():
 
     assert body["indicators"]["sma"][2] is not None
     assert body["indicators"]["macd"][3]["macd"] is not None
+
+
+def test_ticker_path_traversal_is_rejected_and_contained(tmp_path):
+    # tmp_path here is the same instance the autouse isolated_bars fixture patched
+    # bars._BARS_DIR to. Plant a marker file OUTSIDE that directory and try to
+    # reach it with a ticker containing ".." segments.
+    outside_marker = tmp_path.parent / "marker_outside.json"
+    outside_marker.write_text(json.dumps([{"secret": "outside-data"}]), encoding="utf-8")
+
+    res = client.get(
+        "/api/bars",
+        params={"date": "20260827", "ticker": "x/../../marker_outside"},
+    )
+    body = res.json()
+
+    assert res.status_code == 200
+    assert body["bars"] == []
+    assert body["meta"]["source"] == "invalid"
+    assert "outside-data" not in res.text
+
+
+def test_malformed_bars_file_is_reported_as_empty_not_memory(tmp_path):
+    (tmp_path / "20260827_006340.json").write_text("{not valid json", encoding="utf-8")
+
+    res = client.get("/api/bars", params={"date": "20260827", "ticker": "006340"})
+    body = res.json()
+
+    assert res.status_code == 200
+    assert body["bars"] == []
+    assert body["indicators"]["sma"] == []
+    assert body["meta"]["source"] == "empty"
+
+
+def test_bad_date_format_is_rejected_without_an_error():
+    res = client.get("/api/bars", params={"date": "2026-08-27", "ticker": "006340"})
+    body = res.json()
+
+    assert res.status_code == 200
+    assert body["bars"] == []
+    assert body["indicators"]["sma"] == []
+    assert body["meta"]["source"] == "invalid"

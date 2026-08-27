@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -951,6 +952,10 @@ async def api_f1() -> JSONResponse:
     )
 
 
+_BARS_DATE_RE = re.compile(r"^\d{8}$")
+_BARS_TICKER_RE = re.compile(r"^[A-Za-z0-9]{1,12}$")
+
+
 @app.get("/api/bars")
 async def api_bars(
     track: str = "B",
@@ -965,19 +970,30 @@ async def api_bars(
 
     지표를 브라우저가 아니라 여기서 계산한다 — 전략 판정과 차트가 같은 순수
     함수를 타야 "차트는 신호인데 봇은 안 샀다"는 혼란이 없다.
+
+    `date`·`ticker`는 파일 경로 조합에 쓰이므로 형식을 검증한다 — 검증 실패는
+    200과 빈 배열로 조용히 처리하되 `meta.source`를 "invalid"로 남겨 원인을
+    드러낸다 (UI가 30초마다 폴링하므로 에러를 내면 안 된다).
     """
     trade_date = date or datetime.now(KST).strftime("%Y%m%d")
     target = ticker or (state.get().target_ticker or "")
 
-    rows = bars.series(trade_date, target) if target else []
-    source = "memory"
-    if not rows and target:
-        path = bars.bars_path(trade_date, target)
-        try:
-            rows = json.loads(path.read_text(encoding="utf-8"))
-            source = "file"
-        except (OSError, ValueError):
-            rows = []
+    rows: list = []
+    source = "empty"
+    if not _BARS_DATE_RE.match(trade_date) or (target and not _BARS_TICKER_RE.match(target)):
+        source = "invalid"
+    elif target:
+        rows = bars.series(trade_date, target)
+        if rows:
+            source = "memory"
+        else:
+            path = bars.bars_path(trade_date, target)
+            try:
+                rows = json.loads(path.read_text(encoding="utf-8"))
+                source = "file"
+            except (OSError, ValueError):
+                rows = []
+                source = "empty"
 
     return JSONResponse({
         "date": trade_date,
