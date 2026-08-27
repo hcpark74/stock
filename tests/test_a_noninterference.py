@@ -51,9 +51,11 @@ def test_the_listener_adds_no_measurable_cost_to_the_tick_path():
     bars.install()
     with_listener = min(_elapsed(ticks) for _ in range(3))
 
-    # 동기 경로에 더해지는 일은 deque.append 하나다. 3배는 매우 느슨한 상한이고,
-    # 여기서 걸린다면 팬아웃 지점에서 집계·지표를 돌리고 있다는 뜻이다.
-    assert with_listener < baseline * 3 + 0.05
+    # 동기 경로에 더해지는 일은 deque.append 하나다. 5배(바닥 0.01s)는
+    # 스케줄러 잡음에는 여유가 있으면서(측정값 대비 4배 이상 헤드룸) 대략
+    # 10배 이상의 회귀 — 팬아웃 지점에서 집계·지표를 도는 것에 해당하는
+    # 규모 — 는 잡아내는 상한이다.
+    assert with_listener < max(baseline * 5, 0.01)
 
 
 def test_stage_one_never_opens_a_database_connection():
@@ -81,14 +83,41 @@ def test_the_bars_module_does_not_import_db():
     import ast
     import inspect
 
-    tree = ast.parse(inspect.getsource(bars))
-    imported = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imported.update(a.name for a in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            for alias in node.names:
-                imported.add(f"{node.module}.{alias.name}")
+    def _modules_imported(source: str) -> set[str]:
+        # 모듈-플러스-이름 문자열이 아니라 "참조된 모듈"의 집합을 모은다.
+        # node.module 자체를 넣는 것이 핵심이다 — 그래야
+        # `from src.db import open_trade`가 "src.db"를 직접 내놓는다.
+        tree = ast.parse(source)
+        modules = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                modules.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    modules.add(node.module)
+                    modules.update(
+                        f"{node.module}.{alias.name}" for alias in node.names
+                    )
+        return modules
 
-    assert "src.db" not in imported
-    assert not any(name.endswith(".db") for name in imported)
+    def _touches_db(modules: set[str]) -> bool:
+        return any(
+            m == "db" or m == "src.db" or m.startswith("src.db.") for m in modules
+        )
+
+    # 검사기 자체를 먼저 검증한다: 세 가지 import 형태(직접 import, `from src
+    # import db`, `from src.db import <이름>`)는 모두 걸려야 하고, db를
+    # 언급만 하는 주석/독스트링은 걸리면 안 된다(부분 문자열 매칭 결함 없음을
+    # 증명한다).
+    assert _touches_db(_modules_imported("import src.db"))
+    assert _touches_db(_modules_imported("from src import db"))
+    assert _touches_db(_modules_imported("from src.db import open_trade"))
+    assert not _touches_db(
+        _modules_imported(
+            "# this comment mentions db but does not import it\n"
+            '"""docstring also mentions db here"""\n'
+            "x = 1\n"
+        )
+    )
+
+    assert not _touches_db(_modules_imported(inspect.getsource(bars)))
