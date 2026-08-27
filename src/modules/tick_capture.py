@@ -730,8 +730,33 @@ def attach_or_resume(
     return start(trade_date, ticker, trade_id, experiment_id, entry_at)
 
 
+# 관측 팬아웃 — 트랙 B의 봉 집계기가 여기 붙는다. live.push_tick은 가격과
+# 종목만 받아 OHLCV를 만들 수 없으므로(거래량 없음) 팬아웃은 여기에 둔다.
+_tick_listeners: list = []
+
+
+def register_tick_listener(fn) -> None:
+    """틱 스트림 구독자를 등록한다. 중복 등록은 무시한다."""
+    if fn not in _tick_listeners:
+        _tick_listeners.append(fn)
+
+
+def clear_tick_listeners() -> None:
+    """테스트 전용 — 등록된 구독자를 모두 제거한다."""
+    _tick_listeners.clear()
+
+
 def enqueue(tick: dict) -> None:
-    """논블로킹. 활성 캡처가 있고 종목이 일치할 때만 적재한다."""
+    """논블로킹. 활성 캡처가 있고 종목이 일치할 때만 적재한다.
+
+    구독자 호출을 캡처 활성 검사보다 **앞에** 둔다 — 캡처가 붙지 않은
+    순간에도 트랙 B는 봉을 만들어야 한다.
+    """
+    for fn in _tick_listeners:
+        try:
+            fn(tick)
+        except Exception:  # noqa: BLE001 — 구독자 실패가 캡처·주문 경로를 흔들면 안 된다
+            pass
     cap = _capture
     if cap is not None and tick.get("ticker") in (None, cap.ticker):
         cap.enqueue(tick)
