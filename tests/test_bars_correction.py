@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -8,6 +9,11 @@ from src.api import kis_minute_bars as mb
 from src.modules import tick_capture
 
 KST = ZoneInfo("Asia/Seoul")
+
+# isolated_bars가 ensure_worker를 no-op으로 스텁하기 전에 실물을 잡아 둔다.
+# 워커 생애주기(지연 생성의 멱등성, 루프 없을 때의 조용한 반환, reset()의
+# 취소)를 테스트하려면 스텁이 아니라 진짜 함수를 호출해야 한다.
+_REAL_ENSURE_WORKER = bars.ensure_worker
 
 
 def _tick(price, minute="0935", qty=10):
@@ -157,3 +163,52 @@ async def test_worker_logs_and_exits_without_propagating(monkeypatch):
     monkeypatch.setattr(bars, "drain", exploding_drain)
 
     await bars.worker("20260827", "006340")   # 예외가 새어 나오면 실패
+
+
+def test_ensure_worker_without_a_running_loop_returns_quietly():
+    _REAL_ENSURE_WORKER("20260827", "006340")
+
+    assert bars._workers == {}
+
+
+async def test_ensure_worker_is_idempotent(monkeypatch):
+    async def fake_worker(date, ticker):
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            raise
+
+    monkeypatch.setattr(bars, "worker", fake_worker)
+
+    _REAL_ENSURE_WORKER("20260827", "006340")
+    first = bars._workers[("20260827", "006340")]
+    _REAL_ENSURE_WORKER("20260827", "006340")
+    second = bars._workers[("20260827", "006340")]
+
+    assert len(bars._workers) == 1
+    assert first is second
+
+    first.cancel()
+    try:
+        await first
+    except asyncio.CancelledError:
+        pass
+
+
+async def test_reset_cancels_a_registered_worker_task(monkeypatch):
+    async def fake_worker(date, ticker):
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            raise
+
+    monkeypatch.setattr(bars, "worker", fake_worker)
+
+    _REAL_ENSURE_WORKER("20260827", "006340")
+    task = bars._workers[("20260827", "006340")]
+
+    bars.reset()
+    await asyncio.sleep(0)
+
+    assert task.cancelled()
+    assert bars._workers == {}
