@@ -67,8 +67,15 @@ const BARS_PAD = {l: 52, r: 14, t: 12, b: 22};
 
 function barsResize(canvas) {
   const ratio = window.devicePixelRatio || 1;
+  // 표시 높이는 최초 1회만 재고 그 뒤로는 붙잡아 둔 값을 쓴다. CSS가 높이를
+  // 잡아 주지 못하면(예: app.css가 낡은 채로 캐시된 경우) canvas의 height
+  // 속성이 곧 레이아웃 높이가 되고, 아래에서 거기에 DPR을 곱해 되쓰는 순간
+  // 갱신할 때마다 캔버스가 커지는 폭주가 된다. 가로는 CSS width:100%가 잡는다.
+  if (!canvas.dataset.baseH) {
+    canvas.dataset.baseH = String(canvas.clientHeight || canvas.height || 80);
+  }
   const displayW = Math.max(320, Math.round(canvas.clientWidth || canvas.width));
-  const displayH = Math.max(80, Math.round(canvas.clientHeight || canvas.height));
+  const displayH = Math.max(80, Math.round(Number(canvas.dataset.baseH)));
   const pw = Math.round(displayW * ratio);
   const ph = Math.round(displayH * ratio);
   if (canvas.width !== pw || canvas.height !== ph) { canvas.width = pw; canvas.height = ph; }

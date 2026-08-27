@@ -306,6 +306,11 @@ tr:hover td{background:var(--s2);}
 
 /* 트랙 B 봉·지표 차트 — 트랙 A 틱 차트 아래에 세로로 쌓는다 */
 .bars-chart { margin-top: 10px; }
-.bars-chart canvas { width: 100%; display: block; }
-#bars-macd { margin-top: 4px; }
+/* 가로는 위 #price-flow와 같이 컨테이너 전폭. 세로는 CSS로 못 박는다 —
+   높이가 CSS에 없으면 canvas의 height 속성이 곧 레이아웃 높이가 되고,
+   barsResize가 거기에 DPR을 곱해 되쓰는 순간 갱신할 때마다 캔버스가
+   커지는 폭주가 생긴다. */
+.bars-chart canvas { width: 100%; display: block; box-sizing: border-box; }
+#bars-price { height: 240px; }
+#bars-macd { height: 120px; margin-top: 4px; }
 .bars-sub { font-size: 11px; color: #787b86; margin-bottom: 4px; }
