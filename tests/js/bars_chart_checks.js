@@ -86,6 +86,7 @@ const BARS = [
   check('x is monotonically increasing', xs[0] < xs[1] && xs[1] < xs[2]);
   check('first bar sits inside the chart area', xs[0] > 40);
   check('last bar stays inside the chart area', xs[2] < 340);
+  check('empty bars do not divide by zero', Number.isFinite(barsTimeIndex([], 0, 300, 40)));
 }
 
 // 캔들 폭은 양수이고 봉이 많아질수록 좁아진다
@@ -95,6 +96,7 @@ const BARS = [
   check('candle width is positive', wide > 0 && narrow > 0);
   check('more bars means narrower candles', narrow < wide);
   check('candle width never collapses to zero', barsCandleWidth(5000, 300) >= 1);
+  check('zero bars still give a positive candle width', Number.isFinite(barsCandleWidth(0, 300)) && barsCandleWidth(0, 300) >= 1);
 }
 
 // y 매핑은 뒤집혀 있다 — 큰 값이 위(작은 y)
