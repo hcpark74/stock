@@ -331,3 +331,51 @@ def ensure_worker(date: str, ticker: str) -> None:
     except RuntimeError:
         return
     _workers[key] = loop.create_task(worker(date, ticker), name=f"track_b_bars_{ticker}")
+
+
+async def restore_day(
+    date: str,
+    ticker: str,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """장중 재시작 후 당일 봉을 공식 분봉으로 복원한다.
+
+    봉은 인메모리 누적이라 재시작하면 그날 봉이 사라진다. MACD가 26봉을
+    요구하므로(모스펙 §7.1) 복원이 없으면 재시작한 날의 B는 26분간 눈이 먼다.
+
+    복원된 봉의 틱 파생값은 None이다 — 분봉 API가 주지 않는다. 이 값을 쓰는
+    규칙을 나중에 만들면 그때 복원 구간을 신호 대상에서 제외해야 한다.
+    """
+    when = now or datetime.now(KST)
+    a_holding = state.get().position_status == "HOLDING"
+    if not should_correct(when, a_holding=a_holding, ws_stale=not live.ws_connected):
+        log("TRACK_B_RESTORE_DEFERRED", level="INFO", ticker=ticker, date=date)
+        return 0
+
+    try:
+        official, issues = await kis_minute_bars.fetch_day_bars(ticker)
+    except kis_minute_bars.MinuteBarError as exc:
+        log("TRACK_B_RESTORE_FAILED", level="WARN", ticker=ticker, error=repr(exc))
+        return 0
+    except Exception as exc:  # noqa: BLE001
+        log("TRACK_B_RESTORE_ERROR", level="WARN", ticker=ticker, error=repr(exc))
+        return 0
+
+    minutes = _series.setdefault((date, ticker), {})
+    restored = 0
+    for row in official:
+        if row["date"] != date:
+            continue
+        minute = row["time"][:4] + "00"
+        minutes[minute] = _merge_official(minutes.get(minute), {**row, "time": minute})
+        restored += 1
+
+    if restored:
+        _dirty.add((date, ticker))
+        _flush()
+        log(
+            "TRACK_B_BARS_RESTORED", level="INFO",
+            ticker=ticker, date=date, restored=restored, issues=issues,
+        )
+    return restored
