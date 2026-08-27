@@ -2,7 +2,8 @@
 
 > **상태**: 설계 확정 — 미구현. 1단계(봉·지표·차트) → 2단계(신호 엔진·그림자 기록)
 > **작성일**: 2026-08-27  
-> **갱신일**: 2026-08-27 (차트를 1단계로 끌어올려 2단계 구조로 재편)
+> **갱신일**: 2026-08-27 (차트를 1단계로 끌어올려 2단계 구조로 재편;
+> 계획 수립 중 확인된 사실로 틱 팬아웃 지점을 `live.push_tick` → `tick_capture.enqueue`로 이동 — §3.1)
 > **관련 문서**: [멀티 트랙 전략 병행 운용 설계](2026-08-25-multi-track-strategy-design.md),
 > [PRD.md](../../PRD.md), [DB_DESIGN.md](../../DB_DESIGN.md), [CODING_GUIDELINES.md](../../CODING_GUIDELINES.md)
 
@@ -14,8 +15,8 @@
 
 | | 내용 | 이 단계가 끝나면 |
 |---|---|---|
-| **1단계 — 눈** | 지문 회전 1회 · 봉/지표 계층 · 봉·지표 차트 | 봉이 쌓이기 시작하고, 09시 급등주의 분봉을 눈으로 본다 |
-| **2단계 — 판단** | 신호 엔진 v0 · `shadow_trades` | 실시간 그림자가 돌고, 1단계에 쌓인 봉으로 소급 재생해 대조한다 |
+| **1단계 — 눈** | 봉/지표 계층 · 봉·지표 차트. **A의 지문을 건드리지 않는다** | 봉이 쌓이기 시작하고, 09시 급등주의 분봉을 눈으로 본다 |
+| **2단계 — 판단** | 신호 엔진 v0 · `shadow_trades`. 지문이 **한 번** 돈다 | 실시간 그림자가 돌고, 1단계에 쌓인 봉으로 소급 재생해 대조한다 |
 
 ## 1. 목표와 완료 정의
 
@@ -65,6 +66,7 @@
 | 항목 | 결정 |
 |---|---|
 | 순서 | **차트가 먼저**(1단계), 신호 엔진이 나중(2단계) — §1.3 |
+| 틱 팬아웃 지점 | **`tick_capture.enqueue`**. `live.push_tick`은 거래량이 없어 불가 — §3.1 |
 | 규칙을 담는 법 | **v0 하드코딩 + 파라미터만 `strategy_configs`** |
 | 규칙의 숫자 | 1단계 차트를 보고 정한다. 미리 확정하지 않는다 |
 | 검증 수단 | **차트 + 기록 + 재생 검증** 셋 다 |
@@ -95,28 +97,59 @@ baseline-39cf806f8eac  1건 (08-27)
 두면 **B를 만질 때마다 A의 표본이 리셋되고**, 모스펙 §6.4가 요구하는 20건은 영영 모이지
 않는다.
 
-### 3.1 대안
+### 3.1 훅은 `live.py`가 아니라 `tick_capture`에 건다
 
-`live.py`에는 **영구적인 훅 한 줄**만 넣는다.
+`live.push_tick`에는 훅을 걸 수 없다. **넘겨받는 값이 가격과 종목뿐이기 때문이다.**
 
 ```python
-# src/live.py — 이 파일에서 B를 위해 늘어나는 코드의 전부
+# f4_tracking.py:805
+live.push_tick(price, ticker=ticker)          # 거래량이 없다 → OHLCV 불가
+
+# f4_tracking.py:815 — 같은 함수, 열 줄 아래
+tick_capture.enqueue({
+    "source_ts": ..., "price": price, "qty": meta.get("qty"),
+    "source": source, "ticker": ticker,
+    "raw": meta.get("raw"),                    # 46필드 전부
+})
+```
+
+§6.1이 요구하는 값 — 거래량(idx 12)·체결강도(18)·최우선호가(10/11)·총잔량(38/39) — 은
+**전부 `raw`에만 있다.** `tick_capture.enqueue`가 유일하게 성립하는 경로다.
+
+그리고 [release.py:12](../../../src/release.py#L12)에 이 선택의 근거가 이미 적혀 있다.
+
+> 주문 판단·상태 복구에 실제로 참여하는 파일만 넣는다. 관측 전용 모듈
+> (tick_capture, f1_snapshot_selector 등)은 제외한다 — 관측 코드 수정이 지문을 바꾸면 새
+> experiment_id가 열려 40거래일 paired 수집이 매번 0부터 다시 시작한다.
+
+**`src/modules/tick_capture.py`는 `_STRATEGY_FILES`에 없다.** §3이 논증한 원칙이 이
+코드베이스에 이미 명문화돼 있고, 트랙 B의 봉 집계는 정확히 그 주석이 말하는 "관측 전용"이다.
+
+따라서 훅은 여기 건다.
+
+```python
+# src/modules/tick_capture.py — 모듈 수준 enqueue()
 _tick_listeners: list = []
 
 def register_tick_listener(fn) -> None:
     _tick_listeners.append(fn)
 
-# push_tick() 끝에서
-for fn in _tick_listeners:
-    try:
-        fn(price, ticker, now)
-    except Exception:  # noqa: BLE001 — 리스너 실패가 A의 손절 경로를 흔들면 안 된다
-        pass
+def enqueue(tick: dict) -> None:
+    for fn in _tick_listeners:
+        try:
+            fn(tick)
+        except Exception:  # noqa: BLE001 — 리스너 실패가 캡처·주문 경로를 흔들면 안 된다
+            pass
+    cap = _capture
+    if cap is not None and tick.get("ticker") in (None, cap.ticker):
+        cap.enqueue(tick)
 ```
 
-OHLCV 집계는 새 모듈 `src/bars.py`가 갖는다. `_accumulate_minute`와 `_minute_history`는
-**무변경**이므로 UI 가격흐름도, 모스펙 §8.3의 "`drawPriceFlow`를 건드리지 않는다"는 결정도
-함께 지켜진다.
+리스너를 **캡처 활성 검사보다 앞에** 둔다. 캡처가 붙지 않은 순간에도 B는 봉을 만들어야 한다.
+
+`src/live.py`는 **한 줄도 바뀌지 않는다.** `_accumulate_minute`·`_minute_history`·UI
+가격흐름이 전부 무변경이고, 모스펙 §8.3의 "`drawPriceFlow`를 건드리지 않는다"도 함께
+지켜진다.
 
 ### 3.2 지문 목록을 둘로 나눈다
 
@@ -128,13 +161,19 @@ _TRACK_B_FILES    → 트랙 B의 지문. bars/indicators/b_signal/shadow_book/k
 근거는 모스펙 §4.7의 선례와 같다 — `src/readiness.py`가 A의 실탄 자격만 판정하므로 지문에서
 제외됐듯, B의 파일은 A의 매매 판단에 영향을 주지 않으므로 A의 지문이 아니다.
 
-**결과: 이 덩어리에서 A의 지문은 딱 한 번 돈다** (`live.py` 훅 + `db.py` 테이블 + `main.py`
-기동 배선). 이후 B를 아무리 고쳐도 A의 지문은 그대로다.
+**결과: 1단계에서 A의 지문은 한 번도 돌지 않는다.** 훅이 `tick_capture`로 옮겨가면서
+`live.py`도 `main.py`도 건드릴 이유가 사라졌다.
 
-`main.py`도 `_STRATEGY_FILES`에 있으므로 B의 워커를 띄우는 배선 자체가 지문을 돌린다. 피할
-길이 없다 — 모든 진입점이 지문 파일이다. 따라서 **배선은 한 번에 끝나는 모양**으로 넣는다.
-`bars.start()` / `bars.stop()` 호출 한 쌍이고, B의 내부가 어떻게 바뀌든 이 두 줄은 변하지
-않는다.
+`main.py`가 필요 없어진 이유는 **`bars`가 틱 스트림만으로 스스로 산다**는 것이다. 첫 틱이
+오면 그 (날짜, 종목)의 봉 계열을 시작하고, 봉이 닫힐 때마다 파일로 write-through 하며, 날짜나
+종목이 바뀌면 이전 계열을 마감한다. 기동·종료 배선이 없으므로 진입점 파일을 손대지 않는다.
+
+정정 폴러(§6.2)만 asyncio 태스크가 필요한데, 첫 틱이 `f4`의 코루틴 안에서 도착하므로 그
+자리에서 지연 생성(`asyncio.create_task`)한다. 15:30 이후 또는 일정 시간 틱이 끊기면 스스로
+종료한다.
+
+**A의 지문은 2단계에서 딱 한 번 돈다** — `db.py`에 `shadow_trades`를 추가할 때다. 그때가
+유일하고, 이후 B를 아무리 고쳐도 A의 지문은 그대로다.
 
 ## 4. 모듈 경계
 
@@ -160,30 +199,29 @@ import하지 않는다" 규칙 때문이다. `live.py`와 같은 층위의 인�
 그 규칙 덕에 **`b_signal.py`는 봉을 받아 신호를 돌려주는 순수 함수**가 된다. 오프라인
 재생 검증과 실시간이 같은 코드를 타고, 테스트가 결정적이다.
 
-지문 파일 수정은 셋뿐이고 **전부 1단계에서 한꺼번에** 끝낸다.
+기존 파일 수정은 둘뿐이다.
 
-| 파일 | 변경 | 재발 여부 |
-|---|---|---|
-| `src/live.py` | `register_tick_listener` + `push_tick` 팬아웃 | 한 번. 이후 무변경 |
-| `src/db.py` | `shadow_trades` CREATE TABLE | 한 번. 이후 무변경 |
-| `main.py` | `bars.start()` / `bars.stop()` 호출 한 쌍 | 한 번. 이후 무변경 |
+| 파일 | 변경 | 지문 | 단계 |
+|---|---|---|---|
+| `src/modules/tick_capture.py` | `register_tick_listener` + `enqueue` 팬아웃 (§3.1) | **안 돈다** | 1 |
+| `docs/html/index.html` | 캔버스 2개 + `<script>` 한 줄 | 안 돈다 | 1 |
+| `src/api/server.py` | `/api/bars` 엔드포인트 (§9.3) | 안 돈다 | 1 |
+| `src/db.py` | `shadow_trades` CREATE TABLE | **한 번 돈다** | 2 |
 
-**`shadow_trades` 테이블은 1단계에서 만들고 비워 둔다.** 쓰는 것은 2단계지만, 2단계에
-만들면 지문이 한 번 더 돈다. 빈 테이블 하나를 미리 두는 비용이 A의 표본을 한 번 더 쪼개는
-비용보다 훨씬 싸다.
-
-`src/api/server.py`는 `_STRATEGY_FILES`에 없다. `/api/bars`(§9.3) 추가는 지문을 돌리지 않는다.
+`tick_capture.py`·`server.py`·`index.html`·`app.css`는 전부 `_STRATEGY_FILES` 밖이다.
+**1단계는 A의 지문을 건드리지 않고 끝난다.**
 
 ## 5. 데이터 흐름
 
 ```
 WS 체결 틱 (46필드, 모스펙 §11.1)
-  → f4._handle_price_tick                        [무변경]
-      ├→ live.push_tick        A: UI·틱버퍼      [팬아웃 훅만 추가]
-      │     └→ bars.on_tick    논블로킹 deque     [신규]
-      └→ tick_capture.enqueue  durable           [무변경]
+  → f4._handle_price_tick                            [무변경]
+      ├→ live.push_tick        A: UI·틱버퍼          [무변경]
+      └→ tick_capture.enqueue  이미 try/except 안     [팬아웃 훅만 추가]
+            ├→ bars.on_tick    논블로킹 deque         [신규]
+            └→ cap.enqueue     durable               [무변경]
 
-  bars 워커 (별도 asyncio task, 봉 마감에만 깨어남)
+  bars 워커 (지연 생성 asyncio task, 봉 마감에만 깨어남)
       → 1분 OHLCV 확정 + 틱파생값 집계                      [1단계]
       → 분봉 API 정정   09:11 이후 · BACKGROUND · 1분 1회    [1단계]
                         A가 HOLDING이고 WS stale이면 스킵 (§6.3)
@@ -479,12 +517,18 @@ CREATE TABLE IF NOT EXISTS shadow_trades (
 
 ### 12.1 B는 A의 손절 앞에 서지 않는다
 
-[f4_tracking.py:805](../../../src/modules/f4_tracking.py#L805)의 `live.push_tick`은
-`_process_tick`(청산 판정)보다 **앞에서 동기 실행**된다. 바로 아래 `tick_capture.enqueue`는
-try/except로 격리돼 있지만 `push_tick`은 무방비다.
+틱 팬아웃 지점은 `_process_tick`(청산 판정)보다 **앞에서 동기 실행**된다. 여기서 B가 무슨
+일을 하든 A의 손절이 그만큼 늦어진다.
 
-`bars.on_tick`은 [tick_capture.py:264](../../../src/modules/tick_capture.py#L264)의 계약을
-그대로 복사한다.
+§3.1이 훅을 `tick_capture.enqueue`로 옮기면서 **격리가 두 겹이 됐다.**
+
+1. `tick_capture.enqueue` 호출부 자체가
+   [f4_tracking.py:810](../../../src/modules/f4_tracking.py#L810)에서 이미 try/except로
+   감싸여 있다 — *"캡처는 관측 전용, 절대 전파하지 않는다"*
+2. 팬아웃 루프가 리스너별로 다시 try/except 한다 (§3.1)
+
+그 안에서 `bars.on_tick`은 [tick_capture.py:264](../../../src/modules/tick_capture.py#L264)의
+계약을 그대로 복사한다.
 
 ```python
 def on_tick(...) -> None:
@@ -523,13 +567,14 @@ B가 쓰는 상태는 `state.track('B')`가 반환하는 `TrackState`뿐이다. 
 | 기준 | 1단계 | 2단계 |
 |---|---|---|
 | ① 기존 스위트 무수정 통과 | ✔ | ✔ |
-| ② `trades`에 `track='B'` 0건 | ✔ (자명 — 쓰는 코드가 없다) | ✔ |
-| ③ A 무간섭 3측정 | 앞의 둘 | 셋 다 |
+| ② `trades`에 `track='B'` 0건 | ✔ (자명 — DB를 안 쓴다) | ✔ |
+| ③ A 무간섭 3측정 | ②③ (①은 자명 — 지문 파일 무수정) | 셋 다 |
 | ④ 차트 | ✔ | 마커 추가 |
 | ⑤ 재생 검증 | — | ✔ |
 
-1단계에서 세 번째 측정(A의 DB 쓰기 지연)이 빠지는 이유는 **1단계에 B의 DB 쓰기가 없기
-때문**이다. 봉은 파일로 떨어지고 `shadow_trades`는 비어 있다.
+1단계에서 세 번째 측정(A의 DB 쓰기 지연)이 빠지는 이유는 **1단계에 B의 DB 쓰기가 아예 없기
+때문**이다. 봉은 파일로 떨어진다. 첫 측정(주문 수량·금액)도 1단계에서는 자명하다 — §4에서
+1단계가 손대는 파일에 주문 경로가 하나도 없다.
 
 ### 세부 기준
 
