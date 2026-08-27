@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
-from src import db, live, readiness, state
+from src import bars, db, indicators, live, readiness, state
 from src.api import kis_rest
 from src.api.status_logic import (
     f1_summary_from_rows as _f1_summary_from_rows,
@@ -949,6 +949,55 @@ async def api_f1() -> JSONResponse:
             **summary,
         }
     )
+
+
+@app.get("/api/bars")
+async def api_bars(
+    track: str = "B",
+    date: str = "",
+    ticker: str = "",
+    sma: int = 20,
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+) -> JSONResponse:
+    """트랙 B의 1분 봉과 지표.
+
+    지표를 브라우저가 아니라 여기서 계산한다 — 전략 판정과 차트가 같은 순수
+    함수를 타야 "차트는 신호인데 봇은 안 샀다"는 혼란이 없다.
+    """
+    trade_date = date or datetime.now(KST).strftime("%Y%m%d")
+    target = ticker or (state.get().target_ticker or "")
+
+    rows = bars.series(trade_date, target) if target else []
+    source = "memory"
+    if not rows and target:
+        path = bars.bars_path(trade_date, target)
+        try:
+            rows = json.loads(path.read_text(encoding="utf-8"))
+            source = "file"
+        except (OSError, ValueError):
+            rows = []
+
+    return JSONResponse({
+        "date": trade_date,
+        "ticker": target,
+        "track": track,
+        "bars": rows,
+        "indicators": {
+            "sma": indicators.sma(rows, sma) if rows else [],
+            "macd": indicators.macd(rows, fast, slow, signal) if rows else [],
+        },
+        "meta": {
+            "bar_count": len(rows),
+            "confirmed_count": sum(1 for r in rows if r.get("confirmed")),
+            "spike_dropped": sum(int(r.get("spike_dropped") or 0) for r in rows),
+            "tick_derived_missing": sum(1 for r in rows if r.get("tick_derived") is None),
+            "sma_period": sma,
+            "macd": {"fast": fast, "slow": slow, "signal": signal},
+            "source": source,
+        },
+    })
 
 
 @app.get("/api/history")
