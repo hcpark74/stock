@@ -28,6 +28,7 @@ eval(extract('barsYAt'));
 eval(extract('barsVolumeDomain'));
 eval(extract('barsIndexAtX'));
 eval(extract('barsTimeTicks'));
+eval(extract('barsGapX'));
 
 let failures = 0;
 const check = (label, cond) => {
@@ -170,6 +171,22 @@ const BARS = [
   check('zero width gives no ticks', barsTimeTicks(holes, 0, 56).length === 0);
   check('malformed time is skipped, not guessed',
     barsTimeTicks([{time: 'zzzz'}, {time: '100000'}], 600, 56).length === 1);
+}
+
+// 갭 경계선은 두 캔들 정확히 사이에 선다
+{
+  const rows = [{}, {}, {}, {}, {}];
+  const before = barsTimeIndex(rows, 2, 500, 50);
+  const after = barsTimeIndex(rows, 3, 500, 50);
+  const x = barsGapX(rows, 3, 500, 50);
+  check('gap boundary sits between the two candles', x > before && x < after);
+  check('gap boundary is exactly halfway', near(x, (before + after) / 2));
+  check('a gap at the first bar clamps inside the chart', barsGapX(rows, 0, 500, 50) === 50);
+  check('an out-of-range index does not escape the chart',
+    barsGapX(rows, 99, 500, 50) <= 50 + 500);
+  check('a missing index does not produce NaN',
+    Number.isFinite(barsGapX(rows, undefined, 500, 50)));
+  check('no bars does not divide by zero', Number.isFinite(barsGapX([], 1, 500, 50)));
 }
 
 if (failures) { console.error(`\n${failures} check(s) failed`); process.exit(1); }

@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src import bars
-from src.api.server import app
+from src.api.server import _bar_gaps, app
 from src.modules import tick_capture
 
 client = TestClient(app)
@@ -190,3 +190,89 @@ def test_the_server_lifespan_installs_and_starts_the_bar_collector():
         assert not bars._supervisor.done()
 
     assert bars._supervisor is None
+def test_a_continuous_series_reports_no_gaps(tmp_path):
+    rows = [_row(m, 14500 + m * 10) for m in range(30)]
+    (tmp_path / "20260827_006340.json").write_text(json.dumps(rows), encoding="utf-8")
+
+    res = client.get("/api/bars", params={"date": "20260827", "ticker": "006340"})
+
+    assert res.json()["meta"]["gaps"] == []
+
+
+def test_a_missing_minute_is_reported_as_a_gap(tmp_path):
+    """2026-08-28 043200이 VI로 145초 멈췄을 때의 실제 계열."""
+    rows = [
+        {"date": "20260828", "time": "090100", "open": 1422.0, "high": 1528.0,
+         "low": 1416.0, "close": 1516.0, "volume": 294444.0, "confirmed": False,
+         "tick_count": 1417, "spike_dropped": 0, "tick_derived": None},
+        {"date": "20260828", "time": "090200", "open": 1514.0, "high": 1577.0,
+         "low": 1491.0, "close": 1577.0, "volume": 321988.0, "confirmed": False,
+         "tick_count": 1670, "spike_dropped": 0, "tick_derived": None},
+        {"date": "20260828", "time": "090500", "open": 1535.0, "high": 1580.0,
+         "low": 1505.0, "close": 1580.0, "volume": 353643.0, "confirmed": False,
+         "tick_count": 1772, "spike_dropped": 0, "tick_derived": None},
+    ]
+    (tmp_path / "20260828_043200.json").write_text(json.dumps(rows), encoding="utf-8")
+
+    res = client.get("/api/bars", params={"date": "20260828", "ticker": "043200"})
+    gaps = res.json()["meta"]["gaps"]
+
+    assert gaps == [{
+        "after": "090200", "resume": "090500",
+        "index": 2, "missing": 2, "jump_pct": -2.66,
+    }]
+
+
+def test_the_gap_index_points_at_the_bar_that_resumes(tmp_path):
+    """차트가 이 인덱스로 두 캔들 사이에 경계를 긋는다. 어긋나면 엉뚱한 곳에 선이 간다."""
+    rows = [_row(m, 14500) for m in (0, 1, 2, 7, 8)]
+    (tmp_path / "20260827_006340.json").write_text(json.dumps(rows), encoding="utf-8")
+
+    body = client.get("/api/bars", params={"date": "20260827", "ticker": "006340"}).json()
+    gap = body["meta"]["gaps"][0]
+
+    assert gap["missing"] == 4
+    assert body["bars"][gap["index"]]["time"] == gap["resume"] == "090700"
+    assert body["bars"][gap["index"] - 1]["time"] == gap["after"] == "090200"
+
+
+def test_several_gaps_are_all_reported_in_order(tmp_path):
+    rows = [_row(m, 14500) for m in (0, 1, 5, 6, 20)]
+    (tmp_path / "20260827_006340.json").write_text(json.dumps(rows), encoding="utf-8")
+
+    gaps = client.get(
+        "/api/bars", params={"date": "20260827", "ticker": "006340"}
+    ).json()["meta"]["gaps"]
+
+    assert [(g["after"], g["resume"], g["missing"]) for g in gaps] == [
+        ("090100", "090500", 3),
+        ("090600", "092000", 13),
+    ]
+
+
+def test_a_bar_with_an_unreadable_time_does_not_invent_a_gap(tmp_path):
+    """시각을 못 읽는 봉은 건너뛴다 — 추정해서 없던 갭을 만들지 않는다."""
+    rows = [_row(0, 14500), _row(1, 14500), _row(2, 14500)]
+    rows[1]["time"] = "??????"
+    (tmp_path / "20260827_006340.json").write_text(json.dumps(rows), encoding="utf-8")
+
+    gaps = client.get(
+        "/api/bars", params={"date": "20260827", "ticker": "006340"}
+    ).json()["meta"]["gaps"]
+
+    assert gaps == []
+
+
+def test_a_gap_without_usable_prices_still_reports_the_missing_minutes():
+    """가격을 못 읽어도 빠진 분은 센다 — jump_pct만 포기한다.
+
+    엔드포인트가 아니라 헬퍼를 직접 부른다. close가 None인 봉 파일은
+    indicators가 먼저 걸려 갭 계산에 닿지도 않기 때문이다.
+    """
+    gaps = _bar_gaps([
+        {"time": "090000", "open": 100.0, "close": None},
+        {"time": "090500", "open": 110.0, "close": 110.0},
+    ])
+
+    assert gaps[0]["missing"] == 4
+    assert gaps[0]["jump_pct"] is None

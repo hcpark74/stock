@@ -97,6 +97,15 @@ function barsTimeTicks(bars, chartW, minGapPx) {
   return ticks;
 }
 
+function barsGapX(rows, index, chartW, padLeft) {
+  // 갭 경계의 x. 빠진 분에는 폭이 없으므로(x축이 인덱스 기준) 재개 봉 슬롯의
+  // 왼쪽 모서리, 즉 두 캔들 정확히 사이에 선을 놓는다.
+  const n = Math.max(1, (rows || []).length);
+  const slot = chartW / n;
+  const at = Math.max(0, Math.min(n, Number(index) || 0));
+  return padLeft + slot * at;
+}
+
 // ── 드로잉 ────────────────────────────────────────────────────────────
 // 아래는 캔버스에 의존하므로 Node 하네스가 추출하지 않는다.
 
@@ -107,6 +116,7 @@ const BARS_SIGNAL = '#9b59b6';
 const BARS_AXIS = '#787b86';
 const BARS_GRID = 'rgba(120,123,134,.18)';
 const BARS_CROSS = 'rgba(120,123,134,.7)';
+const BARS_GAP = '#26a69a';
 
 // 시간 라벨은 맨 아래 패널에만 붙인다 — 세 패널이 같은 x축을 공유하므로 한 번
 // 이면 충분하고, 위 두 패널은 아래 여백을 줄여 그림에 더 많은 픽셀을 준다.
@@ -171,6 +181,30 @@ function barsGrid(f, rows, ticks, withLabels) {
   ctx.textAlign = 'left';
 }
 
+// 봉이 빠진 자리. 09:00~09:11은 분봉 정정이 금지돼 있어 거래소가 메워 주기
+// 전까지 계열에 구멍이 남고, 그 창이 하필 B가 판단하는 구간이다.
+function barsGapMarks(f, rows, gaps, withLabel) {
+  if (!gaps || !gaps.length) return;
+  const {ctx, pad, chartW, chartH} = f;
+  ctx.save();
+  ctx.strokeStyle = BARS_GAP;
+  ctx.fillStyle = BARS_GAP;
+  ctx.lineWidth = 1;
+  ctx.setLineDash([2, 3]);
+  ctx.font = '10px Noto Sans KR,sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  for (const gap of gaps) {
+    const x = barsGapX(rows, gap.index, chartW, pad.l);
+    ctx.beginPath();
+    ctx.moveTo(x, pad.t);
+    ctx.lineTo(x, pad.t + chartH);
+    ctx.stroke();
+    if (withLabel) ctx.fillText(`${gap.missing}분 없음`, x, pad.t + 2);
+  }
+  ctx.restore();
+}
+
 function barsAxisLabel(f, text, y) {
   const {ctx, pad} = f;
   ctx.fillStyle = BARS_AXIS;
@@ -208,7 +242,7 @@ function barsCrosshair(f, id, rows, domain, format) {
   ctx.restore();
 }
 
-function drawBarsPricePanel(payload, ticks) {
+function drawBarsPricePanel(payload, ticks, gaps) {
   const f = barsFrame('bars-price');
   if (!f) return;
   const {ctx, pad, chartW, chartH} = f;
@@ -252,10 +286,11 @@ function drawBarsPricePanel(payload, ticks) {
     const value = domain.max - (domain.max - domain.min) * i / 3;
     barsAxisLabel(f, Math.round(value).toLocaleString(), y);
   }
+  barsGapMarks(f, rows, gaps, true);
   barsCrosshair(f, 'bars-price', rows, domain, v => Math.round(v).toLocaleString());
 }
 
-function drawBarsVolumePanel(payload, ticks) {
+function drawBarsVolumePanel(payload, ticks, gaps) {
   const f = barsFrame('bars-volume');
   if (!f) return;
   const {ctx, pad, chartW, chartH} = f;
@@ -276,10 +311,11 @@ function drawBarsVolumePanel(payload, ticks) {
   });
 
   barsAxisLabel(f, barsFmtVolume(domain.max), pad.t);
+  barsGapMarks(f, rows, gaps, false);
   barsCrosshair(f, 'bars-volume', rows, domain, barsFmtVolume);
 }
 
-function drawBarsMacdPanel(payload, ticks) {
+function drawBarsMacdPanel(payload, ticks, gaps) {
   const f = barsFrame('bars-macd');
   if (!f) return;
   const {ctx, W, pad, chartW, chartH} = f;
@@ -317,6 +353,7 @@ function drawBarsMacdPanel(payload, ticks) {
 
   barsAxisLabel(f, domain.max.toFixed(1), pad.t);
   barsAxisLabel(f, domain.min.toFixed(1), pad.t + chartH);
+  barsGapMarks(f, rows, gaps, false);
   barsCrosshair(f, 'bars-macd', rows, domain, v => v.toFixed(1));
 }
 
@@ -355,9 +392,10 @@ function drawBarsChart(payload) {
     : 600;
   const ticks = barsTimeTicks(rows, chartW, 56);
 
-  drawBarsPricePanel(payload, ticks);
-  drawBarsVolumePanel(payload, ticks);
-  drawBarsMacdPanel(payload, ticks);
+  const gaps = (payload.meta && payload.meta.gaps) || [];
+  drawBarsPricePanel(payload, ticks, gaps);
+  drawBarsVolumePanel(payload, ticks, gaps);
+  drawBarsMacdPanel(payload, ticks, gaps);
   barsReadout(payload);
 
   const sub = document.getElementById('bars-sub');
@@ -365,9 +403,12 @@ function drawBarsChart(payload) {
   const meta = payload.meta || {};
   if (!meta.bar_count) { sub.textContent = '봉 수집 대기'; return; }
   const unconfirmed = meta.bar_count - (meta.confirmed_count || 0);
+  const gapList = meta.gaps || [];
+  const missing = gapList.reduce((sum, g) => sum + (g.missing || 0), 0);
   sub.textContent =
     (payload.ticker || '-') + ' · ' + meta.bar_count + '봉 (미확정 ' + unconfirmed + ')' +
-    ' · 스파이크 ' + (meta.spike_dropped || 0) + ' · 출처 ' + (meta.source || '-');
+    ' · 스파이크 ' + (meta.spike_dropped || 0) + ' · 출처 ' + (meta.source || '-') +
+    (gapList.length ? ' · 갭 ' + gapList.length + '회(' + missing + '분)' : '');
 }
 
 function barsRedraw() {

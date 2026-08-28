@@ -985,6 +985,69 @@ def _valid_period(value: int) -> bool:
     return 1 <= value <= _BARS_MAX_PERIOD
 
 
+def _bar_minute(value: object) -> int | None:
+    """'HHMMSS' → 자정부터의 분. 형식이 아니면 None."""
+    text = str(value or "")
+    if len(text) < 4 or not text[:4].isdigit():
+        return None
+    hour, minute = int(text[:2]), int(text[2:4])
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return hour * 60 + minute
+
+
+def _bar_gaps(rows: list) -> list[dict]:
+    """봉이 빠진 구간. 체결이 없던 분(VI 정지 등)이 여기로 드러난다.
+
+    분봉 정정이 돌면 거래소가 0거래량 봉으로 메워 준다 — 2026-08-28에
+    043200이 VI로 145초 멈췄을 때 09:03·09:04가 그렇게 채워졌다. 그런데 그
+    정정은 09:00~09:11에 금지돼 있다. B가 판단해야 하는 바로 그 창에서만
+    계열에 구멍이 남고, 09:11을 넘기면 같은 규칙이 다른 계열을 본다는 뜻이다.
+    그래서 갭을 감추지 않고 사실로 내보낸다.
+
+    `jump_pct`가 진단값이다. 단일가로 재개된 구간은 값이 크고, 그냥 체결이
+    뜸했던 분은 0 근처다.
+    """
+    gaps: list[dict] = []
+    previous_row: dict | None = None
+    previous_minute: int | None = None
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        minute = _bar_minute(row.get("time"))
+        if minute is None:
+            # 시각을 못 읽는 봉. 봉은 있는데 자리를 모르는 것이므로 추적을
+            # 끊는다 — 건너뛰고 앞뒤를 이으면 실재하는 봉을 없는 분으로
+            # 세어 있지도 않은 갭을 만든다.
+            previous_row = None
+            previous_minute = None
+            continue
+        if previous_minute is not None:
+            missing = minute - previous_minute - 1
+            if missing > 0:
+                close = previous_row.get("close")
+                opening = row.get("open")
+                jump = None
+                if (
+                    isinstance(close, (int, float))
+                    and close
+                    and isinstance(opening, (int, float))
+                ):
+                    jump = round((opening - close) / close * 100, 2)
+                gaps.append({
+                    "after": previous_row.get("time"),
+                    "resume": row.get("time"),
+                    # 재개 봉의 인덱스. 차트가 두 캔들 사이에 경계를 그릴 때
+                    # 쓴다 — x축이 인덱스 기준이라 빠진 분에는 폭이 없다.
+                    "index": index,
+                    "missing": missing,
+                    "jump_pct": jump,
+                })
+        previous_row = row
+        previous_minute = minute
+    return gaps
+
+
 @app.get("/api/bars")
 async def api_bars(
     track: str = "B",
@@ -1043,6 +1106,7 @@ async def api_bars(
             "confirmed_count": sum(1 for r in rows if r.get("confirmed")),
             "spike_dropped": sum(int(r.get("spike_dropped") or 0) for r in rows),
             "tick_derived_missing": sum(1 for r in rows if r.get("tick_derived") is None),
+            "gaps": _bar_gaps(rows),
             "sma_period": sma,
             "macd": {"fast": fast, "slow": slow, "signal": signal},
             "source": source,

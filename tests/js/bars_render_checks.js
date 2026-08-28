@@ -145,5 +145,35 @@ drawBarsChart({bars: [], indicators: {sma: [], macd: []}, meta: {bar_count: 0}})
 check('an empty payload neither throws nor emits NaN', bad.length === 0);
 check('an empty payload shows the waiting message', subText === '봉 수집 대기');
 
+// 갭 표시 — 봉이 빠진 자리에 경계선이 서고 요약 줄이 그것을 말한다.
+{
+  const gapped = {
+    bars: rows.slice(0, 3).concat(rows.slice(6)),
+    indicators: {
+      sma: payload.indicators.sma.slice(0, 3).concat(payload.indicators.sma.slice(6)),
+      macd: payload.indicators.macd.slice(0, 3).concat(payload.indicators.macd.slice(6)),
+    },
+    ticker: payload.ticker,
+    meta: Object.assign({}, payload.meta, {
+      bar_count: 37,
+      gaps: [{after: rows[2].time, resume: rows[6].time, index: 3, missing: 3, jump_pct: -2.66}],
+    }),
+  };
+  bad = [];
+  barsHover = null;
+  const before = drawn.size;
+  drawBarsChart(gapped);
+  check('a gapped series draws without a non-finite coordinate', bad.length === 0);
+  check('the summary line reports the gap', subText.includes('갭 1회(3분)'));
+  check('the price panel labels the missing minutes', drawn.has('bars-price.fillText'));
+  check('drawing still happened', drawn.size >= before);
+  check('the gap mark leaves no line dash set',
+    els['bars-price']._ctx._state.dash.length === 0);
+
+  // 갭이 없으면 요약 줄에 갭 문구가 없다
+  drawBarsChart(payload);
+  check('a continuous series says nothing about gaps', !subText.includes('갭'));
+}
+
 if (failures) { console.error(`\n${failures} check(s) failed`); process.exit(1); }
 console.log('\nall bars_render checks passed');
