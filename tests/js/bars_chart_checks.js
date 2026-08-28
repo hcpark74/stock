@@ -29,6 +29,9 @@ eval(extract('barsVolumeDomain'));
 eval(extract('barsIndexAtX'));
 eval(extract('barsTimeTicks'));
 eval(extract('barsGapX'));
+eval(extract('barsWindow'));
+eval(extract('barsZoomView'));
+eval(extract('barsSliceView'));
 
 let failures = 0;
 const check = (label, cond) => {
@@ -187,6 +190,78 @@ const BARS = [
   check('a missing index does not produce NaN',
     Number.isFinite(barsGapX(rows, undefined, 500, 50)));
   check('no bars does not divide by zero', Number.isFinite(barsGapX([], 1, 500, 50)));
+}
+
+// 표시 창 — 증권사 차트처럼 일부만 띄운다
+{
+  check('the window shows the tail by default',
+    JSON.stringify(barsWindow(374, {count: 120, end: null})) ===
+    JSON.stringify({start: 254, end: 374, count: 120}));
+  check('a window wider than the data collapses to the data',
+    JSON.stringify(barsWindow(30, {count: 120, end: null})) ===
+    JSON.stringify({start: 0, end: 30, count: 30}));
+  check('no bars gives an empty window',
+    JSON.stringify(barsWindow(0, {count: 120, end: null})) ===
+    JSON.stringify({start: 0, end: 0, count: 0}));
+  const panned = barsWindow(374, {count: 100, end: 200});
+  check('a panned window keeps its width', panned.count === 100);
+  check('a panned window sits where it was told', panned.start === 100 && panned.end === 200);
+  check('panning past the left edge clamps',
+    barsWindow(374, {count: 100, end: 3}).start === 0);
+  check('panning past the right edge clamps',
+    barsWindow(374, {count: 100, end: 9999}).end === 374);
+  check('a garbage view still yields a usable window',
+    Number.isFinite(barsWindow(374, {count: NaN, end: NaN}).count));
+}
+
+// 줌 — 커서 아래 봉이 제자리에 남는다
+{
+  const total = 374;
+  const before = {count: 120, end: 300};
+  const anchor = 250;
+  const zoomed = barsZoomView(before, total, 0.5, anchor);
+  check('zooming in narrows the window', zoomed.count === 60);
+  const win = barsWindow(total, zoomed);
+  check('the anchored bar stays inside the window',
+    anchor >= win.start && anchor < win.end);
+  const beforeWin = barsWindow(total, before);
+  const ratioBefore = (anchor - beforeWin.start) / (beforeWin.count - 1);
+  const ratioAfter = (anchor - win.start) / (win.count - 1);
+  check('the anchored bar keeps its position on screen',
+    Math.abs(ratioBefore - ratioAfter) < 0.05);
+  check('zooming out past the data clamps to the data',
+    barsZoomView({count: 300, end: null}, total, 4, 300).count === total);
+  check('zooming in stops at the minimum window',
+    barsZoomView({count: 22, end: null}, total, 0.1, 370).count === 20);
+  check('zooming at the right edge keeps following the latest',
+    barsZoomView({count: 120, end: null}, total, 0.5, 373).end === null);
+}
+
+// 창 자르기 — 지표와 갭이 봉과 같이 잘린다
+{
+  const payload = {
+    bars: [{time: '090000'}, {time: '090100'}, {time: '090500'}, {time: '090600'}],
+    indicators: {
+      ma: {'5': [1, 2, 3, 4], '20': [null, null, 5, 6]},
+      vol_ma: {'5': [7, 8, 9, 10]},
+      macd: [{macd: 1}, {macd: 2}, {macd: 3}, {macd: 4}],
+    },
+    meta: {gaps: [{after: '090100', resume: '090500', index: 2, missing: 3, jump_pct: -1}]},
+  };
+  const view = barsSliceView(payload, {start: 1, end: 4, count: 3});
+  check('the window cuts the bars', view.rows.length === 3);
+  check('every indicator is cut to match', view.ma['5'].length === 3 &&
+    view.ma['20'].length === 3 && view.volMa['5'].length === 3 && view.macd.length === 3);
+  check('indicators stay aligned with their bars', view.ma['5'][0] === 2);
+  check('a gap inside the window is re-indexed', view.gaps.length === 1 &&
+    view.gaps[0].index === 1);
+  check('the re-indexed gap points at the resuming bar',
+    view.rows[view.gaps[0].index].time === '090500');
+  const outside = barsSliceView(payload, {start: 2, end: 4, count: 2});
+  check('a gap on the window edge is dropped', outside.gaps.length === 0);
+  const empty = barsSliceView({}, {start: 0, end: 0, count: 0});
+  check('an empty payload slices without throwing',
+    empty.rows.length === 0 && empty.gaps.length === 0 && empty.macd.length === 0);
 }
 
 if (failures) { console.error(`\n${failures} check(s) failed`); process.exit(1); }

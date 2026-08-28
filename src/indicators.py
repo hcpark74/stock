@@ -6,15 +6,19 @@
 """
 
 
-def _closes(bars: list[dict]) -> list[float]:
-    return [float(b["close"]) for b in bars]
+def _closes(bars: list[dict], field: str = "close") -> list[float]:
+    return [float(b[field]) for b in bars]
 
 
-def sma(bars: list[dict], period: int) -> list[float | None]:
-    """단순이동평균. 앞의 period-1개는 None."""
+def sma(bars: list[dict], period: int, field: str = "close") -> list[float | None]:
+    """단순이동평균. 앞의 period-1개는 None.
+
+    `field`는 거래량 이동평균 때문에 있다 — 증권사 차트가 거래량 패널에
+    올리는 그 선이다. 기본값은 종가라 기존 호출부는 그대로다.
+    """
     if period <= 0:
         raise ValueError(f"period must be positive: {period}")
-    closes = _closes(bars)
+    closes = _closes(bars, field)
     out: list[float | None] = [None] * len(closes)
     running = 0.0
     for i, c in enumerate(closes):

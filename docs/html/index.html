@@ -5,7 +5,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="assets/app.css?v=20260828-axis-vol">
+<link rel="stylesheet" href="assets/app.css?v=20260828-hts">
 
 <!-- TOP BAR -->
 <div class="tb">
@@ -151,9 +151,12 @@
               <div class="bars-sub" id="bars-sub">봉 수집 대기</div>
               <div class="bars-readout" id="bars-readout"></div>
             </div>
-            <canvas id="bars-price" width="760" height="240"></canvas>
-            <canvas id="bars-volume" width="760" height="64"></canvas>
-            <canvas id="bars-macd" width="760" height="120"></canvas>
+            <canvas id="bars-price" width="760" height="240"
+              title="휠: 확대·축소 · 드래그: 좌우 이동 · 더블클릭: 최근 120봉으로"></canvas>
+            <canvas id="bars-volume" width="760" height="64"
+              title="휠: 확대·축소 · 드래그: 좌우 이동 · 더블클릭: 최근 120봉으로"></canvas>
+            <canvas id="bars-macd" width="760" height="120"
+              title="휠: 확대·축소 · 드래그: 좌우 이동 · 더블클릭: 최근 120봉으로"></canvas>
           </div>
         </div>
       </div>
@@ -397,4 +400,4 @@
 </div>
 
 <script src="assets/app.js?v=20260825-tracking-warning"></script>
-<script src="assets/bars_chart.js?v=20260828-gaps"></script>
+<script src="assets/bars_chart.js?v=20260828-hts"></script>

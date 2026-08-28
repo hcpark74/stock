@@ -323,3 +323,8 @@ tr:hover td{background:var(--s2);}
                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bars-up { color: var(--up); }
 .bars-dn { color: var(--dn); }
+/* 판독 줄의 이동평균 색은 캔버스에 그리는 선과 같아야 한다 — 다르면 어느 선의
+   값인지 눈으로 다시 짚어야 한다. bars_chart.js의 BARS_MA와 짝이다. */
+.bars-ma5 { color: #f7a600; }
+.bars-ma20 { color: #ab47bc; }
+.bars-ma60 { color: #78909c; }

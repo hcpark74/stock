@@ -19,6 +19,7 @@ const src = fs.readFileSync(ASSET, 'utf8');
 const payload = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
 
 let bad = [];
+let ops = [];
 const drawn = new Set();
 
 function makeCtx(id) {
@@ -28,7 +29,11 @@ function makeCtx(id) {
       if (typeof a === 'number' && !Number.isFinite(a)) bad.push(`${id}.${fn}(${args})`);
     }
   };
-  const rec = name => (...args) => { guard(name, args); drawn.add(`${id}.${name}`); };
+  const rec = name => (...args) => {
+    guard(name, args);
+    drawn.add(`${id}.${name}`);
+    ops.push({panel: id, op: name, args: args, stroke: ctx.strokeStyle, fill: ctx.fillStyle});
+  };
   const ctx = {
     save() { state.saved = {alpha: state.alpha, dash: state.dash}; },
     restore() { if (state.saved) { state.alpha = state.saved.alpha; state.dash = state.saved.dash; } },
@@ -39,8 +44,14 @@ function makeCtx(id) {
     lineTo: rec('lineTo'),
     stroke: rec('stroke'),
     fillRect: rec('fillRect'),
-    fillText(text, x, y) { guard('fillText', [x, y]); drawn.add(`${id}.fillText`); },
+    fillText(text, x, y) {
+      guard('fillText', [x, y]);
+      drawn.add(`${id}.fillText`);
+      ops.push({panel: id, op: 'fillText', args: [text, x, y], fill: ctx.fillStyle});
+    },
     setLineDash(dash) { state.dash = dash || []; },
+    // 범례가 라벨 폭을 재서 다음 항목을 배치한다. 폭이 유한하기만 하면 된다.
+    measureText(text) { return {width: String(text).length * 6}; },
     _state: state,
   };
   Object.defineProperty(ctx, 'globalAlpha', {
@@ -93,9 +104,9 @@ const check = (label, cond) => {
 };
 
 const rows = payload.bars;
-check('fixture carries bars', rows.length === 40);
-check('fixture carries a defined sma tail', Number.isFinite(payload.indicators.sma[39]));
-check('fixture carries a defined macd tail', Number.isFinite(payload.indicators.macd[39].macd));
+check('fixture carries bars', rows.length === 60);
+check('fixture carries a defined sma tail', Number.isFinite(payload.indicators.sma[59]));
+check('fixture carries a defined macd tail', Number.isFinite(payload.indicators.macd[59].macd));
 
 drawBarsChart(payload);
 check('no non-finite coordinate on the first draw', bad.length === 0);
@@ -108,7 +119,8 @@ for (const id of Object.keys(SIZES)) {
   check(`${id} left no line dash set`, els[id]._ctx._state.dash.length === 0);
 }
 check('time labels go on the bottom panel', drawn.has('bars-macd.fillText'));
-check('the summary line reports the bar count', subText.includes(`${rows.length}봉`));
+check('the summary line reports the bar count', subText.includes(`${rows.length}봉 중`));
+check('the summary line reports how many are on screen', /\d+봉 표시/.test(subText));
 check('nothing is read out until the mouse is over the chart', readout === '');
 
 // 높이 폭주 회귀: 같은 페이로드를 세 번 그려도 백킹 스토어가 자라면 안 된다.
@@ -173,6 +185,100 @@ check('an empty payload shows the waiting message', subText === '봉 수집 대�
   // 갭이 없으면 요약 줄에 갭 문구가 없다
   drawBarsChart(payload);
   check('a continuous series says nothing about gaps', !subText.includes('갭'));
+}
+
+// 증권사 차트 관례 — 오른쪽 가격축, 이동평균 3종, 현재가 태그, 거래량 이동평균
+{
+  bad = [];
+  ops = [];
+  barsHover = null;
+  barsView = {count: 120, end: null};
+  drawBarsChart(payload);
+  check('the redesigned chart draws without a non-finite coordinate', bad.length === 0);
+  if (bad.length) console.error('  ', bad.slice(0, 5));
+
+  const priceOps = ops.filter(o => o.panel === 'bars-price');
+  const padR = BARS_PAD.r;
+  const W = SIZES['bars-price'].w;
+
+  // 가격축이 오른쪽이다 — 축 라벨의 x가 눈금자 안에 있어야 한다.
+  const axisText = priceOps.filter(o => o.op === 'fillText' && o.args[1] >= W - padR);
+  check('price labels are drawn on the right-hand ruler', axisText.length >= 4);
+  check('nothing is labelled in a left-hand gutter any more',
+    priceOps.filter(o => o.op === 'fillText' && o.args[1] < BARS_PAD.l).length === 0);
+
+  // 이동평균 3종이 각자의 색으로 그려진다.
+  // 기대값을 먼저 못 박는다 — BARS_MA를 그냥 순회하면 상수에서 항목을 지웠을 때
+  // 검사도 같이 줄어들어 아무것도 못 잡는다.
+  check('three moving averages are configured',
+    BARS_MA.map(m => m.period).join(',') === '5,20,60');
+  for (const ma of BARS_MA) {
+    check(`MA${ma.period} is drawn`,
+      priceOps.some(o => o.op === 'stroke' && o.stroke === ma.color));
+  }
+  check('the legend names every moving average',
+    BARS_MA.every(ma => priceOps.some(
+      o => o.op === 'fillText' && o.args[0] === 'MA' + ma.period && o.fill === ma.color)));
+
+  // 현재가 태그가 눈금자 위에 덮인다.
+  const last = rows[rows.length - 1];
+  const badge = priceOps.filter(
+    o => o.op === 'fillText' && o.args[0] === Math.round(last.close).toLocaleString());
+  check('the last close is tagged on the price ruler',
+    badge.length >= 1 && badge.some(o => o.args[1] >= W - padR));
+
+  // 거래량 이동평균
+  const volOps = ops.filter(o => o.panel === 'bars-volume');
+  check('two volume moving averages are configured',
+    BARS_VOL_MA.map(m => m.period).join(',') === '5,20');
+  for (const ma of BARS_VOL_MA) {
+    check(`volume MA${ma.period} is drawn`,
+      volOps.some(o => o.op === 'stroke' && o.stroke === ma.color));
+  }
+}
+
+// 표시 창 — 창을 좁히면 그만큼만 그린다
+{
+  const total = rows.length;
+  barsView = {count: 20, end: null};
+  ops = [];
+  bad = [];
+  drawBarsChart(payload);
+  const candles = ops.filter(o => o.panel === 'bars-price' && o.op === 'fillRect');
+  // 캔들 몸통 20개 + 현재가 배지 1개
+  check('a narrowed window draws only the visible candles',
+    candles.length === 21);
+  check('a narrowed window still draws cleanly', bad.length === 0);
+  check('the summary says how many of the total are shown',
+    subText.includes(`${total}봉 중 20봉 표시`));
+
+  // 창을 왼쪽으로 밀면 다른 봉이 보인다
+  barsView = {count: 20, end: 20};
+  ops = [];
+  drawBarsChart(payload);
+  const labels = ops
+    .filter(o => o.panel === 'bars-macd' && o.op === 'fillText')
+    .map(o => o.args[0]);
+  check('panning left shows earlier minutes',
+    labels.some(l => /^09:0/.test(String(l))));
+  barsView = {count: BARS_DEFAULT_VIEW, end: null};
+}
+
+// 십자선이 맨 아래 패널에 시간 배지를 붙인다
+{
+  const win = barsWindow(rows.length, barsView);
+  barsHover = {panel: 'bars-price', index: 10, y: 100};
+  ops = [];
+  bad = [];
+  drawBarsChart(payload);
+  const bar = rows[win.start + 10];
+  const hhmm = `${bar.time.slice(0, 2)}:${bar.time.slice(2, 4)}`;
+  check('the crosshair time badge sits on the bottom panel',
+    ops.some(o => o.panel === 'bars-macd' && o.op === 'fillText' && o.args[0] === hhmm));
+  check('the time badge is not repeated on the upper panels',
+    !ops.some(o => o.panel === 'bars-price' && o.op === 'fillText' && o.args[0] === hhmm));
+  check('the crosshair draws cleanly', bad.length === 0);
+  barsHover = null;
 }
 
 if (failures) { console.error(`\n${failures} check(s) failed`); process.exit(1); }

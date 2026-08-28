@@ -985,6 +985,13 @@ def _valid_period(value: int) -> bool:
     return 1 <= value <= _BARS_MAX_PERIOD
 
 
+# 차트가 그리는 이동평균. `sma` 파라미터와 별개다 — 그쪽은 전략이 쓰는 단일
+# 설정값이고, 이쪽은 증권사 차트의 관례적 3종 세트다. 지표를 브라우저가 아니라
+# 서버에서 계산하는 원칙(설계 §9)은 그대로 지킨다.
+_BARS_MA_PERIODS = (5, 20, 60)
+_BARS_VOL_MA_PERIODS = (5, 20)
+
+
 def _bar_minute(value: object) -> int | None:
     """'HHMMSS' → 자정부터의 분. 형식이 아니면 None."""
     text = str(value or "")
@@ -1100,6 +1107,13 @@ async def api_bars(
         "indicators": {
             "sma": indicators.sma(rows, sma) if rows else [],
             "macd": indicators.macd(rows, fast, slow, signal) if rows else [],
+            "ma": {
+                str(p): indicators.sma(rows, p) for p in _BARS_MA_PERIODS
+            } if rows else {},
+            "vol_ma": {
+                str(p): indicators.sma(rows, p, field="volume")
+                for p in _BARS_VOL_MA_PERIODS
+            } if rows else {},
         },
         "meta": {
             "bar_count": len(rows),
