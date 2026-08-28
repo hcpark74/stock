@@ -200,3 +200,38 @@ def test_gap_block_suppresses_signals_after_missing_minutes():
     assert ctx["gap_block"][3] is True
     assert ctx["gap_block"][4] is True   # min_bars_after_gap=2
     assert ctx["gap_block"][2] is False
+
+
+def test_r3_fires_when_conditions_met():
+    """r3_indicator의 발화 경로를 고정한다.
+
+    히스토그램이 성숙한 뒤, 종가 > SMA이고 히스토그램이 음→양으로 꺾인
+    봉에서 True를 돌려야 한다. 조건이 실제로 성립하는 인덱스를 찾아
+    검증한다.
+    """
+    # 하락 후 상승으로 꺾이는 계열로 MACD 히스토그램의 부호 전환을 자연스럽게 유도
+    closes = [100 + (i % 7) - 3 for i in range(70)]
+    bars = _series(closes)
+    ctx = build_context(bars, DEFAULT_PARAMS)
+
+    first = ctx["first_hist_idx"]
+    assert first is not None
+    maturity = DEFAULT_PARAMS["hist_maturity_bars"]
+
+    # 성숙 구간 이후에서 조건을 만족하는 인덱스를 찾는다
+    fire_idx = None
+    for i in range(first + maturity, len(bars)):
+        sma_val = ctx["sma"][i]
+        hist_now = ctx["macd"][i]["hist"]
+        hist_prev = ctx["macd"][i - 1]["hist"]
+
+        if (sma_val is not None and hist_now is not None and hist_prev is not None and
+            bars[i]["close"] > sma_val and hist_prev < 0 <= hist_now):
+            fire_idx = i
+            break
+
+    # 조건을 만족하는 인덱스가 존재해야 함
+    assert fire_idx is not None, "Could not find bar where r3_indicator conditions are met"
+
+    # 그 인덱스에서 r3_indicator가 True를 돌려야 함
+    assert r3_indicator(bars, fire_idx, ctx, DEFAULT_PARAMS) is True
