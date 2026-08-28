@@ -22,6 +22,8 @@
 - **봉 시각은 `HHMMSS` 문자열**로 비교한다. `data/backtest_bars/*.json`의 봉 dict는 `{"date","time","open","high","low","close","volume"}`이다.
 - **트랙 A의 코드를 수정하지 않는다.** `src/modules/f3_entry.py`, `f4_tracking.py`, `f5_timeout.py`, `scripts/strategy_backtest.py`는 읽기만 한다.
 - **커밋 메시지는 저장소 관례**를 따른다 — 영문, 무엇을 왜 바꿨는지, 끝에 `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`. 여러 줄 메시지는 파일에 쓰고 `git commit -F`로 넣는다 (PowerShell 따옴표 문제).
+- **테스트는 프로젝트 가상환경으로 돌린다** — `./.venv/Scripts/python.exe -m pytest` ([DEV_ENV.md:659](../../DEV_ENV.md#L659)). 맨 `python`은 시스템 Python이라 이 프로젝트의 고정 버전(pytest 8.x, pytest-asyncio 0.23.x)이 아니다.
+- **테스트 픽스처의 봉 시각은 연속된 분으로 만든다.** 분을 건너뛰면 `build_context`의 `gap_block`이 결측으로 판정해 그 뒤 봉의 신호를 막는다. 결측 처리를 검증하려는 테스트가 아니라면 건너뛰지 않는다.
 
 ## 스펙이 모호했던 지점 — 이 계획에서 확정한다
 
@@ -1096,22 +1098,29 @@ def _bars(prices: list[tuple[str, float]]) -> list[dict]:
 
 
 def test_signal_takes_earliest_bar_not_best_rank():
-    """랭크 1이 나중에 신호를 내도 기다리지 않는다. 실시간에 불가능하다."""
+    """랭크 1이 나중에 신호를 내도 기다리지 않는다. 실시간에 불가능하다.
+
+    봉 시각은 반드시 연속된 분이어야 한다. 분을 건너뛰면 `build_context` 의
+    `gap_block` 이 결측으로 보고 그 뒤 봉의 신호를 막아, 선택 로직이 아니라
+    결측 처리를 검증하게 된다.
+    """
     bars_by_ticker = {
-        "AAA": _bars([("093500", 100), ("093600", 100), ("094000", 100),
-                      ("100000", 130)]),   # 랭크 1 — 10:00에 고가 돌파
-        "BBB": _bars([("093500", 100), ("093600", 100), ("094000", 130),
-                      ("100000", 100)]),   # 랭크 2 — 09:40에 돌파
+        # 랭크 1 — 09:38에 고가 돌파
+        "AAA": _bars([("093500", 100), ("093600", 100), ("093700", 100),
+                      ("093800", 130)]),
+        # 랭크 2 — 09:37에 먼저 돌파한다
+        "BBB": _bars([("093500", 100), ("093600", 100), ("093700", 130),
+                      ("093800", 100)]),
     }
     signal = find_signal(bars_by_ticker, ["AAA", "BBB"], "R1", DEFAULT_PARAMS)
     assert signal["ticker"] == "BBB"
-    assert signal["signal_time"] == "094000"
+    assert signal["signal_time"] == "093700"
 
 
 def test_same_bar_tie_goes_to_higher_rank():
     bars_by_ticker = {
-        "AAA": _bars([("093500", 100), ("093600", 100), ("094000", 130)]),
-        "BBB": _bars([("093500", 100), ("093600", 100), ("094000", 130)]),
+        "AAA": _bars([("093500", 100), ("093600", 100), ("093700", 130)]),
+        "BBB": _bars([("093500", 100), ("093600", 100), ("093700", 130)]),
     }
     signal = find_signal(bars_by_ticker, ["AAA", "BBB"], "R1", DEFAULT_PARAMS)
     assert signal["ticker"] == "AAA"
@@ -1119,8 +1128,9 @@ def test_same_bar_tie_goes_to_higher_rank():
 
 
 def test_signal_ignores_bars_before_0935_and_after_1400():
+    """`late` 도 연속된 분이어야 마감 시각만 격리해서 검증된다."""
     early = _bars([("091000", 100), ("091100", 130)])
-    late = _bars([("093500", 100), ("140100", 130)])
+    late = _bars([("135900", 100), ("140000", 100), ("140100", 130)])
     assert find_signal({"AAA": early}, ["AAA"], "R1", DEFAULT_PARAMS) is None
     assert find_signal({"AAA": late}, ["AAA"], "R1", DEFAULT_PARAMS) is None
 
