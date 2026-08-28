@@ -14,6 +14,12 @@ _ROOT = Path(__file__).resolve().parents[1]
 # (tick_capture, f1_snapshot_selector 등)은 제외한다 — 관측 코드 수정이 지문을
 # 바꾸면 새 experiment_id가 열려 40거래일 paired 수집이 매번 0부터 다시 시작한다.
 # 관측 동작이 기준선 적격성에 영향을 주는 부분은 STRATEGY_TICK_ 환경 스냅샷이 잡는다.
+#
+# 이 지문은 저장소 파일의 바이트와 환경변수만 본다 — 설치된 패키지 버전은 보지
+# 않는다. 그래서 kis_rest.py·kis_ws.py를 외부 라이브러리로 바꾸면 pip 업그레이드
+# 한 번이 매매 동작을 바꾸면서 지문은 그대로 두어, 다른 코드로 만든 결과가 한
+# 표본에 섞인다. 직접 구현을 유지하는 결정적 이유이고 전문은
+# docs/CODING_GUIDELINES.md §1-1에 있다.
 _STRATEGY_FILES = (
     "main.py",
     "src/state.py",
