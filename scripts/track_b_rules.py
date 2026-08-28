@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import math
 
+from src import indicators
+
 # 트랙 A와 같은 값. f4_tracking.STEP_SIZE / STEP_TRAIL / HARD_STOP_RATIO 와 일치한다.
 STEP_SIZE = 0.025
 STEP_TRAIL = 0.020
@@ -101,3 +103,123 @@ def resolve_exit(bars: list[dict], entry_idx: int, entry_price: float) -> dict:
         "low_first": low_first,
         "pct": None if ambiguous else high_first["pct"],
     }
+
+
+DEFAULT_PARAMS = {
+    "sma_period": 20,
+    "macd_fast": 12,
+    "macd_slow": 26,
+    "macd_signal": 9,
+    "vol_window": 5,
+    # 히스토그램이 정의된 뒤 이만큼 지나야 판정한다. v0가 값 2~3개로 부호를
+    # 판정하던 것을 막는다.
+    "hist_maturity_bars": 3,
+    # 봉이 빠진 직후 이만큼은 신호를 내지 않는다 (그림자 스펙 §15.3).
+    "min_bars_after_gap": 2,
+}
+
+
+def _minutes(time_: str) -> int:
+    return int(time_[:2]) * 60 + int(time_[2:4])
+
+
+def build_context(bars: list[dict], params: dict) -> dict:
+    """하루치 파생 계열을 한 번만 계산한다.
+
+    지표는 반드시 운영 코드(src.indicators)를 쓴다. 여기서 다시 구현하면
+    백테스트와 실시간이 다른 값을 보게 된다.
+    """
+    period = params.get("sma_period", DEFAULT_PARAMS["sma_period"])
+    macd_rows = indicators.macd(
+        bars,
+        params.get("macd_fast", DEFAULT_PARAMS["macd_fast"]),
+        params.get("macd_slow", DEFAULT_PARAMS["macd_slow"]),
+        params.get("macd_signal", DEFAULT_PARAMS["macd_signal"]),
+    )
+
+    run_high: list[float] = []
+    vwap: list[float] = []
+    cum_pv = 0.0
+    cum_v = 0.0
+    highest = float("-inf")
+    for bar in bars:
+        run_high.append(highest)          # 직전 봉까지의 고가
+        highest = max(highest, bar["high"])
+        cum_pv += bar["close"] * bar["volume"]
+        cum_v += bar["volume"]
+        vwap.append(cum_pv / cum_v if cum_v > 0 else None)
+
+    first_hist_idx = next(
+        (i for i, r in enumerate(macd_rows) if r["hist"] is not None), None
+    )
+
+    block_for = params.get("min_bars_after_gap", DEFAULT_PARAMS["min_bars_after_gap"])
+    gap_block = [False] * len(bars)
+    remaining = 0
+    for i, bar in enumerate(bars):
+        if i > 0 and _minutes(bar["time"]) - _minutes(bars[i - 1]["time"]) > 1:
+            remaining = block_for
+        if remaining > 0:
+            gap_block[i] = True
+            remaining -= 1
+
+    return {
+        "sma": indicators.sma(bars, period),
+        "macd": macd_rows,
+        "vwap": vwap,
+        "run_high": run_high,
+        "first_hist_idx": first_hist_idx,
+        "gap_block": gap_block,
+    }
+
+
+def r1_high_reclaim(bars: list[dict], i: int, ctx: dict, params: dict) -> bool:
+    """확정 봉 종가가 그날 직전까지의 고가를 넘는다. 파라미터 0개.
+
+    30분 고가의 49%가 09:00~09:02에 만들어진다. 그 고가를 되찾는 사건은 드물고
+    상태 전환이 분명하다 — 설계 §2.3.
+    """
+    prior_high = ctx["run_high"][i]
+    if prior_high == float("-inf"):
+        return False
+    return bars[i]["close"] > prior_high
+
+
+def r2_vwap_reclaim(bars: list[dict], i: int, ctx: dict, params: dict) -> bool:
+    """VWAP 아래에 있던 종가가 위로 올라서고, 그 봉 거래량이 직전 N봉 평균을 넘는다."""
+    window = params.get("vol_window", DEFAULT_PARAMS["vol_window"])
+    if i < 1 or i < window:
+        return False
+    vwap_now, vwap_prev = ctx["vwap"][i], ctx["vwap"][i - 1]
+    if vwap_now is None or vwap_prev is None:
+        return False
+    if not (bars[i - 1]["close"] <= vwap_prev < bars[i]["close"]):
+        return False
+    prior = [b["volume"] for b in bars[i - window:i]]
+    if not prior or sum(prior) <= 0:
+        return False
+    return bars[i]["volume"] > sum(prior) / len(prior)
+
+
+def r3_indicator(bars: list[dict], i: int, ctx: dict, params: dict) -> bool:
+    """v0 개정판 — 종가 > SMA + 히스토그램 음→양. 단 성숙 대기를 둔다.
+
+    청산에 'SMA 이탈'이 없다는 점이 v0와 다르다. v0는 진입 조건과 청산 조건이
+    같은 가격에서 무장해 3~6분 만에 끝났다 (설계 §2.1).
+    """
+    first = ctx["first_hist_idx"]
+    maturity = params.get("hist_maturity_bars", DEFAULT_PARAMS["hist_maturity_bars"])
+    if first is None or i < first + maturity or i < 1:
+        return False
+    sma_now = ctx["sma"][i]
+    hist_now, hist_prev = ctx["macd"][i]["hist"], ctx["macd"][i - 1]["hist"]
+    if sma_now is None or hist_now is None or hist_prev is None:
+        return False
+    return bars[i]["close"] > sma_now and hist_prev < 0 <= hist_now
+
+
+RULES = {
+    "R1": r1_high_reclaim,
+    "R2": r2_vwap_reclaim,
+    "R3": r3_indicator,
+}
