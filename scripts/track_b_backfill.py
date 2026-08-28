@@ -43,6 +43,7 @@ from scripts.strategy_backtest import (  # noqa: E402
 )
 from src.api import kis_rest  # noqa: E402
 from src.api.kis_minute_bars import parse_minute_bars  # noqa: E402
+from src.api.kis_rest import RequestBudgetExceeded  # noqa: E402
 from src.modules import f1_selector  # noqa: E402
 
 KST = ZoneInfo("Asia/Seoul")
@@ -119,7 +120,7 @@ async def fetch_session_bars(
         for bar in fresh:
             seen.add(bar["time"])
             bars.append(bar)
-        earliest = min(b["time"] for b in fresh)
+        earliest = next_cursor(fresh)
         if earliest <= SESSION_START:
             break
         cursor = earliest
@@ -154,8 +155,13 @@ async def backfill(
     budget: kis_rest.CallBudget,
     throttle: Throttle,
 ) -> dict[str, int]:
-    stats = {"skipped": 0, "filled": 0, "empty": 0, "failed": 0}
+    stats = {
+        "skipped": 0, "filled": 0, "empty": 0, "failed": 0,
+        "budget_exhausted": False,
+    }
     for date in sorted(needed):
+        if stats["budget_exhausted"]:
+            break
         for ticker in sorted(needed[date]):
             existing = read_cached_bars(date, ticker, cache_dir) or []
             if is_session_complete(existing):
@@ -167,16 +173,28 @@ async def backfill(
                 )
             except PocStop:
                 raise
-            except Exception:
+            except RequestBudgetExceeded:
+                # 예산 컷오프는 실패가 아니다 — 추가 호출을 안 낸 것뿐이고 캐시는
+                # 남아 재실행하면 이어진다. failed에 섞이면 운영자가 "진짜 실패
+                # 40건"과 "예산이 모자랐다"를 구분 못 한다.
+                stats["budget_exhausted"] = True
+                print(
+                    f"  예산 소진: {date} {ticker} 이후 중단 "
+                    f"(used={budget.used}/{budget.max_calls})",
+                    flush=True,
+                )
+                break
+            except Exception as exc:
                 stats["failed"] += 1
+                print(f"  {date} {ticker} {type(exc).__name__}: {exc}", flush=True)
                 continue
             if not fetched:
                 stats["empty"] += 1
                 continue
-            write_cached_bars(date, ticker, merge_bars(existing, fetched), cache_dir)
+            merged = merge_bars(existing, fetched)
+            write_cached_bars(date, ticker, merged, cache_dir)
             stats["filled"] += 1
-            print(f"  {date} {ticker}: {len(existing)} -> "
-                  f"{len(merge_bars(existing, fetched))}봉", flush=True)
+            print(f"  {date} {ticker}: {len(existing)} -> {len(merged)}봉", flush=True)
     return stats
 
 

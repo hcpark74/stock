@@ -58,7 +58,7 @@ def test_window_allows_after_1540():
     assert_backfill_window(datetime(2026, 8, 28, 15, 40, tzinfo=KST)) is None
 
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from scripts.track_b_backfill import fetch_session_bars
 from src.api import kis_rest
@@ -149,7 +149,7 @@ async def test_fetch_session_stops_when_cursor_stalls():
 
 import json
 
-from scripts.track_b_backfill import is_session_complete, needed_pairs
+from scripts.track_b_backfill import backfill, is_session_complete, needed_pairs
 
 
 def test_needed_pairs_uses_operational_ranking(tmp_path):
@@ -182,3 +182,33 @@ def test_session_complete_skips_full_days_only():
     assert is_session_complete([{"time": "090000"}] * 380) is True
     assert is_session_complete([{"time": "090000"}] * 31) is False
     assert is_session_complete(None) is False
+
+
+async def test_backfill_stops_on_budget_exhaustion(tmp_path):
+    """예산이 다 떨어지면 남은 쌍을 실패로 세지 않고 즉시 멈춘다.
+
+    CallBudget.charge()가 던지는 RequestBudgetExceeded는 RuntimeError라
+    무심코 짠 ``except Exception``에도 걸린다. 그러면 예산이 없어도 루프가
+    안 멈추고 남은 쌍을 전부 순회하며 failed로 센다 — 예산 컷오프와 진짜
+    실패가 통계에서 구분이 안 된다.
+    """
+    needed = {"20260820": {"000001", "000002", "000003"}}
+    calls: list[str] = []
+
+    async def fake_fetch(ticker, trade_date, *, budget, hour_cursor="093000"):
+        budget.charge()
+        calls.append(ticker)
+        return _response(["090000"])
+
+    with patch("scripts.track_b_backfill.fetch_daily_minute_bars", fake_fetch):
+        stats = await backfill(
+            needed,
+            cache_dir=tmp_path,
+            budget=kis_rest.CallBudget(1),
+            throttle=Throttle(0.0),
+        )
+
+    assert stats["budget_exhausted"] is True
+    assert stats["failed"] == 0
+    # 예산이 1콜뿐이라 첫 쌍만 시도하고 멈춘다.
+    assert len(calls) == 1
