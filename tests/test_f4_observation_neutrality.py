@@ -141,20 +141,51 @@ def test_rest_backup_allowed_while_position_open(monkeypatch, status):
 def test_capture_attaches_without_trade_id(monkeypatch):
     """거래가 없어도 종목이 확정됐으면 캡처를 붙인다 — 안 그러면 디스크에 안 남는다."""
     _use(monkeypatch, _State(target_ticker="005930", position_status="IDLE"))
-    assert f4_tracking._should_attach_capture(f4_tracking.state.get()) is True
+    assert f4_tracking._should_attach_capture(f4_tracking.state.get(), NOON) is True
 
 
 def test_capture_attaches_when_holding_with_trade(monkeypatch):
     """기존 경로(체결 후 부착)는 그대로 동작한다."""
     _use(monkeypatch, _State(target_ticker="005930", position_status="HOLDING",
                              trade_id=31))
-    assert f4_tracking._should_attach_capture(f4_tracking.state.get()) is True
+    assert f4_tracking._should_attach_capture(f4_tracking.state.get(), NOON) is True
 
 
 def test_capture_not_attached_without_target(monkeypatch):
     """종목이 없으면 붙일 대상이 없다."""
     _use(monkeypatch, _State(target_ticker=None, position_status="IDLE"))
-    assert f4_tracking._should_attach_capture(f4_tracking.state.get()) is False
+    assert f4_tracking._should_attach_capture(f4_tracking.state.get(), NOON) is False
+
+
+def test_capture_not_reattached_after_capture_window(monkeypatch):
+    """15:15 이후에는 캡처를 다시 붙이지 않는다.
+
+    붙이면 `_price_observation_active()`의 컷오프가 `CAPTURE_UNTIL`로 뒤집혀
+    관측이 즉시 끝나고, 최종화 → 재부착이 0.5초마다 반복된다. 2026-08-28
+    실장에서 15:15~15:30 사이 약 900바퀴가 돌았고 그날 캡처가 RESTART_GAP으로
+    오염됐다 — `F4_POST_CLOSE_OBSERVE_UNTIL`이 `CAPTURE_UNTIL`보다 늦으면
+    언제든 재발한다.
+    """
+    _use(monkeypatch, _State(target_ticker="005930", position_status="CLOSED",
+                             entry_at="2026-08-25T09:01:00+09:00"))
+    after = datetime(2026, 8, 25, 15, 16, tzinfo=KST)
+    assert f4_tracking._should_attach_capture(f4_tracking.state.get(), after) is False
+
+
+def test_capture_not_reattached_exactly_at_capture_until(monkeypatch):
+    """경계 15:15:00은 캡처 창 밖이다 — 그 시각의 최종화가 COMPLETE를 확정한다."""
+    _use(monkeypatch, _State(target_ticker="005930", position_status="CLOSED",
+                             entry_at="2026-08-25T09:01:00+09:00"))
+    at_cutoff = datetime(2026, 8, 25, 15, 15, tzinfo=KST)
+    assert f4_tracking._should_attach_capture(f4_tracking.state.get(), at_cutoff) is False
+
+
+def test_capture_still_attached_before_capture_window_ends(monkeypatch):
+    """15:15 이전에는 종전대로 붙는다 — 장중 재시작 복구가 이 경로다."""
+    _use(monkeypatch, _State(target_ticker="005930", position_status="HOLDING",
+                             trade_id=31))
+    before = datetime(2026, 8, 25, 15, 14, tzinfo=KST)
+    assert f4_tracking._should_attach_capture(f4_tracking.state.get(), before) is True
 
 
 # ── 종목 교체 방어 ───────────────────────────────────────────────────

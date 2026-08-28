@@ -218,15 +218,26 @@ def _rest_backup_allowed(position_status: str) -> bool:
     return position_status not in ("IDLE", "ENTERING")
 
 
-def _should_attach_capture(s: state.State) -> bool:
+def _should_attach_capture(s: state.State, now: datetime | None = None) -> bool:
     """durable 캡처를 붙일지 여부. 거래가 없는 날도 대상이다.
 
     캡처는 trade_id를 Optional로 받고 price_path_manifests.trade_id도
     nullable이므로, 체결이 없어도 (거래일, 종목, experiment_id)로 식별된다.
     이 조건이 trade_id를 요구하면 A가 진입하지 않은 날의 가격 경로가 디스크에
     전혀 남지 않는다.
+
+    캡처 창(CAPTURE_UNTIL, 15:15)이 끝난 뒤에는 붙지 않는다. 붙이면
+    `_price_observation_active()`의 컷오프가 `F4_POST_CLOSE_OBSERVE_UNTIL`에서
+    `CAPTURE_UNTIL`로 뒤집혀 관측이 그 자리에서 끝나고, 최종화 → 재부착이
+    `_REARM_INTERVAL_SEC`마다 반복된다. 2026-08-28 실장에서 두 값이 어긋나
+    (관측 15:30 > 캡처 15:15) 그 사이 약 900바퀴가 돌았고, 재부착이 디스크의
+    기존 청크를 재시작으로 읽어 그날 캡처를 RESTART_GAP으로 오염시켰다.
+    그 시각 이후에 붙인 캡처는 어차피 즉시 최종화되므로 남길 것도 없다.
     """
-    return bool(s.target_ticker)
+    if not s.target_ticker:
+        return False
+    now = now or datetime.now(KST)
+    return (now.hour, now.minute) < tick_capture.CAPTURE_UNTIL
 
 
 def post_close_observation_active(now: datetime | None = None) -> bool:

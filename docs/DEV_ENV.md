@@ -618,6 +618,12 @@ STRATEGY_TICK_SOFT_LIMIT_MB=100
 
 - `F4_POST_CLOSE_OBSERVE_UNTIL`은 `HH:MM` 형식이다. 잘못된 값은 로깅 초기화 후
   `F4_OBSERVE_UNTIL_INVALID` WARN을 1회 남기고 기본 `09:10`을 사용한다.
+- 이 값을 `tick_capture.CAPTURE_UNTIL`(15:15)보다 **늦게 두면 캡처가 그 뒤로
+  다시 붙지 않는다.** 15:15 이후에는 관측(차트용 가격 수집)만 이어지고 durable
+  캡처는 붙지 않는다 — 붙이면 `_price_observation_active()`의 컷오프가 캡처
+  활성 여부로 뒤집혀 최종화·재부착이 초당 한 번씩 반복된다. 2026-08-28에 이
+  값이 `15:30`으로 설정돼 15:15~15:30 사이 약 900바퀴가 돌았고, 재부착이
+  디스크의 기존 청크를 재시작으로 읽어 그날 캡처가 `RESTART_GAP`으로 남았다.
 - 조기·수동 진입 거래가 이 시각 전에 CLOSED가 되면 WS/REST는 차트용 가격만 수집한다.
   CLOSED 중에는 스탑 계산, VI 처리, 매도 주문을 실행하지 않는다.
 - 상태 파일의 `entry_at`이 손상되면 `F4_ENTRY_AT_INVALID` WARN을 값별 1회 남기고
