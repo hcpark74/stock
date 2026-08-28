@@ -263,10 +263,9 @@ def a_daily_from_baseline() -> dict[str, float | None]:
     실계좌 체결이 아니라 같은 봉 위의 시뮬레이션이라 B와 대칭이다. 미진입일은
     None으로 두고 커버리지 계산에 쓴다.
     """
-    from scripts.strategy_backtest import (
-        BASELINE, load_bar_cache, load_universes as _lu,
-        simulate_day as a_simulate_day, tickers_needed,
-    )
+    from scripts.strategy_backtest import BASELINE, load_bar_cache, tickers_needed
+    from scripts.strategy_backtest import load_universes as _lu
+    from scripts.strategy_backtest import simulate_day as a_simulate_day
 
     universes = _lu()
     bars = load_bar_cache(tickers_needed(universes, [BASELINE]))

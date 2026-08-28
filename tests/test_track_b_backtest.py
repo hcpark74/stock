@@ -7,8 +7,6 @@
 import pytest
 
 from scripts.track_b_backtest import (
-    ENTRY_DEADLINE,
-    SIGNAL_START,
     bootstrap_ci,
     correlation,
     find_signal,

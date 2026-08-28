@@ -15,7 +15,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.track_b_rules import (  # noqa: E402
-    DEFAULT_PARAMS, HARD_STOP, RULES, STEP_SIZE, STEP_TRAIL,
+    DEFAULT_PARAMS,
+    HARD_STOP,
+    RULES,
+    STEP_SIZE,
+    STEP_TRAIL,
 )
 
 

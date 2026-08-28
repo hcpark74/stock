@@ -4,7 +4,9 @@
 스크립트는 KIS를 1,300번 때리므로 시간 가드가 틀리면 장중에 A의 유량을 먹는다.
 """
 
+import json
 from datetime import datetime
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -12,9 +14,14 @@ import pytest
 from scripts.fast_path_counterfactual import PocStop, Throttle
 from scripts.track_b_backfill import (
     assert_backfill_window,
+    backfill,
+    fetch_session_bars,
+    is_session_complete,
     merge_bars,
+    needed_pairs,
     next_cursor,
 )
+from src.api import kis_rest
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -56,12 +63,6 @@ def test_window_rejects_before_1540():
 
 def test_window_allows_after_1540():
     assert_backfill_window(datetime(2026, 8, 28, 15, 40, tzinfo=KST)) is None
-
-
-from unittest.mock import patch
-
-from scripts.track_b_backfill import fetch_session_bars
-from src.api import kis_rest
 
 
 def _response(times: list[str]) -> dict:
@@ -145,11 +146,6 @@ async def test_fetch_session_stops_when_cursor_stalls():
 
     assert calls["n"] == 2
     assert [b["time"] for b in bars] == ["093000"]
-
-
-import json
-
-from scripts.track_b_backfill import backfill, is_session_complete, needed_pairs
 
 
 def test_needed_pairs_uses_operational_ranking(tmp_path):
