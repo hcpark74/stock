@@ -127,6 +127,16 @@
               <div class="flow-sub" id="flow-sub">틱 수신 대기</div>
             </div>
             <div class="flow-head-right">
+              <div class="flow-scale" role="group" aria-label="가로 구간 모드">
+                <button class="fp on" id="range-recent" type="button" data-range="recent"
+                  aria-pressed="true"
+                  title="오른쪽 끝이 최신인 최근 20분 슬라이딩 창. 관측이 이어져도 구간이 늘어나지 않습니다."
+                  onclick="setPriceFlowRange('recent')">최근 20분</button>
+                <button class="fp" id="range-trade" type="button" data-range="trade"
+                  aria-pressed="false"
+                  title="진입부터 마지막까지 전체를 한 화면에 고정합니다. 매수·매도 마커를 함께 봅니다."
+                  onclick="setPriceFlowRange('trade')">거래 전체</button>
+              </div>
               <div class="flow-scale" role="group" aria-label="세로 스케일 모드">
                 <button class="fp on" id="scale-full" type="button" data-scale="full"
                   aria-pressed="true" title="전체 가시 가격 범위로 세로 축을 맞춥니다."
@@ -399,5 +409,5 @@
   </div>
 </div>
 
-<script src="assets/app.js?v=20260825-tracking-warning"></script>
+<script src="assets/app.js?v=20260828-flow-range"></script>
 <script src="assets/bars_chart.js?v=20260828-hts"></script>

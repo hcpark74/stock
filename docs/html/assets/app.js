@@ -171,6 +171,9 @@ let _trackingStopPending = false;
 const PRICE_FLOW_TICK_WINDOW = 5000;  // 서버 tick 버퍼(live._TICK_HISTORY_MAX)와 동일
 const PRICE_FLOW_VIEW_MIN = 20;       // 보유 중 슬라이딩 창 크기(분)
 const PRICE_FLOW_SCALE_KEY = 'priceFlowScale';  // 세로 스케일 모드 저장 키
+const PRICE_FLOW_RANGE_KEY = 'priceFlowRange';  // 가로 구간 모드 저장 키
+// 'recent'=최근 PRICE_FLOW_VIEW_MIN분 슬라이딩, 'trade'=진입~마지막 전체 고정.
+let _priceFlowRangeMode = lsGet(PRICE_FLOW_RANGE_KEY) === 'trade' ? 'trade' : 'recent';
 // 'full'=전체 가시 범위, 'trailing'=트레일링 밴드 집중. localStorage에서 복원.
 let _priceFlowScaleMode = lsGet(PRICE_FLOW_SCALE_KEY) === 'trailing' ? 'trailing' : 'full';
 
@@ -525,9 +528,16 @@ function parseViEvents(d) {
     .filter(v => v.start > 0);
 }
 
-function priceFlowViewWindow(d, marks) {
-  // 보유 중: 증권사 차트처럼 "지금"이 오른쪽 끝인 최근 20분 슬라이딩 창.
-  // 청산 후: 진입~마지막 체결/tick 전체 구간을 고정해 매수/매도를 함께 리뷰.
+function priceFlowViewWindow(d, marks, rangeMode) {
+  // 가로 구간 두 모드. 'recent'는 오른쪽 끝이 최신인 슬라이딩 창이고,
+  // 'trade'는 진입~마지막 전체를 고정해 매수/매도 마커를 함께 리뷰한다.
+  //
+  // 청산 후에도 'recent'가 필요한 이유: 사후 관측이 15:15까지 이어지므로
+  // 전체 고정이면 구간이 하루로 늘어난다. 2026-08-28은 09:01 청산 뒤
+  // 11:25에 이미 2시간 24분이 한 캔버스에 눌려 들어갔다 — 그 상태로 장이
+  // 끝나면 6시간이 된다. 그러면 정작 볼 진입·청산 구간이 왼쪽 끝 몇 픽셀로
+  // 뭉개진다. 마커를 다시 보고 싶을 때 'trade'로 돌아간다.
+  const mode = rangeMode === 'trade' ? 'trade' : 'recent';
   const firstDataTs = _priceFlowTicks[0]?.ts || _priceFlow[0]?.ts;
   const lastDataTs = _priceFlowTicks[_priceFlowTicks.length - 1]?.ts
     || _priceFlow[_priceFlow.length - 1]?.ts;
@@ -536,11 +546,16 @@ function priceFlowViewWindow(d, marks) {
     const firstMarkTs = marks?.length ? marks[0].ts : entryTs;
     const lastMarkTs = marks?.length ? marks[marks.length - 1].ts : 0;
     const edge = 30 * 1000; // 양끝 마커가 잘리지 않도록 30초 여백
-    const startTs = Math.min(entryTs, firstMarkTs) - edge;
-    const endTs = Math.max(lastDataTs || 0, lastMarkTs, startTs + 60 * 1000) + edge;
-    return {startTs, endTs};
+    const tradeStart = Math.min(entryTs, firstMarkTs) - edge;
+    const tradeEnd = Math.max(lastDataTs || 0, lastMarkTs, tradeStart + 60 * 1000) + edge;
+    if(mode === 'trade') return {startTs: tradeStart, endTs: tradeEnd};
+    // 오른쪽 끝은 지금이 아니라 마지막 데이터다 — 사후 관측이 멎으면 빈
+    // 구간으로 흘러가지 않고 마지막 틱에 붙어 선다.
+    return {startTs: Math.max(tradeStart, tradeEnd - PRICE_FLOW_VIEW_MIN * 60 * 1000),
+            endTs: tradeEnd};
   }
   const endTs = Math.max(Date.now(), entryTs + 60 * 1000);
+  if(mode === 'trade') return {startTs: entryTs, endTs};
   const startTs = Math.max(entryTs, endTs - PRICE_FLOW_VIEW_MIN * 60 * 1000);
   return {startTs, endTs};
 }
@@ -603,6 +618,23 @@ function syncPriceFlowScaleButtons() {
   tr.setAttribute('aria-pressed', String(trailing));
 }
 
+function syncPriceFlowRangeButtons() {
+  const recent = $('range-recent'), trade = $('range-trade');
+  if(!recent || !trade) return;
+  const isTrade = _priceFlowRangeMode === 'trade';
+  recent.classList.toggle('on', !isTrade);
+  trade.classList.toggle('on', isTrade);
+  recent.setAttribute('aria-pressed', String(!isTrade));
+  trade.setAttribute('aria-pressed', String(isTrade));
+}
+
+function setPriceFlowRange(mode) {
+  _priceFlowRangeMode = mode === 'trade' ? 'trade' : 'recent';
+  lsSet(PRICE_FLOW_RANGE_KEY, _priceFlowRangeMode);
+  syncPriceFlowRangeButtons();
+  drawPriceFlow(_lastStatus);   // 즉시 로컬 재렌더 — 네트워크/타이머 없음
+}
+
 function setPriceFlowScale(mode) {
   _priceFlowScaleMode = mode === 'trailing' ? 'trailing' : 'full';
   lsSet(PRICE_FLOW_SCALE_KEY, _priceFlowScaleMode);
@@ -619,7 +651,7 @@ function drawPriceFlow(d) {
   const chartW = W - pad.l - pad.r;
   const chartH = H - pad.t - pad.b;
   const marks = parseTradeMarks(d);
-  const {startTs, endTs} = priceFlowViewWindow(d || {}, marks);
+  const {startTs, endTs} = priceFlowViewWindow(d || {}, marks, _priceFlowRangeMode);
   const xAtTs = ts => pad.l + Math.max(0, Math.min(1, (Number(ts) - startTs) / (endTs - startTs || 1))) * chartW;
   const sub = $('flow-sub');
   const holding = d?.position_status === 'HOLDING';
@@ -726,9 +758,12 @@ function drawPriceFlow(d) {
     || lastSellPrice || lastBuyPrice || 0;
   const timeLabel = firstTs && lastTs ? `${fmtFlowTime(firstTs)}-${fmtFlowTime(lastTs)}` : '시간 대기';
   if(sub) {
-    const stateLabel = closed
-      ? `청산 완료${d.close_reason ? ` (${d.close_reason})` : ''}`
+    const rangeLabel = _priceFlowRangeMode === 'trade'
+      ? '거래 전체'
       : `최근 ${PRICE_FLOW_VIEW_MIN}분`;
+    const stateLabel = closed
+      ? `청산 완료${d.close_reason ? ` (${d.close_reason})` : ''} · ${rangeLabel}`
+      : rangeLabel;
     const priceLabel = lastPrice > 0 ? ` · ${holding ? '현재' : '마지막'} ${fmt(lastPrice)}원` : '';
     sub.textContent = `${fmtFlowMinute(startTs)}-${fmtFlowMinute(endTs)} · ${stateLabel} · 틱 ${points.length}개 · ${timeLabel}${priceLabel}`;
   }
@@ -1856,6 +1891,7 @@ function toggleTheme() {
 
 // ── 초기 로드 ────────────────────────────────────────────────────────────
 syncPriceFlowScaleButtons();  // 저장된 세로 스케일 모드로 버튼 상태 동기화
+syncPriceFlowRangeButtons();  // 저장된 가로 구간 모드로 버튼 상태 동기화
 loadSchedule();
 loadStatus();
 loadF1();

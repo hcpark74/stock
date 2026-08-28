@@ -61,10 +61,45 @@ const marks = parseTradeMarks({
 check('마커 파싱: 3건', marks.length === 3);
 check('마커 파싱: 매도 가격', marks[2].price === 10200 && marks[2].side === 'SELL');
 
-w = priceFlowViewWindow({position_status: 'CLOSED', entry_at: '2026-07-14T09:10:30+09:00'}, marks);
+w = priceFlowViewWindow(
+  {position_status: 'CLOSED', entry_at: '2026-07-14T09:10:30+09:00'}, marks, 'trade');
 const sellTs = Date.parse('2026-07-14T09:55:00+09:00');
-check('청산 후: 시작 <= 진입-여백', w.startTs <= T0 - 29 * 1000);
-check('청산 후: 끝 >= 매도체결+여백', w.endTs >= sellTs + 29 * 1000);
+check('청산 후 거래 전체: 시작 <= 진입-여백', w.startTs <= T0 - 29 * 1000);
+check('청산 후 거래 전체: 끝 >= 매도체결+여백', w.endTs >= sellTs + 29 * 1000);
+
+// 3-1) 청산 후 기본값('recent')은 오른쪽 끝에 붙는 20분 슬라이딩 창.
+//      사후 관측이 15:15까지 이어져 '거래 전체'가 하루로 늘어나는 것을 막는다.
+//      2026-08-28에 09:01 청산 후 11:25 시점 구간이 이미 2시간 24분이었다.
+_priceFlowTicks = [{ts: T0, price: 10000}, {ts: T0 + 140 * MIN, price: 10500}];
+w = priceFlowViewWindow(
+  {position_status: 'CLOSED', entry_at: '2026-07-14T09:10:30+09:00'}, marks);
+check('청산 후 최근창: 크기=20분', w.endTs - w.startTs === 20 * MIN);
+check('청산 후 최근창: 오른쪽 끝이 마지막 데이터', w.endTs === T0 + 140 * MIN + 30 * 1000);
+check('청산 후 최근창: 진입 시각을 지나 스크롤됐다', w.startTs > T0);
+const wide = priceFlowViewWindow(
+  {position_status: 'CLOSED', entry_at: '2026-07-14T09:10:30+09:00'}, marks, 'trade');
+check('같은 데이터에서 거래 전체는 훨씬 넓다', wide.endTs - wide.startTs > 2 * (20 * MIN));
+
+// 3-2) 청산 직후처럼 구간이 20분보다 짧으면 최근창도 전체를 그대로 보여준다
+_priceFlowTicks = [{ts: T0, price: 10000}, {ts: T0 + 5 * MIN, price: 10100}];
+const shortMarks = parseTradeMarks({ticker: '005930', trade_marks: [
+  {order_type: 'BUY', order_phase: 'FIRST_BUY', ticker: '005930',
+    fill_price: 10000, filled_at: '2026-07-14T09:10:31+09:00'},
+  {order_type: 'SELL', order_phase: 'CLOSE_SELL', ticker: '005930',
+    fill_price: 10200, filled_at: '2026-07-14T09:13:00+09:00'},
+]});
+w = priceFlowViewWindow(
+  {position_status: 'CLOSED', entry_at: '2026-07-14T09:10:30+09:00'}, shortMarks);
+check('짧은 거래: 최근창이 진입 앞을 잘라내지 않는다', w.startTs <= T0 - 29 * 1000);
+
+// 3-3) 보유 중 '거래 전체'는 진입부터 지금까지
+_priceFlowTicks = [{ts: T0, price: 10000}];
+Date.now = () => T0 + 40 * MIN;
+w = priceFlowViewWindow(
+  {position_status: 'HOLDING', entry_at: '2026-07-14T09:10:30+09:00'}, [], 'trade');
+check('보유 거래 전체: 시작=진입시각', w.startTs === T0);
+check('보유 거래 전체: 40분 전부', w.endTs - w.startTs === 40 * MIN);
+_priceFlowTicks = [{ts: T0, price: 10000}, {ts: T0 + 5 * MIN, price: 10100}];
 
 // 4) 같은 날 다른 종목의 체결은 현재 종목 마커에서 제외
 const filtered = parseTradeMarks({ticker: '005930', trade_marks: [
@@ -78,7 +113,8 @@ check('타 종목 마커 필터링: 남은 마커는 현재 종목', filtered[0]
 
 // 5) 재시작 후 CLOSED(tick 없음) → 마커만으로 창 성립
 _priceFlowTicks = []; _priceFlow = [];
-w = priceFlowViewWindow({position_status: 'CLOSED', entry_at: '2026-07-14T09:10:30+09:00'}, marks);
+w = priceFlowViewWindow(
+  {position_status: 'CLOSED', entry_at: '2026-07-14T09:10:30+09:00'}, marks, 'trade');
 check('재시작 CLOSED: 매도까지 포함', w.endTs >= sellTs);
 
 // 6) 다운샘플링: 크기 제한 + 스파이크(min/max) 보존 + 시간순 유지
