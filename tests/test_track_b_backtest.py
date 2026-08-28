@@ -9,7 +9,10 @@ import pytest
 from scripts.track_b_backtest import (
     ENTRY_DEADLINE,
     SIGNAL_START,
+    bootstrap_ci,
+    correlation,
     find_signal,
+    gate_report,
     simulate_day,
 )
 from scripts.track_b_rules import DEFAULT_PARAMS
@@ -94,3 +97,64 @@ def test_slippage_raises_entry_price_only():
                           DEFAULT_PARAMS, slippage=0.004)
     assert result["entry_price"] == pytest.approx(100.4)
     assert result["pct"] == pytest.approx((100 / 100.4 - 1) * 100)
+
+
+def test_bootstrap_ci_is_deterministic_and_brackets_the_mean():
+    values = [1.0, -2.0, 3.0, -1.0, 2.0]
+    low, high = bootstrap_ci(values)
+    assert low < sum(values) / len(values) < high
+    assert (low, high) == bootstrap_ci(values)   # 시드 고정
+
+
+def test_bootstrap_ci_of_empty_is_none():
+    assert bootstrap_ci([]) == (None, None)
+
+
+def test_correlation_of_identical_series_is_one():
+    assert correlation([1.0, 2.0, 3.0], [1.0, 2.0, 3.0]) == pytest.approx(1.0)
+
+
+def test_correlation_needs_two_points():
+    assert correlation([1.0], [1.0]) is None
+
+
+def test_gate1_rejects_axis_with_fewer_than_three_entry_days():
+    axis = {
+        "R1": {
+            "rows": [{"date": "20260820", "pct": 1.0, "ambiguous": False}] * 2,
+            "slippage_signs": [1, 1, 1],
+        }
+    }
+    report = gate_report(axis, a_daily={})
+    assert report["R1"]["gate1_pass"] is False
+    assert "진입일" in report["R1"]["gate1_reason"]
+
+
+def test_gate2_rejects_axis_whose_sign_flips_under_slippage():
+    axis = {
+        "R1": {
+            "rows": [{"date": f"2026082{i}", "pct": 1.0, "ambiguous": False}
+                     for i in range(4)],
+            "slippage_signs": [1, 1, -1],
+        }
+    }
+    report = gate_report(axis, a_daily={})
+    assert report["R1"]["gate2_pass"] is False
+
+
+def test_ambiguous_days_are_excluded_but_counted():
+    axis = {
+        "R1": {
+            "rows": [
+                {"date": "20260818", "pct": 1.0, "ambiguous": False},
+                {"date": "20260819", "pct": None, "ambiguous": True},
+                {"date": "20260820", "pct": 2.0, "ambiguous": False},
+                {"date": "20260821", "pct": 3.0, "ambiguous": False},
+            ],
+            "slippage_signs": [1, 1, 1],
+        }
+    }
+    report = gate_report(axis, a_daily={})
+    assert report["R1"]["ambiguous_days"] == 1
+    assert report["R1"]["judged_days"] == 3
+    assert report["R1"]["total_pct"] == pytest.approx(6.0)

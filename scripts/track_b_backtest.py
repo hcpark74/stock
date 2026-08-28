@@ -9,12 +9,28 @@ strategy_backtest.py 는 09:00~09:30 장벽 모델에 묶여 있어 재사용하
 
 from __future__ import annotations
 
-from scripts.track_b_rules import RULES, build_context, resolve_exit
-from src.modules import f1_selector
+import argparse
+import json
+import random
+import statistics
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.strategy_backtest import BAR_CACHE_DIR, load_universes, read_cached_bars  # noqa: E402
+from scripts.track_b_rules import DEFAULT_PARAMS, RULES, build_context, resolve_exit  # noqa: E402
+from src.modules import f1_selector  # noqa: E402
 
 SIGNAL_START = "093500"
 ENTRY_DEADLINE = "140000"
 DEPTH = 5
+
+# 스펙 §5.2 — 체결 가정을 셋 얹어 부호가 유지되는지만 본다. 최댓값을 고르지 않는다.
+SLIPPAGES = (0.000, 0.002, 0.004)
+MIN_ENTRY_DAYS = 3
 
 
 def find_signal(
@@ -95,3 +111,217 @@ def simulate_day(
         "exit_time": exit_["high_first"]["exit_time"],
         "pct": exit_["pct"],
     }
+
+
+def bootstrap_ci(
+    values: list[float],
+    *,
+    seed: int = 20260828,
+    resamples: int = 10000,
+    alpha: float = 0.05,
+) -> tuple[float | None, float | None]:
+    """일별 손익 평균의 백분위 부트스트랩 CI. 시드를 고정해 재현 가능하게 둔다."""
+    if not values:
+        return (None, None)
+    rng = random.Random(seed)
+    n = len(values)
+    means = sorted(
+        sum(rng.choice(values) for _ in range(n)) / n for _ in range(resamples)
+    )
+    lo = means[int(resamples * alpha / 2)]
+    hi = means[min(resamples - 1, int(resamples * (1 - alpha / 2)))]
+    return (lo, hi)
+
+
+def correlation(xs: list[float], ys: list[float]) -> float | None:
+    if len(xs) != len(ys) or len(xs) < 2:
+        return None
+    try:
+        return statistics.correlation(xs, ys)
+    except statistics.StatisticsError:
+        return None
+
+
+def run_axis(
+    universes: dict[str, list[dict]],
+    bars: dict[str, dict[str, list[dict]]],
+    rule_key: str,
+    params: dict,
+    *,
+    slippage: float = 0.0,
+) -> list[dict]:
+    rows = []
+    for date in sorted(universes):
+        result = simulate_day(
+            date, universes[date], bars.get(date, {}), rule_key, params,
+            slippage=slippage,
+        )
+        if result is not None:
+            rows.append(result)
+    return rows
+
+
+def sign_stability(
+    universes: dict[str, list[dict]],
+    bars: dict[str, dict[str, list[dict]]],
+    rule_key: str,
+    params: dict,
+) -> list[int]:
+    """체결 가정 셋에서의 합계 부호. 하나라도 다르면 관문 2 탈락이다."""
+    signs = []
+    for slip in SLIPPAGES:
+        rows = run_axis(universes, bars, rule_key, params, slippage=slip)
+        total = sum(r["pct"] for r in rows if r["pct"] is not None)
+        signs.append(0 if total == 0 else (1 if total > 0 else -1))
+    return signs
+
+
+def gate_report(axis_results: dict[str, dict], a_daily: dict[str, float]) -> dict:
+    """스펙 §5의 관문을 그대로 적용한다. 통과·탈락과 사유를 함께 남긴다."""
+    report = {}
+    for key, data in axis_results.items():
+        rows = data["rows"]
+        judged = [r for r in rows if not r["ambiguous"] and r["pct"] is not None]
+        pcts = [r["pct"] for r in judged]
+        entry_days = len(rows)
+
+        gate1_pass = entry_days >= MIN_ENTRY_DAYS
+        gate1_reason = (
+            "" if gate1_pass
+            else f"진입일 {entry_days}일 < {MIN_ENTRY_DAYS}일 — 판정 불가"
+        )
+
+        signs = [s for s in data["slippage_signs"] if s != 0]
+        gate2_pass = len(set(signs)) <= 1
+        gate2_reason = (
+            "" if gate2_pass
+            else f"체결 가정에 따라 부호가 뒤집힌다: {data['slippage_signs']}"
+        )
+
+        paired_b, paired_a = [], []
+        for row in judged:
+            a_pct = a_daily.get(row["date"])
+            if a_pct is not None:      # None 을 상관계수에 넣으면 TypeError 다
+                paired_b.append(row["pct"])
+                paired_a.append(a_pct)
+        # A가 미진입이거나 AMBIGUOUS라 판정 못 한 날. 둘을 섞어 세므로 문서에
+        # 적을 때 "A의 손익이 없는 날"이라고 쓴다.
+        a_missing_days = [d for d, v in a_daily.items() if v is None]
+        covered = sum(1 for r in rows if r["date"] in a_missing_days)
+
+        lo, hi = bootstrap_ci(pcts)
+        report[key] = {
+            "entry_days": entry_days,
+            "judged_days": len(judged),
+            "ambiguous_days": entry_days - len(judged),
+            "total_pct": sum(pcts),
+            "win_rate": (sum(1 for p in pcts if p > 0) / len(pcts)) if pcts else None,
+            "ci_low": lo,
+            "ci_high": hi,
+            "ci_includes_zero": (lo is not None and lo <= 0 <= hi),
+            "corr_with_a": correlation(paired_b, paired_a),
+            "a_missing_day_coverage": covered,
+            "gate1_pass": gate1_pass,
+            "gate1_reason": gate1_reason,
+            "gate2_pass": gate2_pass,
+            "gate2_reason": gate2_reason,
+        }
+    return report
+
+
+def load_bars_for(
+    universes: dict[str, list[dict]], *, depth: int = DEPTH,
+    cache_dir: Path = BAR_CACHE_DIR,
+) -> tuple[dict[str, dict[str, list[dict]]], dict[str, int]]:
+    """캐시에서만 읽는다. 없는 쌍은 세어서 보고한다 — 조용히 빠지면 안 된다."""
+    bars: dict[str, dict[str, list[dict]]] = {}
+    stats = {"pairs": 0, "missing": 0, "partial": 0}
+    for date, rows in universes.items():
+        ranked = f1_selector.rank_candidates(rows)[:depth]
+        day: dict[str, list[dict]] = {}
+        for row in ranked:
+            ticker = str(row.get("ticker") or "")
+            if not ticker:
+                continue
+            stats["pairs"] += 1
+            cached = read_cached_bars(date, ticker, cache_dir)
+            if not cached:
+                stats["missing"] += 1
+                continue
+            if max(b["time"] for b in cached) < "140000":
+                stats["partial"] += 1
+                continue
+            day[ticker] = cached
+        if day:
+            bars[date] = day
+    return bars, stats
+
+
+def a_daily_from_baseline() -> dict[str, float | None]:
+    """트랙 A의 일별 손익 — 기존 하네스의 현행 정책(BASELINE)으로 낸다.
+
+    실계좌 체결이 아니라 같은 봉 위의 시뮬레이션이라 B와 대칭이다. 미진입일은
+    None으로 두고 커버리지 계산에 쓴다.
+    """
+    from scripts.strategy_backtest import (
+        BASELINE, load_bar_cache, load_universes as _lu,
+        simulate_day as a_simulate_day, tickers_needed,
+    )
+
+    universes = _lu()
+    bars = load_bar_cache(tickers_needed(universes, [BASELINE]))
+    daily: dict[str, float | None] = {}
+    for date in sorted(universes):
+        # 인자 순서에 주의한다 — (date, universe, policy, bars) 다.
+        row = a_simulate_day(date, universes[date], BASELINE, bars.get(date, {}))
+        daily[date] = row.get("realized_pct") if row.get("entered") else None
+    return daily
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="트랙 B 진입 규칙 비교")
+    parser.add_argument("--depth", type=int, default=DEPTH)
+    parser.add_argument("--out", default="", help="결과 JSON 경로")
+    args = parser.parse_args(argv)
+
+    universes = load_universes()
+    bars, stats = load_bars_for(universes, depth=args.depth)
+    print(f"표본: {len(bars)}거래일 / 쌍 {stats['pairs']} "
+          f"(없음 {stats['missing']}, 09:00~09:30만 {stats['partial']})")
+    if stats["missing"] + stats["partial"] > 0:
+        print("  ! 전 세션 봉이 없는 쌍이 있다. track_b_backfill.py 를 먼저 돌린다.")
+
+    axis_results = {}
+    for key in sorted(RULES):
+        rows = run_axis(universes, bars, key, DEFAULT_PARAMS)
+        axis_results[key] = {
+            "rows": rows,
+            "slippage_signs": sign_stability(universes, bars, key, DEFAULT_PARAMS),
+        }
+
+    report = gate_report(axis_results, a_daily_from_baseline())
+    for key in sorted(report):
+        r = report[key]
+        print(f"\n[{key}] 진입 {r['entry_days']}일 / 판정 {r['judged_days']}일 "
+              f"(AMBIGUOUS {r['ambiguous_days']})")
+        print(f"  합계 {r['total_pct']:+.2f}%  승률 "
+              f"{'-' if r['win_rate'] is None else format(r['win_rate'] * 100, '.1f')}%")
+        print(f"  일평균 95% CI [{r['ci_low']}, {r['ci_high']}] "
+              f"{'— 0을 포함한다 (차이 없음)' if r['ci_includes_zero'] else ''}")
+        print(f"  A와의 상관 {r['corr_with_a']}  A 미진입일 커버 "
+              f"{r['a_missing_day_coverage']}일")
+        print(f"  관문1 {'통과' if r['gate1_pass'] else '탈락 — ' + r['gate1_reason']}")
+        print(f"  관문2 {'통과' if r['gate2_pass'] else '탈락 — ' + r['gate2_reason']}")
+
+    if args.out:
+        Path(args.out).write_text(
+            json.dumps({"report": report, "axes": axis_results},
+                       ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"\n결과: {args.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
