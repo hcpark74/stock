@@ -283,3 +283,74 @@ async def test_reset_cancels_a_registered_worker_task(monkeypatch):
 
     assert task.cancelled()
     assert bars._workers == {}
+async def test_switching_tickers_cancels_the_abandoned_worker(monkeypatch):
+    async def fake_worker(date, ticker):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(bars, "worker", fake_worker)
+
+    bars._active = ("20260827", "041190")
+    _REAL_ENSURE_WORKER("20260827", "041190")
+    task = bars._workers[("20260827", "041190")]
+
+    bars._close_previous(("20260827", "043200"))
+    await asyncio.sleep(0)
+
+    assert task.cancelled()
+    assert ("20260827", "041190") not in bars._workers
+
+
+async def test_the_abandoned_worker_stops_calling_the_minute_api(monkeypatch):
+    """교체된 종목의 정정 폴링이 실제로 끊기는지 본다.
+
+    태스크 취소만 확인하면 부족하다. 2026-08-28에 문제가 된 것은 워커가
+    살아서 분봉 API를 계속 부른 것이었고, 그 호출이 멎는지가 요점이다.
+    """
+    calls: list[str] = []
+
+    async def fake_correct(date, ticker, *, now=None):
+        calls.append(ticker)
+        return 0
+
+    monkeypatch.setattr(bars, "correct_once", fake_correct)
+    monkeypatch.setattr(bars, "_CORRECT_INTERVAL_SEC", 0.01)
+
+    bars._active = ("20260827", "041190")
+    _REAL_ENSURE_WORKER("20260827", "041190")
+    await asyncio.sleep(0.06)
+    assert calls, "워커가 정정을 한 번도 부르지 않았다면 이 테스트는 무의미하다"
+
+    bars._close_previous(("20260827", "043200"))
+    await asyncio.sleep(0)
+    settled = len(calls)
+    await asyncio.sleep(0.06)
+
+    assert len(calls) == settled
+
+
+async def test_closing_the_series_leaves_the_incoming_worker_alone(monkeypatch):
+    """나가는 종목만 끊는다 — 들어오는 종목의 워커까지 죽이면 안 된다."""
+
+    async def fake_worker(date, ticker):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(bars, "worker", fake_worker)
+
+    bars._active = ("20260827", "041190")
+    _REAL_ENSURE_WORKER("20260827", "041190")
+    _REAL_ENSURE_WORKER("20260827", "043200")
+    incoming = bars._workers[("20260827", "043200")]
+
+    bars._close_previous(("20260827", "043200"))
+    await asyncio.sleep(0)
+
+    assert not incoming.done()
+    assert bars._workers[("20260827", "043200")] is incoming
+
+    # 살려 둔 태스크는 여기서 정리한다. reset()은 동기라 await 없이 cancel만
+    # 하고, 루프가 닫힌 뒤에 그게 불리면 "Event loop is closed"가 난다.
+    incoming.cancel()
+    try:
+        await incoming
+    except asyncio.CancelledError:
+        pass

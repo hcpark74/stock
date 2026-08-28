@@ -268,6 +268,12 @@ def _close_previous(key: tuple[str, str]) -> None:
     폴백을 갖고 있어 마감한 날도 계속 읽힌다(source="file"). 나가는 종목의
     스파이크 필터도 함께 버린다 — 어제 종가를 들고 있으면 오늘 시초의 큰
     갭이 스파이크로 걸러진다. B가 보는 것이 바로 그 큰 시초 갭이다.
+
+    워커도 같이 취소한다. 두고 가면 1분마다 분봉 API를 부르며 방금 지운
+    키를 다시 채우고, 스스로 멈추지도 못한다 — 유휴 판정이 전역 _queue를
+    보는데 거기에는 새 종목의 틱이 계속 들어오기 때문이다. 2026-08-28에
+    실제로 이렇게 됐다: 09:01:18에 버린 041190이 장중 내내 정정을 돌며
+    트랙 B의 REST 사용량을 두 배로 만들었다.
     """
     global _active
     previous = _active
@@ -280,6 +286,9 @@ def _close_previous(key: tuple[str, str]) -> None:
     _filters.pop(previous[1], None)
     for pending in [k for k in _pending_spikes if (k[0], k[1]) == previous]:
         _pending_spikes.pop(pending, None)
+    task = _workers.pop(previous, None)
+    if task is not None:
+        task.cancel()
     log("TRACK_B_SERIES_CLOSED", level="INFO", date=previous[0], ticker=previous[1])
 
 
