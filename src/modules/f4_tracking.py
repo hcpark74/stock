@@ -229,9 +229,11 @@ def _should_attach_capture(s: state.State, now: datetime | None = None) -> bool:
     캡처 창(CAPTURE_UNTIL, 15:15)이 끝난 뒤에는 붙지 않는다. 붙이면
     `_price_observation_active()`의 컷오프가 `F4_POST_CLOSE_OBSERVE_UNTIL`에서
     `CAPTURE_UNTIL`로 뒤집혀 관측이 그 자리에서 끝나고, 최종화 → 재부착이
-    `_REARM_INTERVAL_SEC`마다 반복된다. 2026-08-28 실장에서 두 값이 어긋나
-    (관측 15:30 > 캡처 15:15) 그 사이 약 900바퀴가 돌았고, 재부착이 디스크의
+    `_REARM_INTERVAL_SEC`마다 반복된다. 실장에서 두 값이 어긋난 채로
+    (관측 15:30 > 캡처 15:15) 하루 약 900바퀴가 돌았고, 재부착이 디스크의
     기존 청크를 재시작으로 읽어 그날 캡처를 RESTART_GAP으로 오염시켰다.
+    2026-08-14/19/27/28 네 거래일이 이렇게 남았다 — 틱 자체는 온전하다.
+    자세한 내역은 docs/DEV_ENV.md의 "F4 청산 후 관측과 EXITING 운영".
     그 시각 이후에 붙인 캡처는 어차피 즉시 최종화되므로 남길 것도 없다.
     """
     if not s.target_ticker:

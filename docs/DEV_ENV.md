@@ -621,9 +621,22 @@ STRATEGY_TICK_SOFT_LIMIT_MB=100
 - 이 값을 `tick_capture.CAPTURE_UNTIL`(15:15)보다 **늦게 두면 캡처가 그 뒤로
   다시 붙지 않는다.** 15:15 이후에는 관측(차트용 가격 수집)만 이어지고 durable
   캡처는 붙지 않는다 — 붙이면 `_price_observation_active()`의 컷오프가 캡처
-  활성 여부로 뒤집혀 최종화·재부착이 초당 한 번씩 반복된다. 2026-08-28에 이
-  값이 `15:30`으로 설정돼 15:15~15:30 사이 약 900바퀴가 돌았고, 재부착이
-  디스크의 기존 청크를 재시작으로 읽어 그날 캡처가 `RESTART_GAP`으로 남았다.
+  활성 여부로 뒤집혀 최종화·재부착이 초당 한 번씩 반복된다. 이 값이 `15:30`으로
+  설정돼 있던 동안 15:15~15:30 사이 약 900바퀴가 돌았고, 재부착이 디스크의 기존
+  청크를 재시작으로 읽어 그날 캡처가 `RESTART_GAP`으로 남았다.
+- **`price_path_manifests`의 `RESTART_GAP` 4행은 실제 재시작이 아니라 위 진동이다.**
+  20260814/001820, 20260819/006660, 20260827/006340, 20260828/043200 네 행이
+  모두 같은 지문을 남겼다 — `created_at` 09:01, `last_source_ts` 15:14:59,
+  `reached_expected_close=1`, 그리고 `finalized_at`이 `F4_POST_CLOSE_OBSERVE_UNTIL`
+  경계인 15:30:00 ±1초. 진짜 재시작은 이렇게 초 단위로 정렬되지 않는다.
+  **네 날 모두 틱 데이터는 15:14:59까지 온전하다**; 손상된 것은 품질 플래그뿐이다.
+  현재 `data_complete`를 읽는 코드가 없어(호출부는 upsert 자신과 테스트뿐) 정정하지
+  않고 두었다. 품질 게이팅을 실제로 붙일 때 아래 한 줄로 정리한다.
+
+  ```sql
+  UPDATE price_path_manifests SET data_complete=1, missing_reason=NULL
+   WHERE missing_reason='RESTART_GAP' AND reached_expected_close=1;
+  ```
 - 조기·수동 진입 거래가 이 시각 전에 CLOSED가 되면 WS/REST는 차트용 가격만 수집한다.
   CLOSED 중에는 스탑 계산, VI 처리, 매도 주문을 실행하지 않는다.
 - 상태 파일의 `entry_at`이 손상되면 `F4_ENTRY_AT_INVALID` WARN을 값별 1회 남기고
