@@ -624,19 +624,28 @@ STRATEGY_TICK_SOFT_LIMIT_MB=100
   활성 여부로 뒤집혀 최종화·재부착이 초당 한 번씩 반복된다. 이 값이 `15:30`으로
   설정돼 있던 동안 15:15~15:30 사이 약 900바퀴가 돌았고, 재부착이 디스크의 기존
   청크를 재시작으로 읽어 그날 캡처가 `RESTART_GAP`으로 남았다.
-- **`price_path_manifests`의 `RESTART_GAP` 4행은 실제 재시작이 아니라 위 진동이다.**
-  20260814/001820, 20260819/006660, 20260827/006340, 20260828/043200 네 행이
-  모두 같은 지문을 남겼다 — `created_at` 09:01, `last_source_ts` 15:14:59,
-  `reached_expected_close=1`, 그리고 `finalized_at`이 `F4_POST_CLOSE_OBSERVE_UNTIL`
-  경계인 15:30:00 ±1초. 진짜 재시작은 이렇게 초 단위로 정렬되지 않는다.
-  **네 날 모두 틱 데이터는 15:14:59까지 온전하다**; 손상된 것은 품질 플래그뿐이다.
-  현재 `data_complete`를 읽는 코드가 없어(호출부는 upsert 자신과 테스트뿐) 정정하지
-  않고 두었다. 품질 게이팅을 실제로 붙일 때 아래 한 줄로 정리한다.
+- **`price_path_manifests`의 `RESTART_GAP` 5행은 실제 재시작이 아니라 위 진동이다.**
+  20260814/001820, 20260819/006660, 20260827/006340, 20260828/043200,
+  20260831/443670 다섯 행이 모두 같은 지문을 남겼다 — `created_at` 09:01,
+  `last_source_ts` 15:14:58~59, `reached_expected_close=1`, 그리고 `finalized_at`이
+  `F4_POST_CLOSE_OBSERVE_UNTIL` 경계인 15:30:00 ±1초. 진짜 재시작은 이렇게 초
+  단위로 정렬되지 않는다. **다섯 날 모두 틱 데이터는 창이 닫힐 때까지 온전하다**;
+  손상된 것은 품질 플래그뿐이다. 현재 `data_complete`를 읽는 코드가 없어(호출부는
+  upsert 자신과 테스트뿐) 정정하지 않고 두었다. 품질 게이팅을 실제로 붙일 때 아래
+  한 줄로 정리한다.
 
   ```sql
   UPDATE price_path_manifests SET data_complete=1, missing_reason=NULL
    WHERE missing_reason='RESTART_GAP' AND reached_expected_close=1;
   ```
+
+  **품질 플래그만 잃은 것이 아니다 — 진동은 단절 증거도 지운다.** 매니페스트의
+  UNIQUE 키가 `(trade_date, ticker, experiment_id)`라 재부착이 같은 행을 계속
+  upsert하고, 마지막 0.5초짜리 인스턴스의 카운터가 남는다. 20260831은 그날 WS가
+  16회 끊겨 15:15:00에 `WS_LOSS`(`ws_disconnects=16`)로 최종화됐는데, 진동이 끝난
+  뒤 남은 행은 `ws_disconnects=0`이다. 위 `UPDATE`는 `data_complete`만 되돌린다 —
+  `ws_disconnects`·`source_ts_reversals`는 복구할 수 없고, 그날 로그의
+  `TICK_CAPTURE_FINALIZED` 첫 행에서만 실제 값을 읽을 수 있다.
 - `CAPTURE_UNTIL`은 2026-08-31부터 **15:20**이다. 그 전에는 F5 청산 시각(15:15)에서
   파생된 값이었으나, F5가 15:15인 것은 시장가 매도가 마감 동시호가에 걸리지 않게
   하려는 주문 제약이지 관측 제약이 아니다. 연속매매는 15:20에 끝난다. 따라서
@@ -644,6 +653,38 @@ STRATEGY_TICK_SOFT_LIMIT_MB=100
   "15:15까지 받았다", 이후 행은 "15:20까지 받았다"이다. 두 기간의 완전성 비율을
   직접 비교하지 않는다. 15:20~15:30 마감 동시호가 구간은 담지 않는다(연속 체결이
   없고, 그 구간 WS 프레임이 무엇인지 실측한 바 없다).
+- **캡처 창 이전(2026-08-31 이하)의 실장 확인 절차.** 창을 15:20으로 옮긴 뒤 첫
+  거래일에 아래를 돌려 재부착 진동이 실제로 멎었는지 본다. A가 진입하지 않은 날에도
+  캡처는 붙으므로(관측 계층 중립화) 거래 유무와 무관하게 확인된다.
+
+  ```powershell
+  .\.venv\Scripts\python.exe -c @'
+import json
+for line in open('data/logs/20260901.jsonl', encoding='utf-8'):
+    r = json.loads(line)
+    if r['event'].startswith('TICK_CAPTURE_'):
+        print(r['ts'][11:19], r['event'], r.get('reason', ''), r.get('data_complete', ''))
+'@
+  ```
+
+  | 시각 | 통과 조건 |
+  |---|---|
+  | 15:15 | `TICK_CAPTURE_FINALIZED`가 **없다** — 창이 15:20으로 옮겨졌다 |
+  | 15:20 | `TICK_CAPTURE_FINALIZED`가 **정확히 1회** |
+  | 15:20 이후 | `TICK_CAPTURE_STARTED`가 **없다** — 재부착이 막혔다 |
+
+  `reason`은 그날 WS 상태에 따라 `COMPLETE`(무단절) 또는 `WS_LOSS`(단절 있음)이며,
+  둘 다 정상이다. 이 확인이 보는 것은 **최종화 횟수와 시각**이지 완전성 플래그가
+  아니다. `RESTART_GAP`이 다시 나오면 진동이 남아 있다는 뜻이다.
+
+  비교용으로, 진동이 있던 20260831의 같은 출력은 이렇게 시작한다 — 15:15에
+  최종화된 뒤 곧바로 다시 시작하고, 그 왕복이 15:29:59까지 이어진다.
+
+  ```
+  15:15:00 TICK_CAPTURE_FINALIZED WS_LOSS 0
+  15:15:00 TICK_CAPTURE_STARTED
+  15:15:01 TICK_CAPTURE_FINALIZED RESTART_GAP 0
+  ```
 - 조기·수동 진입 거래가 이 시각 전에 CLOSED가 되면 WS/REST는 차트용 가격만 수집한다.
   CLOSED 중에는 스탑 계산, VI 처리, 매도 주문을 실행하지 않는다.
 - 상태 파일의 `entry_at`이 손상되면 `F4_ENTRY_AT_INVALID` WARN을 값별 1회 남기고
