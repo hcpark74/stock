@@ -354,3 +354,33 @@ async def test_closing_the_series_leaves_the_incoming_worker_alone(monkeypatch):
         await incoming
     except asyncio.CancelledError:
         pass
+
+
+async def test_a_late_tick_lands_on_a_bar_the_correction_created(monkeypatch):
+    """정정이 만든 봉(tick_derived=None)에 뒤늦은 틱이 들어와도 파생값을 남긴다.
+
+    WS가 끊긴 분을 분봉 API가 메꾸면 그 봉의 tick_derived는 None이다. 그 뒤
+    재연결된 틱이 같은 분으로 도착하면 _apply가 None에 항목을 대입하려다
+    TypeError로 죽는다 — 2026-08-31 실장에서 543건. OHLCV는 예외 직전에 이미
+    갱신되므로 조용히 파생값만 사라진다.
+    """
+    bars.on_tick(_tick(14570, minute="0935"))
+    bars.drain()
+
+    async def fake_fetch(ticker, *, hour_cursor=""):
+        return {"rt_cd": "0", "output2": [
+            _official("093500", 14500, 15200, 14400, 15100, 900),
+            _official("093600", 15100, 15300, 15000, 15250, 400),
+        ]}
+
+    monkeypatch.setattr(bars.kis_minute_bars, "fetch_minute_bars", fake_fetch)
+    await bars.correct_once("20260827", "006340", now=datetime(2026, 8, 27, 9, 40, tzinfo=KST))
+    assert bars.series("20260827", "006340")[1]["tick_derived"] is None
+
+    bars.on_tick(_tick(14600, minute="0936"))
+    bars.drain()
+
+    bar = bars.series("20260827", "006340")[1]
+    assert bar["tick_count"] == 1
+    assert bar["tick_derived"] is not None
+    assert bar["tick_derived"]["cttr"] == 120.5

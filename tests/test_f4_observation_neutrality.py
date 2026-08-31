@@ -158,7 +158,7 @@ def test_capture_not_attached_without_target(monkeypatch):
 
 
 def test_capture_not_reattached_after_capture_window(monkeypatch):
-    """15:15 이후에는 캡처를 다시 붙이지 않는다.
+    """캡처 창(15:20)이 끝난 뒤에는 캡처를 다시 붙이지 않는다.
 
     붙이면 `_price_observation_active()`의 컷오프가 `CAPTURE_UNTIL`로 뒤집혀
     관측이 즉시 끝나고, 최종화 → 재부착이 0.5초마다 반복된다. 2026-08-28
@@ -168,20 +168,33 @@ def test_capture_not_reattached_after_capture_window(monkeypatch):
     """
     _use(monkeypatch, _State(target_ticker="005930", position_status="CLOSED",
                              entry_at="2026-08-25T09:01:00+09:00"))
-    after = datetime(2026, 8, 25, 15, 16, tzinfo=KST)
+    after = datetime(2026, 8, 25, 15, 21, tzinfo=KST)
     assert f4_tracking._should_attach_capture(f4_tracking.state.get(), after) is False
 
 
 def test_capture_not_reattached_exactly_at_capture_until(monkeypatch):
-    """경계 15:15:00은 캡처 창 밖이다 — 그 시각의 최종화가 COMPLETE를 확정한다."""
+    """경계 15:20:00은 캡처 창 밖이다 — 그 시각의 최종화가 COMPLETE를 확정한다."""
     _use(monkeypatch, _State(target_ticker="005930", position_status="CLOSED",
                              entry_at="2026-08-25T09:01:00+09:00"))
-    at_cutoff = datetime(2026, 8, 25, 15, 15, tzinfo=KST)
+    at_cutoff = datetime(2026, 8, 25, 15, 20, tzinfo=KST)
     assert f4_tracking._should_attach_capture(f4_tracking.state.get(), at_cutoff) is False
 
 
+def test_capture_still_attached_during_the_closing_continuous_session(monkeypatch):
+    """15:15~15:20은 연속매매 구간이다 — 캡처는 계속 붙어 있어야 한다.
+
+    F5 청산이 15:15인 것은 시장가 매도가 마감 동시호가(15:20~)에 걸리지 않게
+    하려는 주문 제약이지 관측 제약이 아니다. 캡처 창은 연속매매가 실제로
+    끝나는 15:20까지 간다.
+    """
+    _use(monkeypatch, _State(target_ticker="005930", position_status="CLOSED",
+                             entry_at="2026-08-25T09:01:00+09:00"))
+    in_window = datetime(2026, 8, 25, 15, 17, tzinfo=KST)
+    assert f4_tracking._should_attach_capture(f4_tracking.state.get(), in_window) is True
+
+
 def test_capture_still_attached_before_capture_window_ends(monkeypatch):
-    """15:15 이전에는 종전대로 붙는다 — 장중 재시작 복구가 이 경로다."""
+    """캡처 창 안에서는 종전대로 붙는다 — 장중 재시작 복구가 이 경로다."""
     _use(monkeypatch, _State(target_ticker="005930", position_status="HOLDING",
                              trade_id=31))
     before = datetime(2026, 8, 25, 15, 14, tzinfo=KST)

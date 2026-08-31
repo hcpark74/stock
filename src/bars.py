@@ -169,13 +169,17 @@ def _new_bar(when: datetime, price: float) -> dict:
         "confirmed": False,
         "tick_count": 0,
         "spike_dropped": 0,
-        "tick_derived": {
-            "cttr": None, "askp1": None, "bidp1": None,
-            "total_askp_rsqn": None, "total_bidp_rsqn": None,
-            "vol_by_ccld": {},
-            # 분봉 API는 OHLCV만 준다. 틱 파생값은 정정 대상이 아니다.
-            "corrected": False,
-        },
+        "tick_derived": _new_derived(),
+    }
+
+
+def _new_derived() -> dict:
+    return {
+        "cttr": None, "askp1": None, "bidp1": None,
+        "total_askp_rsqn": None, "total_bidp_rsqn": None,
+        "vol_by_ccld": {},
+        # 분봉 API는 OHLCV만 준다. 틱 파생값은 정정 대상이 아니다.
+        "corrected": False,
     }
 
 
@@ -193,6 +197,11 @@ def _apply(bar: dict, tick: dict, price: float) -> None:
     if not isinstance(raw, list):
         return
     derived = bar["tick_derived"]
+    if derived is None:
+        # 정정이 만든 봉은 파생값이 없다(_merge_official). 그 분에 틱이 실제로
+        # 도착하면 그때 구조를 만든다 — 여기서 대입만 하면 TypeError로 죽고,
+        # 그 위의 OHLCV 갱신은 이미 끝나 파생값만 조용히 사라진다.
+        derived = bar["tick_derived"] = _new_derived()
     for key, index in (
         ("cttr", _IDX_CTTR), ("askp1", _IDX_ASKP1), ("bidp1", _IDX_BIDP1),
         ("total_askp_rsqn", _IDX_TOTAL_ASKP), ("total_bidp_rsqn", _IDX_TOTAL_BIDP),

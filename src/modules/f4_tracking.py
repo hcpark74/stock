@@ -180,7 +180,7 @@ def _price_observation_active(now: datetime | None = None) -> bool:
             _invalid_entry_at_warned_value = invalid_value
         return False
     _invalid_entry_at_warned_value = None
-    # 캡처가 이 체결 종목에 활성이면 사후 관측을 고정 15:15까지 연장해 durable
+    # 캡처가 이 체결 종목에 활성이면 사후 관측을 고정 15:20까지 연장해 durable
     # 가격 경로가 실제 청산 이후에도 계속 기록되게 한다. 캡처 비활성이면 기존
     # 조기·수동 진입 동작(F4_POST_CLOSE_OBSERVE_UNTIL, 기본 09:10)을 보존한다.
     if tick_capture.is_active() and tick_capture.active_ticker() == s.target_ticker:
@@ -226,7 +226,7 @@ def _should_attach_capture(s: state.State, now: datetime | None = None) -> bool:
     이 조건이 trade_id를 요구하면 A가 진입하지 않은 날의 가격 경로가 디스크에
     전혀 남지 않는다.
 
-    캡처 창(CAPTURE_UNTIL, 15:15)이 끝난 뒤에는 붙지 않는다. 붙이면
+    캡처 창(CAPTURE_UNTIL, 15:20)이 끝난 뒤에는 붙지 않는다. 붙이면
     `_price_observation_active()`의 컷오프가 `F4_POST_CLOSE_OBSERVE_UNTIL`에서
     `CAPTURE_UNTIL`로 뒤집혀 관측이 그 자리에서 끝나고, 최종화 → 재부착이
     `_REARM_INTERVAL_SEC`마다 반복된다. 실장에서 두 값이 어긋난 채로
@@ -268,7 +268,7 @@ def _capture_backup_active(now: datetime | None = None) -> bool:
 
 
 def _note_ws_loss(now: datetime | None = None) -> bool:
-    """15:15 이전 WS 단절을 캡처에 실제 증거로 기록한다.
+    """캡처 창(15:20) 이전 WS 단절을 캡처에 실제 증거로 기록한다.
 
     재연결하더라도 그 사이 구간이 비어 완전 커버가 깨지므로, 캡처는 이 거래를
     ``data_complete=0``/``missing_reason=WS_LOSS``로 최종화한다.
@@ -289,7 +289,7 @@ async def _finalize_capture_after_observation() -> None:
     """관측 창이 끝난 뒤 캡처를 최종화한다(정상 청산 경로 전용).
 
     포지션이 아직 HOLDING이면(모니터 비정상 종료 후 재무장) 캡처를 계속 두고
-    최종화하지 않는다. 15:15에 도달했으면 COMPLETE, 이전이면 불완전으로 남긴다.
+    최종화하지 않는다. 15:20에 도달했으면 COMPLETE, 이전이면 불완전으로 남긴다.
     """
     if not (
         tick_capture.is_active()
@@ -327,7 +327,7 @@ async def stop_post_close_observation() -> dict:
         task.cancel()
         cancelled += 1
 
-    # 수동 중지는 15:15 이전 종료이므로 캡처를 불완전(MANUAL_STOP)으로 최종화한다.
+    # 수동 중지는 캡처 창 이전 종료이므로 캡처를 불완전(MANUAL_STOP)으로 최종화한다.
     if tick_capture.is_active() and tick_capture.active_ticker() == s.target_ticker:
         await tick_capture.finalize("MANUAL_STOP", reached_expected_close=False)
 
@@ -506,7 +506,7 @@ async def run() -> None:
         nonlocal ws_transport_known
         ws_transport_known = True
         live.ws_connected = connected
-        # 15:15 이전 WS 단절을 캡처에 실제 증거로 남긴다(재연결해도 불완전).
+        # 캡처 창 이전 WS 단절을 캡처에 실제 증거로 남긴다(재연결해도 불완전).
         if not connected:
             try:
                 _note_ws_loss()
@@ -569,7 +569,7 @@ async def run() -> None:
                     ),
                     ticker=ticker,
                 )
-        # 관측 창(15:15)이 끝나 모니터가 정상 종료했으면 캡처를 최종화한다.
+        # 관측 창(15:20)이 끝나 모니터가 정상 종료했으면 캡처를 최종화한다.
         # 취소(shutdown) 시에는 여기 도달하지 않고 main.py finally가
         # PROCESS_SHUTDOWN으로 마감한다. 캡처는 F4 청산 모니터가 소유·취소하지
         # 않으므로 정상 청산이 writer를 죽이지 않는다.
@@ -816,7 +816,7 @@ async def _handle_price_tick(
         return False
 
     live.push_tick(price, ticker=ticker)
-    # 진입~15:15 durable 가격 경로에 적재한다. 논블로킹·격리 — 캡처 실패가
+    # 진입~15:20 durable 가격 경로에 적재한다. 논블로킹·격리 — 캡처 실패가
     # 스탑 추적·주문 경로를 흔들면 안 된다. CLOSED 구간에서도 가격만 기록한다.
     # 거래소 시각(source_ts)·체결량(qty)·출처를 그대로 보존하고, naive/무효
     # 시각은 소리 없이 받아들이지 않고 source_ts=None·valid=False로 표시한다.

@@ -1,4 +1,4 @@
-"""선택·체결된 PAPER 한 종목의 재생 가능한 가격 경로를 15:15까지 durable 기록.
+"""선택·체결된 PAPER 한 종목의 재생 가능한 가격 경로를 15:20까지 durable 기록.
 
 설계 원칙:
 - 진입 체결(F3)이 확정되면 즉시 시작하고, F4는 idempotent하게 attach/resume한다.
@@ -49,11 +49,15 @@ def _env_float(name: str, default: float) -> float:
 # 기록을 버리지 않고 경고와 실제 용량을 남긴다(단계 A 종료 시 재산정).
 SOFT_LIMIT_MB = max(0.0, _env_float("STRATEGY_TICK_SOFT_LIMIT_MB", 100.0))
 
-# 고정 종료 15:15 및 저우선 REST 백업 창 — schedule_times 단일 출처에서 파생.
-# 계획 §"실제 청산 후 가격 경로 요구사항": 백업은 09:35 이후에만 시작하고 15:14에
-# 멈춘다(F5 precheck 15:14:50 · exec 15:15:00이 항상 우선).
-CAPTURE_UNTIL = (F5_EXEC_H, F5_EXEC_M)          # (15, 15)
+# 캡처 종료는 연속매매가 끝나는 15:20이다. F5(15:15)에서 파생시키지 않는다 —
+# F5가 15:15인 것은 시장가 매도가 마감 동시호가에 걸리지 않게 하려는 주문
+# 제약이지(schedule_times.py) 관측 제약이 아니고, 관측 계층은 이미 트랙 A의
+# 포지션과 분리돼 있다(모스펙 §3.3). 15:20 이후 동시호가 구간은 연속 체결이
+# 없어 담지 않는다 — 그 구간 프레임이 무엇인지 실측한 바 없다.
+CAPTURE_UNTIL = (15, 20)
 CAPTURE_BACKUP_START = (9, 35)
+# 백업은 09:35 이후에만 시작하고 15:14에 멈춘다 — F5 precheck 15:14:50 ·
+# exec 15:15:00이 유량에서 항상 우선이다. 15:15~15:20은 WS로만 받는다.
 CAPTURE_BACKUP_STOP = (F5_EXEC_H, F5_EXEC_M - 1)  # (15, 14)
 
 # 캡처 경로 완전성 전용 스위치. F4_POST_CLOSE_REST_BACKUP_ENABLED(기본 0)는 차트
@@ -246,7 +250,7 @@ class TickCapture:
                 continue
 
     def mark_ws_disconnect(self) -> None:
-        """15:15 이전 WS 단절을 실제 증거로 기록한다(재연결해도 불완전 처리)."""
+        """캡처 창(15:20) 이전 WS 단절을 실제 증거로 기록한다(재연결해도 불완전)."""
         self._ws_disconnects += 1
         self._ws_loss_before_close = True
 
@@ -344,7 +348,7 @@ class TickCapture:
 
         REST 표본은 거래소 시각이 없어 ``source_ts=None``으로 들어온다. 이를 그대로
         덮어쓰면 장 마감 후 REST 백업이 마지막 행이 되는 대부분의 거래에서
-        ``last_source_ts``가 NULL이 되어, 진입~15:15 커버리지 판정이 실제와 무관하게
+        ``last_source_ts``가 NULL이 되어, 진입~15:20 커버리지 판정이 실제와 무관하게
         결측으로 보인다. 따라서 None은 경계를 지우지 않는다.
         """
         if source_ts is not None:
@@ -450,6 +454,9 @@ class TickCapture:
             "".join(c["sha256"] for c in chunks).encode("utf-8")
         ).hexdigest()
 
+        # 리터럴 ``INCOMPLETE_BEFORE_1515``는 캡처 창이 15:20으로 옮겨진 뒤에도
+        # 그대로 둔다. 뜻은 "창이 닫히기 전에 끝났다"이며, 이름을 바꾸면 같은
+        # 사유가 DB에 두 문자열로 남아 과거 행과 대조가 끊긴다.
         explicit_incomplete = {
             "MANUAL_STOP",
             "PROCESS_SHUTDOWN",
@@ -464,7 +471,7 @@ class TickCapture:
             data_complete = 0
             missing_reason = reason
         elif self._ws_loss_before_close:
-            # 15:15 이전 WS 단절은 재연결해도 불완전으로 남긴다.
+            # 캡처 창(15:20) 이전 WS 단절은 재연결해도 불완전으로 남긴다.
             data_complete = 0
             missing_reason = "WS_LOSS"
         elif self._prior_interruption:
