@@ -7,6 +7,7 @@
 
 import pytest
 
+from scripts import track_b_rules
 from scripts.track_b_rules import (
     DEFAULT_PARAMS,
     HARD_STOP,
@@ -235,3 +236,56 @@ def test_r3_fires_when_conditions_met():
 
     # 그 인덱스에서 r3_indicator가 True를 돌려야 함
     assert r3_indicator(bars, fire_idx, ctx, DEFAULT_PARAMS) is True
+
+
+def _seq_bars(closes, start_hhmm=900, volume=100.0):
+    """분 단위로 이어지는 봉. close만 의미가 있다."""
+    out = []
+    hh, mm = divmod(start_hhmm, 100)
+    for c in closes:
+        out.append({
+            "time": f"{hh:02d}{mm:02d}00",
+            "open": float(c), "high": float(c), "low": float(c), "close": float(c),
+            "volume": volume,
+        })
+        mm += 1
+        if mm == 60:
+            mm = 0
+            hh += 1
+    return out
+
+
+def test_warmup_defines_macd_from_the_first_bar_of_the_day():
+    """워밍업이 없으면 당일 초반 MACD는 None이다. 붙이면 첫 봉부터 값이 선다."""
+    warm = _seq_bars([1000 + i for i in range(60)])
+    day = _seq_bars([1060 + i for i in range(5)], start_hhmm=1000)
+
+    cold = track_b_rules.build_context(day, track_b_rules.DEFAULT_PARAMS)
+    hot = track_b_rules.build_context(day, track_b_rules.DEFAULT_PARAMS, warmup=warm)
+
+    assert cold["macd"][0]["macd"] is None
+    assert hot["macd"][0]["macd"] is not None
+    assert len(hot["macd"]) == len(day)
+    assert len(hot["sma"]) == len(day)
+
+
+def test_warmup_does_not_leak_into_session_accumulators():
+    """VWAP·당일 고가·봉 간격은 세션 값이다 — 워밍업이 섞이면 안 된다."""
+    warm = _seq_bars([9999.0] * 60)          # 당일보다 훨씬 높은 전일 고가
+    day = _seq_bars([100.0, 110.0, 120.0], start_hhmm=1000)
+
+    cold = track_b_rules.build_context(day, track_b_rules.DEFAULT_PARAMS)
+    hot = track_b_rules.build_context(day, track_b_rules.DEFAULT_PARAMS, warmup=warm)
+
+    assert hot["vwap"] == cold["vwap"]
+    assert hot["run_high"] == cold["run_high"]
+    assert hot["gap_block"] == cold["gap_block"]
+
+
+def test_warmup_none_reproduces_the_old_context_exactly():
+    """--warmup-days 0 의 회귀선. 기존 문서의 숫자가 재현 가능해야 한다."""
+    day = _seq_bars([100 + i for i in range(40)])
+
+    assert (track_b_rules.build_context(day, track_b_rules.DEFAULT_PARAMS)
+            == track_b_rules.build_context(day, track_b_rules.DEFAULT_PARAMS,
+                                           warmup=[]))

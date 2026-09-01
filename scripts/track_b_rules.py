@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 
 from src import indicators
+from src import warmup as warmup_mod  # noqa: E402
 
 # 트랙 A와 같은 값. f4_tracking.STEP_SIZE / STEP_TRAIL / HARD_STOP_RATIO 와 일치한다.
 STEP_SIZE = 0.025
@@ -123,19 +124,29 @@ def _minutes(time_: str) -> int:
     return int(time_[:2]) * 60 + int(time_[2:4])
 
 
-def build_context(bars: list[dict], params: dict) -> dict:
+def build_context(
+    bars: list[dict], params: dict, warmup: list[dict] | None = None
+) -> dict:
     """하루치 파생 계열을 한 번만 계산한다.
 
     지표는 반드시 운영 코드(src.indicators)를 쓴다. 여기서 다시 구현하면
     백테스트와 실시간이 다른 값을 보게 된다.
+
+    ``warmup``은 전 거래일 봉이다. **SMA·MACD에만 먹인다** — VWAP은 정의상
+    세션 누적이고, ``run_high``는 "그날 직전까지의 고가"이며, ``gap_block``은
+    15:30→09:00 경계를 거대한 봉 간격으로 읽는다. 셋 중 하나라도 전일을
+    섞으면 R1·R2가 조용히 다른 규칙이 된다.
     """
     period = params.get("sma_period", DEFAULT_PARAMS["sma_period"])
+    warmed_bars, offset = warmup_mod.combine(warmup or [], bars)
+
     macd_rows = indicators.macd(
-        bars,
+        warmed_bars,
         params.get("macd_fast", DEFAULT_PARAMS["macd_fast"]),
         params.get("macd_slow", DEFAULT_PARAMS["macd_slow"]),
         params.get("macd_signal", DEFAULT_PARAMS["macd_signal"]),
-    )
+    )[offset:]
+    sma_rows = indicators.sma(warmed_bars, period)[offset:]
 
     run_high: list[float] = []
     vwap: list[float] = []
@@ -164,7 +175,7 @@ def build_context(bars: list[dict], params: dict) -> dict:
             remaining -= 1
 
     return {
-        "sma": indicators.sma(bars, period),
+        "sma": sma_rows,
         "macd": macd_rows,
         "vwap": vwap,
         "run_high": run_high,
