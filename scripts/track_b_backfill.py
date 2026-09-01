@@ -41,6 +41,7 @@ from scripts.strategy_backtest import (  # noqa: E402
     read_cached_bars,
     write_cached_bars,
 )
+from scripts.track_b_backtest import previous_trading_date  # noqa: E402
 from src.api import kis_rest  # noqa: E402
 from src.api.kis_minute_bars import parse_minute_bars  # noqa: E402
 from src.api.kis_rest import RequestBudgetExceeded  # noqa: E402
@@ -129,8 +130,15 @@ async def fetch_session_bars(
     return bars
 
 
-def needed_pairs(depth: int = 5, snapshot_dir: Path | None = None) -> dict[str, set[str]]:
-    """날짜별 F1 랭크 1~depth 종목. 운영 랭킹 함수를 그대로 쓴다."""
+def needed_pairs(
+    depth: int = 5, snapshot_dir: Path | None = None, warmup_days: int = 0
+) -> dict[str, set[str]]:
+    """날짜별 F1 랭크 1~depth 종목. 운영 랭킹 함수를 그대로 쓴다.
+
+    ``warmup_days``가 0보다 크면 각 종목의 전 거래일 쌍을 함께 대상에 넣는다.
+    지표 워밍업이 그 봉을 필요로 하는데, 그 종목이 그날 F1 상위에 없었으면
+    캐시에 없기 때문이다(스펙 §5.1).
+    """
     universes = (
         load_universes(snapshot_dir) if snapshot_dir is not None else load_universes()
     )
@@ -140,6 +148,16 @@ def needed_pairs(depth: int = 5, snapshot_dir: Path | None = None) -> dict[str, 
         tickers = {str(r["ticker"]) for r in ranked if r.get("ticker")}
         if tickers:
             needed[date] = tickers
+
+    if warmup_days > 0:
+        dates = sorted(universes)
+        for date in list(needed):
+            cursor = date
+            for _ in range(warmup_days):
+                cursor = previous_trading_date(dates, cursor)
+                if cursor is None:
+                    break
+                needed.setdefault(cursor, set()).update(needed[date])
     return needed
 
 
@@ -204,9 +222,13 @@ async def main_async(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-calls", type=int, default=1600)
     parser.add_argument("--interval", type=float, default=1.2)
     parser.add_argument("--dry-run", action="store_true", help="호출 없이 계획만 출력")
+    parser.add_argument(
+        "--warmup-days", type=int, default=1,
+        help="지표 워밍업에 필요한 전 거래일도 함께 채운다. 0이면 채우지 않는다",
+    )
     args = parser.parse_args(argv)
 
-    needed = needed_pairs(args.depth)
+    needed = needed_pairs(args.depth, warmup_days=args.warmup_days)
     pairs = sum(len(v) for v in needed.values())
     print(f"대상 {len(needed)}거래일 / {pairs}쌍 (랭크 1~{args.depth})")
     if args.dry_run:
