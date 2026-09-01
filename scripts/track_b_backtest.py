@@ -86,8 +86,14 @@ def simulate_day(
     slippage: float = 0.0,
     depth: int = DEPTH,
     warmup_by_ticker: dict[str, list[dict]] | None = None,
+    warmup_days: int = 1,
 ) -> dict | None:
-    """하루 한 건. 신호가 없거나 진입가가 없으면 None(미진입)이다."""
+    """하루 한 건. 신호가 없거나 진입가가 없으면 None(미진입)이다.
+
+    반환 행의 ``warmup_bars``·``warmed``는 실제로 진입한 종목의 워밍업 상태다
+    (``src.warmup.meta``) — 산출물만 보고도 어느 모드에서 나온 값인지 알 수
+    있어야 22거래일 기존 표본과 비교 가능하다(스펙 §8).
+    """
     ranked = f1_selector.rank_candidates(universe)[:depth]
     ranked_tickers = [str(r["ticker"]) for r in ranked if r.get("ticker")]
     signal = find_signal(
@@ -106,6 +112,8 @@ def simulate_day(
         return None
 
     exit_ = resolve_exit(bars, entry_idx, entry_price)
+    warm = (warmup_by_ticker or {}).get(signal["ticker"]) or []
+    warmup_state = warmup_mod.meta(warm, warmup_days)
     return {
         "date": date,
         "ticker": signal["ticker"],
@@ -117,6 +125,8 @@ def simulate_day(
         "reason": exit_["high_first"]["reason"],
         "exit_time": exit_["high_first"]["exit_time"],
         "pct": exit_["pct"],
+        "warmup_bars": warmup_state["warmup_bars"],
+        "warmed": warmup_state["warmed"],
     }
 
 
@@ -157,6 +167,7 @@ def run_axis(
     *,
     slippage: float = 0.0,
     warmup: dict[str, dict[str, list[dict]]] | None = None,
+    warmup_days: int = 1,
 ) -> list[dict]:
     rows = []
     warm = warmup or {}
@@ -164,6 +175,7 @@ def run_axis(
         result = simulate_day(
             date, universes[date], bars.get(date, {}), rule_key, params,
             slippage=slippage, warmup_by_ticker=warm.get(date),
+            warmup_days=warmup_days,
         )
         if result is not None:
             rows.append(result)
@@ -259,8 +271,12 @@ def load_warmup(
 ) -> list[dict]:
     """전 거래일 봉을 시간 순으로 이어 붙인다.
 
-    없으면 빈 리스트다 — 워밍업 실패를 조용히 채우지 않고 warmed=False로
-    드러낸다(스펙 §4.3).
+    요청한 ``days``일을 가장 가까운 전 거래일부터 거슬러 올라가며 채우다가
+    캐시에 없는 날을 만나면 그 자리에서 멈추고 그때까지 모은 봉만 돌려준다 —
+    ``days=3``인데 이틀 전 파일이 없으면 하루치만 돌아온다. 그러니 반환값은
+    "0봉 아니면 요청한 만큼"이 아니라 0봉부터 요청 일수 전체 분량까지 어디든
+    될 수 있다. 그 길이가 지표를 데우기에 충분한지는 여기서 판정하지 않는다
+    — 소비하는 쪽이 ``warmup.usable()``로 문턱(``WARMUP_MIN_BARS``)을 적용한다.
     """
     if days <= 0:
         return []
@@ -359,7 +375,10 @@ def main(argv: list[str] | None = None) -> int:
 
     axis_results = {}
     for key in sorted(RULES):
-        rows = run_axis(universes, bars, key, DEFAULT_PARAMS, warmup=warmup)
+        rows = run_axis(
+            universes, bars, key, DEFAULT_PARAMS,
+            warmup=warmup, warmup_days=args.warmup_days,
+        )
         axis_results[key] = {
             "rows": rows,
             "slippage_signs": sign_stability(
@@ -383,8 +402,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.out:
         Path(args.out).write_text(
-            json.dumps({"report": report, "axes": axis_results},
-                       ensure_ascii=False, indent=2),
+            json.dumps(
+                {
+                    "report": report,
+                    "axes": axis_results,
+                    "warmup_days": args.warmup_days,
+                },
+                ensure_ascii=False, indent=2,
+            ),
             encoding="utf-8",
         )
         print(f"\n결과: {args.out}")

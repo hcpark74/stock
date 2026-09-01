@@ -4,6 +4,8 @@
 종가면 봉이 닫히는 순간을 미리 안 것이 된다. 두 가지가 이 파일의 핵심이다.
 """
 
+import json
+
 import pytest
 
 from scripts import track_b_backtest
@@ -200,3 +202,61 @@ def test_load_warmup_zero_days_reads_nothing(tmp_path):
     assert track_b_backtest.load_warmup(
         "20260818", "005930", ["20260814", "20260818"], days=0, cache_dir=tmp_path
     ) == []
+
+
+def test_simulate_day_row_carries_warmup_state_for_the_entered_ticker():
+    """산출물만 보고 어느 모드로 나온 값인지 알 수 있어야 한다(스펙 §8)."""
+    bars = _bars([("093500", 100), ("093600", 130)])
+    bars.append({"date": "20260820", "time": "093700", "open": 125,
+                 "high": 125, "low": 125, "close": 125, "volume": 1000.0})
+    bars.append({"date": "20260820", "time": "151500", "open": 125,
+                 "high": 125, "low": 125, "close": 125, "volume": 1000.0})
+    universe = [{"ticker": "AAA", "gap_pct": 0.05, "prev_close": 95,
+                 "expected_amount": 5_000_000_000,
+                 "avg_amount_5d": 1_000_000_000}]
+    warm = [{"time": f"{9 + m // 60:02d}{m % 60:02d}00", "open": 1, "high": 1,
+             "low": 1, "close": 1, "volume": 1}
+            for m in range(track_b_backtest.warmup_mod.WARMUP_MIN_BARS)]
+
+    result = simulate_day(
+        "20260820", universe, {"AAA": bars}, "R1", DEFAULT_PARAMS,
+        warmup_by_ticker={"AAA": warm},
+    )
+
+    assert result["warmup_bars"] == track_b_backtest.warmup_mod.WARMUP_MIN_BARS
+    assert result["warmed"] is True
+
+
+def test_simulate_day_row_reports_unwarmed_when_no_warmup_was_supplied():
+    bars = _bars([("093500", 100), ("093600", 130)])
+    bars.append({"date": "20260820", "time": "093700", "open": 125,
+                 "high": 125, "low": 125, "close": 125, "volume": 1000.0})
+    bars.append({"date": "20260820", "time": "151500", "open": 125,
+                 "high": 125, "low": 125, "close": 125, "volume": 1000.0})
+    universe = [{"ticker": "AAA", "gap_pct": 0.05, "prev_close": 95,
+                 "expected_amount": 5_000_000_000,
+                 "avg_amount_5d": 1_000_000_000}]
+
+    result = simulate_day("20260820", universe, {"AAA": bars}, "R1", DEFAULT_PARAMS)
+
+    assert result["warmup_bars"] == 0
+    assert result["warmed"] is False
+
+
+def test_out_json_records_the_warmup_days_the_run_used(tmp_path, monkeypatch):
+    """22일 표본을 대체하는 산출물은 어떤 모드에서 나왔는지 스스로 말해야 한다(스펙 §8)."""
+    monkeypatch.setattr(track_b_backtest, "load_universes", lambda: {})
+    monkeypatch.setattr(
+        track_b_backtest, "load_bars_for",
+        lambda universes, depth=5, **kwargs: ({}, {"pairs": 0, "missing": 0, "partial": 0}),
+    )
+    monkeypatch.setattr(track_b_backtest, "a_daily_from_baseline", lambda: {})
+    out_path = tmp_path / "result.json"
+
+    rc = track_b_backtest.main(["--warmup-days", "2", "--out", str(out_path)])
+
+    assert rc == 0
+    payload = json.loads(out_path.read_text(encoding="utf-8"))
+    assert payload["warmup_days"] == 2
+    assert "report" in payload
+    assert "axes" in payload
