@@ -341,6 +341,21 @@ def a_daily_from_baseline() -> dict[str, float | None]:
     return daily
 
 
+def count_warmed(warmup_by_date: dict[str, dict[str, list[dict]]]) -> int:
+    """실제로 데워진 쌍의 수 — 봉 수가 아니라 실행 시점과 같은 판정을 쓴다.
+
+    한때 이 자리가 ``len(rows) >= WARMUP_MIN_BARS``였다. 개수 문턱이 하한보다 높던
+    동안에는 우연히 같은 값을 찍었지만, 하한이 수렴 요건으로 내려간 뒤로는 "봉이
+    그만큼 있다"는 뜻일 뿐이라 오전만 긴 파일을 데운 것으로 과다 보고한다.
+    """
+    return sum(
+        1
+        for day in warmup_by_date.values()
+        for rows in day.values()
+        if warmup_mod.covers_session(rows)
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="트랙 B 진입 규칙 비교")
     parser.add_argument("--depth", type=int, default=DEPTH)
@@ -361,10 +376,7 @@ def main(argv: list[str] | None = None) -> int:
         }
         for date, day in bars.items()
     }
-    warmed_pairs = sum(
-        1 for day in warmup.values() for rows in day.values()
-        if warmup_mod.covers_session(rows)
-    )
+    warmed_pairs = count_warmed(warmup)
     total_pairs = sum(len(day) for day in warmup.values())
     print(f"표본: {len(bars)}거래일 / 쌍 {stats['pairs']} "
           f"(없음 {stats['missing']}, 09:00~09:30만 {stats['partial']})")

@@ -28,9 +28,9 @@ def _spread(keep, first=None, last=None):
     if last is not None:
         full = [b for b in full if b["time"] <= last]
     step = (len(full) - 1) / (keep - 1)
-    picked = [full[round(i * step)] for i in range(keep)]
-    assert len(picked) == keep
-    return picked
+    idx = {round(i * step) for i in range(keep)}
+    assert len(idx) == keep, "인덱스가 겹치면 표본이 요청보다 적어진다"
+    return [full[i] for i in sorted(idx)]
 
 
 def _sparse_session(keep=265):
@@ -211,6 +211,34 @@ def test_the_closing_auction_gap_is_not_a_hole():
     assert session[-2]["time"] == "151900"
     assert session[-1]["time"] == "153000"
     assert warmup.usable(session) == session
+
+
+def test_a_morning_dense_record_with_a_lone_close_bar_is_not_warmed():
+    """단일가 구간을 공백 검사에서 빼기만 하면 꼬리가 뚫린다.
+
+    오전만 촘촘하고 종가 한 봉이 붙은 기록은 양 끝을 다 닿는다. 가운데가 두 시간 넘게
+    비어 있는데도 완결로 통과하면 안 된다 — 연속매매 끝(15:20)까지 이어졌는지도 본다.
+    """
+    morning = _bars(300)                              # 09:00~13:59
+    record = morning + [{"time": "153000", "close": 1.0}]
+
+    assert len(record) > warmup.WARMUP_MIN_BARS
+    assert record[0]["time"] == "090000"
+    assert record[-1]["time"] == "153000"
+    assert warmup.usable(record) == []
+
+
+def test_a_real_thirty_one_minute_gap_is_not_a_hole():
+    """실제 세션에서 관측된 최대 공백은 31분이다(20260728 005930 10:13→10:44).
+
+    공백 상한을 그 아래로 조이면 정상적인 날을 매번 다시 받는다 — 이 테스트가
+    상한을 아래에서 고정한다.
+    """
+    session = _session()
+    gapped = [b for b in session if not ("101400" <= b["time"] <= "104300")]
+
+    assert len(gapped) == len(session) - 30
+    assert warmup.usable(gapped) == gapped
 
 
 def test_unsorted_bars_are_judged_the_same():

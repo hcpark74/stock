@@ -261,3 +261,16 @@ def test_out_json_records_the_warmup_days_the_run_used(tmp_path, monkeypatch):
     assert payload["warmup_days"] == 2
     assert "report" in payload
     assert "axes" in payload
+
+
+def test_count_warmed_uses_the_session_predicate_not_a_bar_count():
+    """산출물의 "실제 데운 쌍"이 개수를 세면 오전만 긴 파일을 데운 것으로 과다 보고한다."""
+    def bars_from(n):
+        return [{"time": f"{9 + i // 60:02d}{i % 60:02d}00"} for i in range(n)]
+
+    whole = bars_from(380) + [{"time": "153000"}]
+    morning_only = bars_from(300)                     # 09:00~13:59, 하한은 넘는다
+
+    assert len(morning_only) > track_b_backtest.warmup_mod.WARMUP_MIN_BARS
+    assert track_b_backtest.count_warmed({"20260831": {"AAA": whole}}) == 1
+    assert track_b_backtest.count_warmed({"20260831": {"AAA": morning_only}}) == 0

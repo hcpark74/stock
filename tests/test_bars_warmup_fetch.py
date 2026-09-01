@@ -10,10 +10,11 @@ KST = ZoneInfo("Asia/Seoul")
 
 
 def _session(n=381, date=None):
-    """실제 세션 모양 — 09:00부터 1분 간격에 단일가 종가 15:30 한 봉.
+    """실제 세션 모양 — 09:00~15:19 연속매매에 단일가 종가 15:30 한 봉.
 
-    같은 시각 봉을 N개 복제하면 개수는 맞아도 세션이 아니다. 완결성 판정이
-    개장~마감을 덮었는지를 보므로 시각이 실제와 같아야 한다.
+    같은 시각 봉을 N개 복제하면 개수는 맞아도 세션이 아니다. ``n``이 381보다 작으면
+    **하루에 고르게 흩어야** 한다 — 앞에서부터 잘라 붙이면 오전만 촘촘하고 가운데가
+    비는 모양이 되고, 그건 거래가 뜸한 날이 아니라 잘린 기록이다.
     """
     def bar(time):
         row = {"time": time, "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1}
@@ -21,14 +22,22 @@ def _session(n=381, date=None):
             row["date"] = date
         return row
 
-    rows = [bar(f"{9 + i // 60:02d}{i % 60:02d}00") for i in range(n - 1)]
-    rows.append(bar("153000"))
-    return rows
+    full = [bar(f"{9 + i // 60:02d}{i % 60:02d}00") for i in range(380)]
+    if n <= 1:
+        return [bar("153000")][:n]
+    step = (len(full) - 1) / (n - 2)
+    picked = [full[round(i * step)] for i in range(n - 1)]
+    return picked + [bar("153000")]
 
 
 def _morning(n, date=None):
     """09:00부터 n분치 조각 — 마감에 닿지 않는다."""
-    return _session(n + 1, date=date)[:n]
+    return [
+        {"time": f"{9 + i // 60:02d}{i % 60:02d}00", "open": 1, "high": 1,
+         "low": 1, "close": 1, "volume": 1,
+         **({"date": date} if date is not None else {})}
+        for i in range(n)
+    ]
 
 
 @pytest.fixture(autouse=True)
