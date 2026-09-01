@@ -341,6 +341,41 @@ def should_correct(now: datetime, *, a_holding: bool, ws_stale: bool) -> bool:
     return not (a_holding and ws_stale)
 
 
+async def ensure_warmup(
+    date: str, ticker: str, prev_date: str, now: datetime | None = None
+) -> bool:
+    """전 거래일 봉을 디스크에 확보한다. 지표 워밍업이 이 파일을 읽는다.
+
+    금지창(09:00~09:11)에는 부르지 않는다 — A의 진입 창을 지키는 가드가
+    워밍업보다 우선한다. 트랙 B의 판정이 빨라도 09:35이라 지연 로드가 판정을
+    늦추지 않는다(스펙 §6.2).
+
+    ``date``는 로깅용이다. 읽고 쓰는 것은 ``prev_date``의 파일이다. 빈 응답은
+    파일로 남기지 않는다 — 남기면 다음 호출이 '이미 있다'고 보고 영영 다시
+    받지 않는다.
+    """
+    now = now or datetime.now(KST)
+    if bars_path(prev_date, ticker).exists():
+        return True
+    if kis_minute_bars.in_forbidden_window(now):
+        return False
+    try:
+        rows = await kis_minute_bars.fetch_session(prev_date, ticker)
+    except Exception as exc:  # noqa: BLE001 — 워밍업 실패는 판정을 막지 않는다
+        log("TRACK_B_WARMUP_FAILED", level="WARN",
+            ticker=ticker, date=prev_date, error=repr(exc))
+        return False
+    if not rows:
+        log("TRACK_B_WARMUP_EMPTY", level="INFO", ticker=ticker, date=prev_date)
+        return False
+    bars_path(prev_date, ticker).write_text(
+        json.dumps(rows, ensure_ascii=False), encoding="utf-8"
+    )
+    log("TRACK_B_WARMUP_READY", level="INFO",
+        ticker=ticker, date=prev_date, bars=len(rows))
+    return True
+
+
 def _merge_official(bar: dict | None, official: dict) -> dict:
     """공식 분봉으로 OHLCV를 대체한다. 틱 파생값과 카운터는 보존한다."""
     if bar is None:
