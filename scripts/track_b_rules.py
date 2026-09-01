@@ -138,7 +138,7 @@ def build_context(
     섞으면 R1·R2가 조용히 다른 규칙이 된다.
     """
     period = params.get("sma_period", DEFAULT_PARAMS["sma_period"])
-    warmed_bars, offset = warmup_mod.combine(warmup or [], bars)
+    warmed_bars, offset = warmup_mod.combine(warmup_mod.usable(warmup or []), bars)
 
     macd_rows = indicators.macd(
         warmed_bars,

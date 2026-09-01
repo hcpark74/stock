@@ -1111,7 +1111,7 @@ async def api_bars(
             )
         except (OSError, ValueError):
             warm = []
-    warmed_rows, offset = warmup_mod.combine(warm, rows)
+    warmed_rows, offset = warmup_mod.combine(warmup_mod.usable(warm), rows)
 
     def _sma(period: int, field: str = "close") -> list:
         if not rows:

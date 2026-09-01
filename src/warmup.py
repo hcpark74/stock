@@ -24,6 +24,16 @@ def combine(warm: list[dict], day: list[dict]) -> tuple[list[dict], int]:
     return merged, len(warm)
 
 
+def usable(warm: list[dict]) -> list[dict]:
+    """임계 미만이면 데우지 않는다.
+
+    부분 워밍업은 옛 모드도 새 모드도 아닌 제3의 값을 만든다 — 28봉으로 시드한
+    MACD는 증권사와도, 일 단위 초기화와도 다르다(스펙 §4.3). 발견된 봉 수는
+    ``meta``가 계속 보고하므로 진단은 가능하다.
+    """
+    return warm if len(warm) >= WARMUP_MIN_BARS else []
+
+
 def meta(warm: list[dict], days: int) -> dict:
     """워밍업 상태. 실제로 붙은 봉이 없으면 요청 일수와 무관하게 0일이다."""
     count = len(warm)

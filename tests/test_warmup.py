@@ -51,3 +51,17 @@ def test_meta_reports_zero_days_when_no_bars_were_prepended():
     assert warmup.meta([], days=1) == {
         "warmup_days": 0, "warmup_bars": 0, "warmed": False,
     }
+
+
+def test_usable_is_empty_just_below_the_threshold():
+    warm = _bars(warmup.WARMUP_MIN_BARS - 1)
+    assert warmup.usable(warm) == []
+
+
+def test_usable_passes_through_at_the_threshold():
+    warm = _bars(warmup.WARMUP_MIN_BARS)
+    assert warmup.usable(warm) == warm
+
+
+def test_usable_of_empty_is_empty():
+    assert warmup.usable([]) == []

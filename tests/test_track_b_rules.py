@@ -256,8 +256,11 @@ def _seq_bars(closes, start_hhmm=900, volume=100.0):
 
 
 def test_warmup_defines_macd_from_the_first_bar_of_the_day():
-    """워밍업이 없으면 당일 초반 MACD는 None이다. 붙이면 첫 봉부터 값이 선다."""
-    warm = _seq_bars([1000 + i for i in range(60)])
+    """워밍업이 없으면 당일 초반 MACD는 None이다. 임계(WARMUP_MIN_BARS) 이상 붙이면
+    첫 봉부터 값이 선다."""
+    from src import warmup as warmup_mod
+
+    warm = _seq_bars([1000 + i for i in range(warmup_mod.WARMUP_MIN_BARS)])
     day = _seq_bars([1060 + i for i in range(5)], start_hhmm=1000)
 
     cold = track_b_rules.build_context(day, track_b_rules.DEFAULT_PARAMS)
@@ -267,6 +270,21 @@ def test_warmup_defines_macd_from_the_first_bar_of_the_day():
     assert hot["macd"][0]["macd"] is not None
     assert len(hot["macd"]) == len(day)
     assert len(hot["sma"]) == len(day)
+
+
+def test_warmup_below_threshold_is_not_used_at_all():
+    """임계 미만 워밍업은 조용히 섞이지 않는다 — 옛 모드와 완전히 같아야 한다(스펙 §4.3 판정).
+
+    28봉 같은 부분 워밍업이 옛 모드도 새 모드도 아닌 제3의 값을 만드는 것이
+    이 항목이 막으려는 버그다.
+    """
+    warm = _seq_bars([1000 + i for i in range(60)])   # WARMUP_MIN_BARS(391) 미만
+    day = _seq_bars([1060 + i for i in range(5)], start_hhmm=1000)
+
+    cold = track_b_rules.build_context(day, track_b_rules.DEFAULT_PARAMS)
+    hot = track_b_rules.build_context(day, track_b_rules.DEFAULT_PARAMS, warmup=warm)
+
+    assert hot == cold
 
 
 def test_warmup_does_not_leak_into_session_accumulators():
