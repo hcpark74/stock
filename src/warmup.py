@@ -29,6 +29,26 @@ WARMUP_MIN_BARS = 228
 _OPEN_BY = "091000"
 _CLOSE_FROM = "150000"
 
+# 연속매매가 끝나는 시각. 이 뒤(15:20~15:30)는 단일가라 봉이 비어 있는 것이 정상이므로
+# 공백 검사에서 제외한다.
+_CONTINUOUS_END = "152000"
+
+# 연속매매 구간에 이만큼 이어서 봉이 없으면 세션의 한 덩어리가 통째로 빠진 것으로 본다.
+#
+# 이 검사가 없으면 개장·마감만 보는 판정이 뚫린다. 백필은 `merge_bars(기존, 받은 것)`을
+# 먼저 하고 완결성을 나중에 묻는다 — 그래서 레코더가 남긴 09:00~09:30 조각이 개장 근거를
+# 대주고 오후만 받은 잘린 조회가 마감 근거를 대주면, 한가운데가 빈 기록이 완결로 통과한다.
+# 캐시 227개 중 68개가 그 조각 모양이라 가상의 경우가 아니다.
+#
+# 60분인 이유: 실제 세션에서 관측된 최대 공백은 31분이고(20260728·29의 몇 종목, 정확히
+# 한 페이지 분량이라 조회 누락으로 의심된다 — 별도 확인 대상), 위 버그가 만드는 공백은
+# 90분 이상이다. 그 사이에서 양쪽에 여유를 둔다.
+_MAX_GAP_MINUTES = 60
+
+
+def _minutes(hhmmss: str) -> int:
+    return int(hhmmss[:2]) * 60 + int(hhmmss[2:4])
+
 
 def combine(warm: list[dict], day: list[dict]) -> tuple[list[dict], int]:
     """워밍업 봉을 앞에 붙이고 당일 첫 봉의 인덱스를 함께 돌려준다.
@@ -47,15 +67,25 @@ def covers_session(warm: list[dict]) -> bool:
     넉넉해도 앞쪽이 통째로 비어 있다. 개장 무렵부터 마감까지 걸쳐 있는지를 본다.
 
     수렴 요건(``WARMUP_MIN_BARS``)도 함께 건다 — 세션을 덮었더라도 봉이 극단적으로
-    적으면 시드가 남는다.
+    적으면 시드가 남는다. 양 끝만 보면 가운데가 빈 기록이 통과하므로 공백도 본다
+    (``_MAX_GAP_MINUTES`` 주석 참고).
     """
     if len(warm) < WARMUP_MIN_BARS:
         return False
-    times = [str(bar.get("time") or "") for bar in warm]
-    times = [t for t in times if t]
+    times = sorted(t for t in (str(bar.get("time") or "") for bar in warm) if t)
     if len(times) < WARMUP_MIN_BARS:
         return False
-    return min(times) <= _OPEN_BY and max(times) >= _CLOSE_FROM
+    if times[0] > _OPEN_BY or times[-1] < _CLOSE_FROM:
+        return False
+    return not _has_hole(times)
+
+
+def _has_hole(times: list[str]) -> bool:
+    """연속매매 구간에 한 덩어리가 통째로 빠졌는가 (``times``는 정렬돼 있어야 한다)."""
+    trading = [_minutes(t) for t in times if t <= _CONTINUOUS_END]
+    return any(
+        b - a > _MAX_GAP_MINUTES for a, b in zip(trading, trading[1:], strict=False)
+    )
 
 
 def usable(warm: list[dict]) -> list[dict]:

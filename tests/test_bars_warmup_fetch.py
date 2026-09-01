@@ -132,10 +132,14 @@ async def test_warmup_fetch_writes_the_previous_session_to_disk(
 
 
 async def test_warmup_fetch_does_not_write_a_truncated_session(monkeypatch, tmp_path):
-    """페이지 상한에 걸리거나 얇은 종목이라 세션이 짧게 끝나면 그 결과를 파일로
-    남기지 않는다 — 남기면 다음 호출이 그 스텁을 완결로 착각한다(§_is_complete_session)."""
+    """페이지 상한에 걸려 세션이 짧게 끝나면 그 결과를 파일로 남기지 않는다 —
+    남기면 다음 호출이 그 조각을 완결로 착각한다(§_is_complete_session).
+
+    조회는 마감 커서에서 역방향으로 밀므로 잘리면 **오후만** 남는다. 아침 조각은
+    이 경로가 만들 수 없는 모양이라 잘림을 시험하지 못한다.
+    """
     async def fake_session(trade_date, ticker, *, max_pages=20):
-        return _morning(50, date=trade_date)
+        return _session(date=trade_date)[200:]
 
     monkeypatch.setattr(bars.kis_minute_bars, "fetch_session", fake_session)
 
@@ -205,3 +209,33 @@ async def test_warmup_fetch_creates_the_bars_dir_when_missing(monkeypatch, tmp_p
         (missing_dir / "20260831_005930.json").read_text(encoding="utf-8")
     )
     assert len(written) == 381
+
+
+async def test_warmup_fetch_refetches_a_long_file_that_misses_the_close(
+    monkeypatch, tmp_path
+):
+    """봉이 300개여도 마감에 닿지 않으면 다시 받는다.
+
+    이 자리에는 한때 별도의 개수 문턱(300)이 있었다. 그 문턱으로 되돌리면 이
+    파일이 완결로 통과해 다시 받지 않는다 — 그것을 이 테스트가 막는다.
+    """
+    lunch = _morning(300)                       # 09:00~13:59
+    (tmp_path / "20260831_005930.json").write_text(
+        json.dumps(lunch), encoding="utf-8"
+    )
+    called = []
+
+    async def fake_session(trade_date, ticker, *, max_pages=20):
+        called.append((trade_date, ticker))
+        return _session(date=trade_date)
+
+    monkeypatch.setattr(bars.kis_minute_bars, "fetch_session", fake_session)
+
+    ok = await bars.ensure_warmup(
+        "20260901", "005930", "20260831",
+        now=datetime(2026, 9, 1, 9, 30, tzinfo=KST),
+    )
+
+    assert len(lunch) >= 300
+    assert ok is True
+    assert called == [("20260831", "005930")]

@@ -189,8 +189,17 @@ def test_session_complete_skips_full_days_only():
 
 
 def test_session_complete_accepts_a_thin_ticker_whole_day():
-    """거래가 뜸해 265봉뿐인 완전한 하루를 매번 다시 받으면 예산만 태운다."""
-    assert is_session_complete(_session(265)) is True
+    """거래가 뜸해 265봉뿐인 완전한 하루를 매번 다시 받으면 예산만 태운다.
+
+    아침에 몰린 265봉이 아니라 하루에 고르게 흩어진 265봉이어야 실제 모양이다.
+    """
+    full = _session()
+    step = (len(full) - 1) / 264
+    thin = [full[round(i * step)] for i in range(265)]
+
+    assert len(thin) == 265
+    assert thin[0]["time"] == "090000" and thin[-1]["time"] == "153000"
+    assert is_session_complete(thin) is True
 
 
 async def test_backfill_stops_on_budget_exhaustion(tmp_path):

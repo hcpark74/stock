@@ -363,7 +363,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     warmed_pairs = sum(
         1 for day in warmup.values() for rows in day.values()
-        if len(rows) >= warmup_mod.WARMUP_MIN_BARS
+        if warmup_mod.covers_session(rows)
     )
     total_pairs = sum(len(day) for day in warmup.values())
     print(f"표본: {len(bars)}거래일 / 쌍 {stats['pairs']} "

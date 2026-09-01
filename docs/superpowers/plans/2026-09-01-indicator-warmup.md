@@ -10,6 +10,13 @@
 
 **Spec:** [docs/superpowers/specs/2026-09-01-indicator-warmup-design.md](../specs/2026-09-01-indicator-warmup-design.md)
 
+> **정정 (2026-09-01, 실행 중 발견).** 이 계획서 곳곳의 `WARMUP_MIN_BARS = 391`과
+> "`warmed`는 `warmup_bars >= 391`일 때 참"은 틀렸다. 15:20~15:30은 단일가라 한 세션은
+> 381봉이고, 391은 어떤 날도 넘지 못해 워밍업이 아예 적용되지 않았다. 완결성은 개수가
+> 아니라 개장~마감 도달과 중간 공백으로 판정한다(`warmup.covers_session`), 수렴 하한은
+> 228봉이다. 계획서 본문은 그때의 지시로 남긴다 — 실제 코드는 `src/warmup.py`와
+> `docs/INDICATOR_WARMUP_VERIFY_20260901.md`를 본다.
+
 ## Global Constraints
 
 - **`src/indicators.py`는 수정 금지.** 이 계획의 어떤 태스크도 이 파일을 건드리지 않는다

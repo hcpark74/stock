@@ -256,8 +256,7 @@ def _seq_bars(closes, start_hhmm=900, volume=100.0):
 
 
 def test_warmup_defines_macd_from_the_first_bar_of_the_day():
-    """워밍업이 없으면 당일 초반 MACD는 None이다. 임계(WARMUP_MIN_BARS) 이상 붙이면
-    첫 봉부터 값이 선다."""
+    """워밍업이 없으면 당일 초반 MACD는 None이다. 한 세션치를 붙이면 첫 봉부터 값이 선다."""
     from src import warmup as warmup_mod
 
     # 한 세션치 — 09:00부터 이어 붙이면 15:20까지 닿아 개장~마감을 덮는다.

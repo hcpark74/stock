@@ -20,12 +20,22 @@ def _session(n=381):
     return out
 
 
+def _spread(keep, first=None, last=None):
+    """한 세션을 ``keep``개로 고르게 솎는다. 양 끝은 항상 남긴다."""
+    full = _session()
+    if first is not None:
+        full = [b for b in full if b["time"] >= first]
+    if last is not None:
+        full = [b for b in full if b["time"] <= last]
+    step = (len(full) - 1) / (keep - 1)
+    picked = [full[round(i * step)] for i in range(keep)]
+    assert len(picked) == keep
+    return picked
+
+
 def _sparse_session(keep=265):
     """거래가 뜸한 종목의 완전한 하루 — 봉은 265개뿐이어도 개장부터 마감까지다."""
-    full = _session()
-    step = len(full) / (keep - 2)
-    picked = [full[int(i * step)] for i in range(keep - 2)]
-    return [full[0]] + picked[1:] + [full[-1]]
+    return _spread(keep)
 
 
 def test_combine_prepends_and_reports_offset():
@@ -138,3 +148,74 @@ def test_a_day_without_a_closing_auction_bar_is_warmed():
 
     assert no_close[-1]["time"] == "151900"
     assert warmup.usable(no_close) == no_close
+
+
+def test_a_merged_record_with_a_hole_is_not_warmed():
+    """양 끝만 보면 뚫린다 — 백필은 기존 봉과 받은 봉을 먼저 합치고 완결성을 나중에 묻는다.
+
+    레코더가 남긴 09:00~09:30 조각이 개장 근거를, 오후만 받은 잘린 조회가 마감 근거를
+    대주면 한가운데가 빈 기록이 완결로 통과한다. 캐시 227개 중 68개가 그 조각 모양이다.
+    """
+    stub = _bars(31)                                  # 09:00~09:30
+    afternoon = [b for b in _session() if b["time"] >= "110000"]
+    merged = stub + afternoon
+
+    assert len(merged) > warmup.WARMUP_MIN_BARS
+    assert merged[0]["time"] == "090000"
+    assert merged[-1]["time"] == "153000"
+    assert warmup.usable(merged) == []
+    assert warmup.meta(merged, days=1)["warmed"] is False
+
+
+def test_a_recorder_file_that_stops_at_lunch_is_not_warmed():
+    """09:00~13:00 레코더 파일은 봉이 240개라 수렴 하한은 넘지만 마감에 닿지 않는다.
+
+    이 경우가 없으면 마감 검사를 지워도 테스트가 전부 통과한다 — 다른 조각 픽스처는
+    전부 봉 수가 적어 하한에서 먼저 걸리기 때문이다.
+    """
+    lunch = _spread(240, last="130000")
+
+    assert len(lunch) > warmup.WARMUP_MIN_BARS
+    assert lunch[0]["time"] == "090000"
+    assert lunch[-1]["time"] <= "130000"
+    assert warmup.usable(lunch) == []
+
+
+def test_a_whole_day_with_too_few_bars_is_not_warmed():
+    """개장~마감을 덮어도 봉이 수렴 하한에 못 미치면 시드가 남는다.
+
+    봉 수를 ``WARMUP_MIN_BARS``에서 끌어오면 안 된다 — 상수를 바꾸면 픽스처도 같이
+    움직여 아무것도 고정하지 못한다. 150은 스펙 §4.1 표의 228보다 확실히 아래다.
+    """
+    thin = _spread(150)
+
+    assert thin[0]["time"] == "090000"
+    assert thin[-1]["time"] == "153000"
+    assert warmup.usable(thin) == []
+
+
+def test_the_convergence_floor_is_the_spec_value():
+    """수렴 하한은 스펙 §4.1 표에서 온 값이다 — 바꾸려면 그 표를 다시 계산해야 한다.
+
+    EMA26 평활계수 2/27에서 228봉이면 시드 잔존이 2.4e-8이다. 이 단언이 없으면
+    하한을 임의로 낮춰도 아무 테스트도 울지 않는다.
+    """
+    assert warmup.WARMUP_MIN_BARS == 228
+    assert (1 - 2 / 27) ** warmup.WARMUP_MIN_BARS < 3e-8
+
+
+def test_the_closing_auction_gap_is_not_a_hole():
+    """15:20~15:30은 단일가라 비어 있는 것이 정상이다 — 공백으로 세면 안 된다."""
+    session = _session()
+
+    assert session[-2]["time"] == "151900"
+    assert session[-1]["time"] == "153000"
+    assert warmup.usable(session) == session
+
+
+def test_unsorted_bars_are_judged_the_same():
+    """입력 순서에 판정이 흔들리면 안 된다."""
+    session = _session()
+    shuffled = session[200:] + session[:200]
+
+    assert warmup.covers_session(shuffled) is True

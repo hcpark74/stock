@@ -977,8 +977,8 @@ async def api_f1() -> JSONResponse:
 
 _BARS_DATE_RE = re.compile(r"^\d{8}$")
 _BARS_TICKER_RE = re.compile(r"^[A-Za-z0-9]{1,12}$")
-# 정규장 1분 봉은 하루 391개다. 그 몇 배 위를 상한으로 둔다 — 이 위의 기간은
-# 오타이지 의도가 아니다.
+# 정규장 1분 봉은 하루 381개다(연속매매 380 + 단일가 종가 1). 그 몇 배 위를 상한으로
+# 둔다 — 이 위의 기간은 오타이지 의도가 아니다.
 _BARS_MAX_PERIOD = 2000
 
 
