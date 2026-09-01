@@ -350,12 +350,14 @@ async def ensure_warmup(
     워밍업보다 우선한다. 트랙 B의 판정이 빨라도 09:35이라 지연 로드가 판정을
     늦추지 않는다(스펙 §6.2).
 
-    ``date``는 로깅용이다. 읽고 쓰는 것은 ``prev_date``의 파일이다. 빈 응답은
+    ``date``는 워밍업을 요청한 당일 거래일(로깅용), ``prev_date``는 그 워밍업이
+    가져오는 전 거래일이다 — 읽고 쓰는 파일은 ``prev_date`` 것이다. 빈 응답은
     파일로 남기지 않는다 — 남기면 다음 호출이 '이미 있다'고 보고 영영 다시
     받지 않는다.
     """
     now = now or datetime.now(KST)
-    if bars_path(prev_date, ticker).exists():
+    path = bars_path(prev_date, ticker)
+    if path.exists():
         return True
     if kis_minute_bars.in_forbidden_window(now):
         return False
@@ -363,16 +365,21 @@ async def ensure_warmup(
         rows = await kis_minute_bars.fetch_session(prev_date, ticker)
     except Exception as exc:  # noqa: BLE001 — 워밍업 실패는 판정을 막지 않는다
         log("TRACK_B_WARMUP_FAILED", level="WARN",
-            ticker=ticker, date=prev_date, error=repr(exc))
+            date=date, ticker=ticker, prev_date=prev_date, error=repr(exc))
         return False
     if not rows:
-        log("TRACK_B_WARMUP_EMPTY", level="INFO", ticker=ticker, date=prev_date)
+        log("TRACK_B_WARMUP_EMPTY", level="INFO",
+            date=date, ticker=ticker, prev_date=prev_date)
         return False
-    bars_path(prev_date, ticker).write_text(
-        json.dumps(rows, ensure_ascii=False), encoding="utf-8"
-    )
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 — 쓰기 실패도 판정을 막지 않는다
+        log("TRACK_B_WARMUP_FAILED", level="WARN",
+            date=date, ticker=ticker, prev_date=prev_date, error=repr(exc))
+        return False
     log("TRACK_B_WARMUP_READY", level="INFO",
-        ticker=ticker, date=prev_date, bars=len(rows))
+        date=date, ticker=ticker, prev_date=prev_date, bars=len(rows))
     return True
 
 

@@ -109,3 +109,30 @@ async def test_warmup_fetch_leaves_no_file_when_the_session_is_empty(
 
     assert ok is False
     assert not (tmp_path / "20260831_005930.json").exists()
+
+
+async def test_warmup_fetch_creates_the_bars_dir_when_missing(monkeypatch, tmp_path):
+    """``_BARS_DIR``가 아직 없어도 쓰기가 raise 하면 안 된다.
+
+    ``isolated`` 픽스처의 ``tmp_path``는 pytest가 미리 만들어 두므로, 이 경우를
+    재현하려면 아직 존재하지 않는 하위 디렉터리를 가리키게 해야 한다.
+    """
+    missing_dir = tmp_path / "nested" / "bars"
+    monkeypatch.setattr(bars, "_BARS_DIR", missing_dir)
+
+    async def fake_session(trade_date, ticker, *, max_pages=20):
+        return [{"date": trade_date, "time": "090000", "open": 1, "high": 1,
+                 "low": 1, "close": 1, "volume": 1}]
+
+    monkeypatch.setattr(bars.kis_minute_bars, "fetch_session", fake_session)
+
+    ok = await bars.ensure_warmup(
+        "20260901", "005930", "20260831",
+        now=datetime(2026, 9, 1, 9, 30, tzinfo=KST),
+    )
+
+    assert ok is True
+    written = json.loads(
+        (missing_dir / "20260831_005930.json").read_text(encoding="utf-8")
+    )
+    assert [r["time"] for r in written] == ["090000"]
