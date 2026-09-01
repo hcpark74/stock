@@ -214,16 +214,17 @@ def test_simulate_day_row_carries_warmup_state_for_the_entered_ticker():
     universe = [{"ticker": "AAA", "gap_pct": 0.05, "prev_close": 95,
                  "expected_amount": 5_000_000_000,
                  "avg_amount_5d": 1_000_000_000}]
+    # 한 세션치(381봉) — 09:00부터 15:20까지라 개장~마감을 덮는다.
     warm = [{"time": f"{9 + m // 60:02d}{m % 60:02d}00", "open": 1, "high": 1,
              "low": 1, "close": 1, "volume": 1}
-            for m in range(track_b_backtest.warmup_mod.WARMUP_MIN_BARS)]
+            for m in range(381)]
 
     result = simulate_day(
         "20260820", universe, {"AAA": bars}, "R1", DEFAULT_PARAMS,
         warmup_by_ticker={"AAA": warm},
     )
 
-    assert result["warmup_bars"] == track_b_backtest.warmup_mod.WARMUP_MIN_BARS
+    assert result["warmup_bars"] == 381
     assert result["warmed"] is True
 
 

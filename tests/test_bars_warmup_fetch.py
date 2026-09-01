@@ -9,6 +9,28 @@ from src import bars
 KST = ZoneInfo("Asia/Seoul")
 
 
+def _session(n=381, date=None):
+    """실제 세션 모양 — 09:00부터 1분 간격에 단일가 종가 15:30 한 봉.
+
+    같은 시각 봉을 N개 복제하면 개수는 맞아도 세션이 아니다. 완결성 판정이
+    개장~마감을 덮었는지를 보므로 시각이 실제와 같아야 한다.
+    """
+    def bar(time):
+        row = {"time": time, "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1}
+        if date is not None:
+            row["date"] = date
+        return row
+
+    rows = [bar(f"{9 + i // 60:02d}{i % 60:02d}00") for i in range(n - 1)]
+    rows.append(bar("153000"))
+    return rows
+
+
+def _morning(n, date=None):
+    """09:00부터 n분치 조각 — 마감에 닿지 않는다."""
+    return _session(n + 1, date=date)[:n]
+
+
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(bars, "_BARS_DIR", tmp_path)
@@ -38,9 +60,7 @@ async def test_warmup_fetch_is_skipped_when_the_existing_file_is_a_complete_sess
     monkeypatch, tmp_path
 ):
     """완결된 세션 파일은 이미 확보된 것으로 치고 다시 받지 않는다."""
-    complete = [
-        {"time": "090000", "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1},
-    ] * 300
+    complete = _session(300)
     (tmp_path / "20260831_005930.json").write_text(
         json.dumps(complete), encoding="utf-8"
     )
@@ -66,14 +86,9 @@ async def test_warmup_fetch_refetches_when_the_existing_file_is_partial(
 ):
     """레코더가 09:01에 마감한 종목은 20봉짜리 스텁만 남긴다. 그 스텁을 확보로 치면
     그 (날짜, 종목) 쌍은 영영 데울 수 없다 — 존재만으로 True를 돌려주면 안 된다."""
-    stub = [
-        {"time": "090000", "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1},
-    ] * 20
+    stub = _morning(20)
     (tmp_path / "20260831_005930.json").write_text(json.dumps(stub), encoding="utf-8")
-    complete_session = [
-        {"date": "20260831", "time": "090000", "open": 1, "high": 1,
-         "low": 1, "close": 1, "volume": 1},
-    ] * 391
+    complete_session = _session(381, date="20260831")
     called = []
 
     async def fake_session(trade_date, ticker, *, max_pages=20):
@@ -92,17 +107,14 @@ async def test_warmup_fetch_refetches_when_the_existing_file_is_partial(
     written = json.loads(
         (tmp_path / "20260831_005930.json").read_text(encoding="utf-8")
     )
-    assert len(written) == 391
+    assert len(written) == 381
 
 
 async def test_warmup_fetch_writes_the_previous_session_to_disk(
     monkeypatch, tmp_path
 ):
     async def fake_session(trade_date, ticker, *, max_pages=20):
-        return [
-            {"date": trade_date, "time": "090000", "open": 1, "high": 1,
-             "low": 1, "close": 1, "volume": 1},
-        ] * 391
+        return _session(381, date=trade_date)
 
     monkeypatch.setattr(bars.kis_minute_bars, "fetch_session", fake_session)
 
@@ -115,7 +127,7 @@ async def test_warmup_fetch_writes_the_previous_session_to_disk(
     written = json.loads(
         (tmp_path / "20260831_005930.json").read_text(encoding="utf-8")
     )
-    assert len(written) == 391
+    assert len(written) == 381
     assert written[0]["time"] == "090000"
 
 
@@ -123,10 +135,7 @@ async def test_warmup_fetch_does_not_write_a_truncated_session(monkeypatch, tmp_
     """페이지 상한에 걸리거나 얇은 종목이라 세션이 짧게 끝나면 그 결과를 파일로
     남기지 않는다 — 남기면 다음 호출이 그 스텁을 완결로 착각한다(§_is_complete_session)."""
     async def fake_session(trade_date, ticker, *, max_pages=20):
-        return [
-            {"date": trade_date, "time": "090000", "open": 1, "high": 1,
-             "low": 1, "close": 1, "volume": 1},
-        ] * 50
+        return _morning(50, date=trade_date)
 
     monkeypatch.setattr(bars.kis_minute_bars, "fetch_session", fake_session)
 
@@ -182,10 +191,7 @@ async def test_warmup_fetch_creates_the_bars_dir_when_missing(monkeypatch, tmp_p
     monkeypatch.setattr(bars, "_BARS_DIR", missing_dir)
 
     async def fake_session(trade_date, ticker, *, max_pages=20):
-        return [
-            {"date": trade_date, "time": "090000", "open": 1, "high": 1,
-             "low": 1, "close": 1, "volume": 1},
-        ] * 391
+        return _session(381, date=trade_date)
 
     monkeypatch.setattr(bars.kis_minute_bars, "fetch_session", fake_session)
 
@@ -198,4 +204,4 @@ async def test_warmup_fetch_creates_the_bars_dir_when_missing(monkeypatch, tmp_p
     written = json.loads(
         (missing_dir / "20260831_005930.json").read_text(encoding="utf-8")
     )
-    assert len(written) == 391
+    assert len(written) == 381

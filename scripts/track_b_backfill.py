@@ -42,6 +42,7 @@ from scripts.strategy_backtest import (  # noqa: E402
     write_cached_bars,
 )
 from scripts.track_b_backtest import previous_trading_date  # noqa: E402
+from src import warmup  # noqa: E402
 from src.api import kis_rest  # noqa: E402
 from src.api.kis_minute_bars import parse_minute_bars  # noqa: E402
 from src.api.kis_rest import RequestBudgetExceeded  # noqa: E402
@@ -161,9 +162,13 @@ def needed_pairs(
     return needed
 
 
-def is_session_complete(bars: list[dict] | None, min_bars: int = 300) -> bool:
-    """이미 전 세션이 채워진 쌍은 건너뛴다. 31봉짜리는 채운다."""
-    return bool(bars) and len(bars) >= min_bars
+def is_session_complete(bars: list[dict] | None) -> bool:
+    """이미 전 세션이 채워진 쌍은 건너뛴다. 31봉짜리는 채운다.
+
+    봉 수가 아니라 개장~마감을 덮었는지로 본다 — 거래가 뜸한 종목은 완전한
+    하루도 265봉이라, 개수로 자르면 그런 쌍을 매번 다시 받는다.
+    """
+    return bool(bars) and warmup.covers_session(bars)
 
 
 async def backfill(

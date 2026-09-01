@@ -22,8 +22,8 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from src import live, state, warmup
 from src.api import kis_minute_bars
-from src import live, state
 from src.modules import tick_capture
 from src.utils.logger import log
 from src.utils.spike_filter import SpikeFilter
@@ -329,19 +329,15 @@ _CORRECT_INTERVAL_SEC = 60.0
 _IDLE_STOP_SEC = 600.0
 _workers: dict[tuple[str, str], asyncio.Task] = {}
 
-# 백필의 완결성 기준(scripts/track_b_backfill.py의 is_session_complete)과 같은 값이다.
-# 두 곳이 묻는 질문이 다르다는 점에 주의한다. WARMUP_MIN_BARS(391)는 "이 봉으로
-# 지표를 데운 셈 칠 것인가"를 묻고(스펙 §4.1, warmup.usable()이 적용), 여기서는
-# "이 세션을 다시 받을 가치가 있는가"를 묻는다. 391을 그대로 쓰면 무거래 분이
-# 섞여 388봉으로 끝나는 정상적인 세션이 영원히 재요청된다 — 그 세션은 usable()의
-# 문턱을 어차피 못 넘으므로 재요청은 예산만 태운다. 300이면 그런 세션도 "이미
-# 받았다"로 인정해 재요청을 멈춘다.
-_WARMUP_SESSION_MIN_BARS = 300
-
-
 def _is_complete_session(rows: list[dict]) -> bool:
-    """전 거래일 세션으로 봐도 되는가 — 봉 수만 본다(문턱은 위 주석 참고)."""
-    return len(rows) >= _WARMUP_SESSION_MIN_BARS
+    """전 거래일 세션으로 봐도 되는가 — 워밍업과 같은 판정을 쓴다.
+
+    한때 이 자리에 별도의 봉 수 문턱이 있었다. "다시 받을 가치가 있는가"와
+    "데운 셈 칠 것인가"가 다른 질문이라고 봤기 때문인데, 두 답이 갈리면
+    재요청해도 끝내 못 쓰는 세션이 생긴다. ``covers_session``은 개장~마감을
+    덮었는지로 판정하므로 무거래 분이 섞인 정상 세션도 한 번만 받는다.
+    """
+    return warmup.covers_session(rows)
 
 
 def should_correct(now: datetime, *, a_holding: bool, ws_stale: bool) -> bool:

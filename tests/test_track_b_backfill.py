@@ -175,10 +175,22 @@ def test_needed_pairs_uses_operational_ranking(tmp_path):
     assert len(needed["20260820"]) <= 5
 
 
+def _session(n=381):
+    """실제 세션 모양 — 09:00부터 1분 간격에 단일가 종가 15:30 한 봉."""
+    rows = [{"time": f"{9 + i // 60:02d}{i % 60:02d}00"} for i in range(n - 1)]
+    rows.append({"time": "153000"})
+    return rows
+
+
 def test_session_complete_skips_full_days_only():
-    assert is_session_complete([{"time": "090000"}] * 380) is True
-    assert is_session_complete([{"time": "090000"}] * 31) is False
+    assert is_session_complete(_session()) is True
+    assert is_session_complete(_session()[:31]) is False
     assert is_session_complete(None) is False
+
+
+def test_session_complete_accepts_a_thin_ticker_whole_day():
+    """거래가 뜸해 265봉뿐인 완전한 하루를 매번 다시 받으면 예산만 태운다."""
+    assert is_session_complete(_session(265)) is True
 
 
 async def test_backfill_stops_on_budget_exhaustion(tmp_path):
