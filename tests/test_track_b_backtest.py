@@ -6,6 +6,7 @@
 
 import pytest
 
+from scripts import track_b_backtest
 from scripts.track_b_backtest import (
     bootstrap_ci,
     correlation,
@@ -156,3 +157,46 @@ def test_ambiguous_days_are_excluded_but_counted():
     assert report["R1"]["ambiguous_days"] == 1
     assert report["R1"]["judged_days"] == 3
     assert report["R1"]["total_pct"] == pytest.approx(6.0)
+
+
+def test_previous_trading_date_uses_the_universe_not_the_calendar():
+    """08-17은 대체공휴일이라 유니버스에 없다. 달력을 쓰면 안 된다."""
+    dates = ["20260814", "20260818", "20260819"]
+
+    assert track_b_backtest.previous_trading_date(dates, "20260818") == "20260814"
+    assert track_b_backtest.previous_trading_date(dates, "20260814") is None
+    assert track_b_backtest.previous_trading_date(dates, "20260901") is None
+
+
+def test_load_warmup_returns_empty_when_the_previous_day_is_missing(tmp_path):
+    dates = ["20260814", "20260818"]
+
+    assert track_b_backtest.load_warmup(
+        "20260818", "005930", dates, days=1, cache_dir=tmp_path
+    ) == []
+
+
+def test_load_warmup_reads_the_previous_day_in_time_order(tmp_path):
+    import json
+    (tmp_path / "20260814_005930.json").write_text(json.dumps([
+        {"time": "091000", "open": 2, "high": 2, "low": 2, "close": 2, "volume": 1},
+        {"time": "090000", "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1},
+    ]), encoding="utf-8")
+    dates = ["20260814", "20260818"]
+
+    rows = track_b_backtest.load_warmup(
+        "20260818", "005930", dates, days=1, cache_dir=tmp_path
+    )
+
+    assert [r["time"] for r in rows] == ["090000", "091000"]
+
+
+def test_load_warmup_zero_days_reads_nothing(tmp_path):
+    import json
+    (tmp_path / "20260814_005930.json").write_text(json.dumps([
+        {"time": "090000", "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1},
+    ]), encoding="utf-8")
+
+    assert track_b_backtest.load_warmup(
+        "20260818", "005930", ["20260814", "20260818"], days=0, cache_dir=tmp_path
+    ) == []
