@@ -306,5 +306,28 @@ def test_api_bars_indicator_arrays_stay_aligned_with_the_day(tmp_path):
     assert body["warmup"]["warmup_bars"] == 60
     assert body["warmup"]["warmed"] is False      # 60 < WARMUP_MIN_BARS
     assert len(body["bars"]) == 3
+    assert len(body["indicators"]["sma"]) == 3
     assert len(body["indicators"]["macd"]) == 3
     assert len(body["indicators"]["ma"]["5"]) == 3
+    assert len(body["indicators"]["vol_ma"]["5"]) == 3
+
+
+def test_api_bars_degrades_to_unwarmed_when_prev_file_is_missing_or_malformed(tmp_path):
+    """prev가 가리키는 파일이 없거나 깨져 있어도 에러 없이 미워밍업으로 남는다."""
+    today = [{"time": "090000", "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1}]
+    (tmp_path / "20260901_005930.json").write_text(json.dumps(today), encoding="utf-8")
+    (tmp_path / "20260830_005930.json").write_text("{not valid json", encoding="utf-8")
+
+    missing = client.get(
+        "/api/bars?date=20260901&ticker=005930&prev=20260828"
+    )
+    malformed = client.get(
+        "/api/bars?date=20260901&ticker=005930&prev=20260830"
+    )
+
+    for res in (missing, malformed):
+        assert res.status_code == 200
+        body = res.json()
+        assert body["warmup"] == {"warmup_days": 0, "warmup_bars": 0, "warmed": False}
+        assert len(body["bars"]) == 1
+        assert len(body["indicators"]["sma"]) == 1
