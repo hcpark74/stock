@@ -329,6 +329,20 @@ _CORRECT_INTERVAL_SEC = 60.0
 _IDLE_STOP_SEC = 600.0
 _workers: dict[tuple[str, str], asyncio.Task] = {}
 
+# 백필의 완결성 기준(scripts/track_b_backfill.py의 is_session_complete)과 같은 값이다.
+# 두 곳이 묻는 질문이 다르다는 점에 주의한다. WARMUP_MIN_BARS(391)는 "이 봉으로
+# 지표를 데운 셈 칠 것인가"를 묻고(스펙 §4.1, warmup.usable()이 적용), 여기서는
+# "이 세션을 다시 받을 가치가 있는가"를 묻는다. 391을 그대로 쓰면 무거래 분이
+# 섞여 388봉으로 끝나는 정상적인 세션이 영원히 재요청된다 — 그 세션은 usable()의
+# 문턱을 어차피 못 넘으므로 재요청은 예산만 태운다. 300이면 그런 세션도 "이미
+# 받았다"로 인정해 재요청을 멈춘다.
+_WARMUP_SESSION_MIN_BARS = 300
+
+
+def _is_complete_session(rows: list[dict]) -> bool:
+    """전 거래일 세션으로 봐도 되는가 — 봉 수만 본다(문턱은 위 주석 참고)."""
+    return len(rows) >= _WARMUP_SESSION_MIN_BARS
+
 
 def should_correct(now: datetime, *, a_holding: bool, ws_stale: bool) -> bool:
     """분봉 API를 지금 호출해도 되는가.
@@ -354,11 +368,25 @@ async def ensure_warmup(
     가져오는 전 거래일이다 — 읽고 쓰는 파일은 ``prev_date`` 것이다. 빈 응답은
     파일로 남기지 않는다 — 남기면 다음 호출이 '이미 있다'고 보고 영영 다시
     받지 않는다.
+
+    파일이 있다는 사실만으로 확보로 치지 않는다. ``data/bars/``는 실시간
+    레코더도 같이 쓰는 저장소라, 트랙 B가 09:01에 마감한 종목의 20봉짜리
+    스텁을 여기 남겨 두는 일이 흔하다(``_close_previous``). 그 쌍은 하필
+    어제 추적했던, 오늘 다시 나올 가능성이 가장 높은 종목이다 — 존재만 보면
+    바로 그 쌍이 영영 데워지지 않는다. 완결성은 ``_is_complete_session``
+    하나가 판정한다.
     """
     now = now or datetime.now(KST)
     path = bars_path(prev_date, ticker)
     if path.exists():
-        return True
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            existing = []
+        if _is_complete_session(existing):
+            return True
+        log("TRACK_B_WARMUP_PARTIAL_REFETCH", level="INFO",
+            date=date, ticker=ticker, prev_date=prev_date, bars=len(existing))
     if kis_minute_bars.in_forbidden_window(now):
         return False
     try:
@@ -370,6 +398,10 @@ async def ensure_warmup(
     if not rows:
         log("TRACK_B_WARMUP_EMPTY", level="INFO",
             date=date, ticker=ticker, prev_date=prev_date)
+        return False
+    if not _is_complete_session(rows):
+        log("TRACK_B_WARMUP_TRUNCATED", level="WARN",
+            date=date, ticker=ticker, prev_date=prev_date, bars=len(rows))
         return False
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
