@@ -99,3 +99,64 @@ async def test_fetch_day_bars_stops_when_cursor_makes_no_progress(monkeypatch):
 
     assert len(bars) == 1          # 중복 제거
     assert calls["n"] == 2         # 두 번째 페이지에서 새 봉 0 → 중단
+
+
+async def test_fetch_session_drops_bars_from_another_date(monkeypatch):
+    """KIS는 휴장일 요청을 가장 가까운 거래일로 조용히 대체한다.
+
+    커서가 09:00을 넘어가도 전일 봉이 섞인다. 요청 날짜가 아닌 봉을 버리지 않으면
+    워밍업이 엉뚱한 날 봉을 먹는다.
+    """
+    pages = [
+        {"rt_cd": "0", "output2": [
+            {"stck_bsop_date": "20260828", "stck_cntg_hour": "150000",
+             "stck_oprc": "10", "stck_hgpr": "11", "stck_lwpr": "9",
+             "stck_prpr": "10", "cntg_vol": "5"},
+            {"stck_bsop_date": "20260827", "stck_cntg_hour": "145900",
+             "stck_oprc": "20", "stck_hgpr": "21", "stck_lwpr": "19",
+             "stck_prpr": "20", "cntg_vol": "5"},
+        ]},
+        {"rt_cd": "0", "output2": []},
+    ]
+    calls = []
+
+    async def fake_daily(ticker, trade_date, *, budget, hour_cursor="153000"):
+        calls.append((ticker, trade_date, hour_cursor))
+        return pages[min(len(calls) - 1, len(pages) - 1)]
+
+    monkeypatch.setattr(mb, "fetch_daily_minute_bars", fake_daily)
+
+    bars = await mb.fetch_session("20260828", "006340")
+
+    assert [b["date"] for b in bars] == ["20260828"]
+    assert [b["time"] for b in bars] == ["150000"]
+
+
+async def test_fetch_session_stops_once_it_reaches_the_open(monkeypatch):
+    """09:00에 닿으면 더 밀지 않는다 — 페이지를 낭비하지 않는다."""
+    calls = []
+
+    async def fake_daily(ticker, trade_date, *, budget, hour_cursor="153000"):
+        calls.append(hour_cursor)
+        return {"rt_cd": "0", "output2": [
+            {"stck_bsop_date": "20260828", "stck_cntg_hour": "090000",
+             "stck_oprc": "10", "stck_hgpr": "11", "stck_lwpr": "9",
+             "stck_prpr": "10", "cntg_vol": "5"},
+        ]}
+
+    monkeypatch.setattr(mb, "fetch_daily_minute_bars", fake_daily)
+
+    bars = await mb.fetch_session("20260828", "006340")
+
+    assert len(calls) == 1
+    assert [b["time"] for b in bars] == ["090000"]
+
+
+async def test_fetch_session_raises_on_a_failed_response(monkeypatch):
+    async def fake_daily(ticker, trade_date, *, budget, hour_cursor="153000"):
+        return {"rt_cd": "1", "msg_cd": "EGW00123"}
+
+    monkeypatch.setattr(mb, "fetch_daily_minute_bars", fake_daily)
+
+    with pytest.raises(mb.MinuteBarError):
+        await mb.fetch_session("20260828", "006340")

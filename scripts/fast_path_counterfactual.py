@@ -46,13 +46,9 @@ from scripts.kis_minute_bar_poc import (  # noqa: E402
     parse_minute_bars,
 )
 from src.api import auth, kis_rest  # noqa: E402
+from src.api.kis_minute_bars import fetch_daily_minute_bars  # noqa: E402
 
 KST = ZoneInfo("Asia/Seoul")
-
-# 일별 분봉. FID_INPUT_HOUR_1 기준 이전 30봉을 주므로 09:30 기준이면 개장 30분을 덮는다.
-# 당일TR(FHKST03010200)은 빈 커서에서 장 마감 직전 봉을 주므로 쓰지 않는다.
-DAILY_MINUTE_PATH = "/uapi/domestic-stock/v1/quotations/inquire-time-dailychartprice"
-DAILY_MINUTE_TR = "FHKST03010230"
 
 RATE_LIMIT_CODES = {"EGW00201", "HTTP_429"}
 MAX_KIS_CALLS = 60
@@ -315,30 +311,8 @@ def _assert_success(response: dict) -> None:
 
 
 # ── 분봉 조회 (읽기 전용 GET) ────────────────────────────────────────────
-
-async def fetch_daily_minute_bars(
-    ticker: str,
-    trade_date: str,
-    *,
-    budget: kis_rest.CallBudget,
-    hour_cursor: str = "093000",
-) -> dict:
-    """일별 분봉 한 페이지. 과거 관측일 소급용이며 가용성은 미검증이다."""
-    return await kis_rest.get(
-        DAILY_MINUTE_PATH,
-        tr_id=DAILY_MINUTE_TR,
-        params={
-            "FID_COND_MRKT_DIV_CODE": "J",
-            "FID_INPUT_ISCD": ticker,
-            "FID_INPUT_DATE_1": trade_date,
-            "FID_INPUT_HOUR_1": hour_cursor,
-            "FID_PW_DATA_INCU_YN": "N",
-            "FID_FAKE_TICK_INCU_YN": "N",
-        },
-        stop_on_rate_limit=True,
-        request_priority=kis_rest.REQUEST_PRIORITY_BACKGROUND,
-        budget=budget,
-    )
+# fetch_daily_minute_bars / DAILY_MINUTE_PATH / DAILY_MINUTE_TR은
+# src/api/kis_minute_bars.py로 승격되었다. 위에서 import한다.
 
 
 
