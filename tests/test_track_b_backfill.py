@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from scripts import track_b_backfill
 from scripts.fast_path_counterfactual import PocStop, Throttle
 from scripts.track_b_backfill import (
     assert_backfill_window,
@@ -174,10 +175,31 @@ def test_needed_pairs_uses_operational_ranking(tmp_path):
     assert len(needed["20260820"]) <= 5
 
 
+def _session(n=381):
+    """실제 세션 모양 — 09:00부터 1분 간격에 단일가 종가 15:30 한 봉."""
+    rows = [{"time": f"{9 + i // 60:02d}{i % 60:02d}00"} for i in range(n - 1)]
+    rows.append({"time": "153000"})
+    return rows
+
+
 def test_session_complete_skips_full_days_only():
-    assert is_session_complete([{"time": "090000"}] * 380) is True
-    assert is_session_complete([{"time": "090000"}] * 31) is False
+    assert is_session_complete(_session()) is True
+    assert is_session_complete(_session()[:31]) is False
     assert is_session_complete(None) is False
+
+
+def test_session_complete_accepts_a_thin_ticker_whole_day():
+    """거래가 뜸해 265봉뿐인 완전한 하루를 매번 다시 받으면 예산만 태운다.
+
+    아침에 몰린 265봉이 아니라 하루에 고르게 흩어진 265봉이어야 실제 모양이다.
+    """
+    full = _session()
+    step = (len(full) - 1) / 264
+    thin = [full[round(i * step)] for i in range(265)]
+
+    assert len(thin) == 265
+    assert thin[0]["time"] == "090000" and thin[-1]["time"] == "153000"
+    assert is_session_complete(thin) is True
 
 
 async def test_backfill_stops_on_budget_exhaustion(tmp_path):
@@ -208,3 +230,54 @@ async def test_backfill_stops_on_budget_exhaustion(tmp_path):
     assert stats["failed"] == 0
     # 예산이 1콜뿐이라 첫 쌍만 시도하고 멈춘다.
     assert len(calls) == 1
+
+
+def _snapshot(tmp_path, date, tickers):
+    """스냅샷 한 장을 만든다.
+
+    load_universes 는 MIN_UNIVERSE_ROWS(30) 미만인 스냅샷을 통째로 버린다
+    (scripts/strategy_backtest.py:70). 기존 테스트가 쓰는 패딩 방식을 그대로
+    따라 30행을 채운다.
+    """
+    rows = [{
+        "ticker": t, "gap_pct": 0.05, "prev_close": 1000,
+        "expected_amount": 5_000_000_000, "avg_amount_5d": 1_000_000_000,
+    } for t in tickers]
+    while len(rows) < 30:
+        filler = dict(rows[0])
+        filler["ticker"] = f"9{len(rows):05d}"
+        rows.append(filler)
+    (tmp_path / f"{date}_090100.jsonl").write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in rows),
+        encoding="utf-8",
+    )
+
+
+def test_needed_pairs_adds_the_previous_session_for_warmup(tmp_path):
+    """워밍업 1일이면 각 날짜의 종목이 전 거래일 쌍에도 들어간다.
+
+    두 날의 스냅샷을 같게 만들어, 랭킹 내부 구현에 기대지 않고 집합 관계만
+    본다 — 어느 종목이 랭크 1인지는 이 테스트의 관심사가 아니다.
+    """
+    for date in ("20260814", "20260818"):
+        _snapshot(tmp_path, date, ["005930", "000660"])
+
+    cold = track_b_backfill.needed_pairs(depth=5, snapshot_dir=tmp_path,
+                                         warmup_days=0)
+    hot = track_b_backfill.needed_pairs(depth=5, snapshot_dir=tmp_path,
+                                        warmup_days=1)
+
+    assert set(cold) == {"20260814", "20260818"}
+    # 20260818의 워밍업은 20260814다. 그날 쌍이 08-18의 종목을 흡수한다.
+    assert hot["20260814"] >= cold["20260818"]
+    assert hot["20260818"] == cold["20260818"]
+
+
+def test_needed_pairs_warmup_does_not_invent_days_outside_the_universe(tmp_path):
+    """유니버스의 첫 날은 그 앞이 없다 — 없는 날짜를 만들어내면 안 된다."""
+    _snapshot(tmp_path, "20260814", ["005930"])
+
+    pairs = track_b_backfill.needed_pairs(depth=5, snapshot_dir=tmp_path,
+                                          warmup_days=1)
+
+    assert set(pairs) == {"20260814"}

@@ -115,3 +115,76 @@ async def fetch_day_bars(
 
     bars.sort(key=lambda b: (b["date"], b["time"]))
     return bars, issues
+
+
+# 일별분봉 — 날짜를 받는다. 당일분봉(FHKST03010200)에는 날짜 인자가 없어
+# 과거 세션을 받을 수 없다. 지표 워밍업이 전 거래일을 필요로 한다.
+DAILY_MINUTE_PATH = "/uapi/domestic-stock/v1/quotations/inquire-time-dailychartprice"
+DAILY_MINUTE_TR = "FHKST03010230"
+
+
+async def fetch_daily_minute_bars(
+    ticker: str,
+    trade_date: str,
+    *,
+    budget: kis_rest.CallBudget,
+    hour_cursor: str = "093000",
+) -> dict:
+    """일별 분봉 한 페이지. 과거 관측일 소급용이며 가용성은 미검증이다."""
+    return await kis_rest.get(
+        DAILY_MINUTE_PATH,
+        tr_id=DAILY_MINUTE_TR,
+        params={
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": ticker,
+            "FID_INPUT_DATE_1": trade_date,
+            "FID_INPUT_HOUR_1": hour_cursor,
+            "FID_PW_DATA_INCU_YN": "N",
+            "FID_FAKE_TICK_INCU_YN": "N",
+        },
+        stop_on_rate_limit=True,
+        request_priority=kis_rest.REQUEST_PRIORITY_BACKGROUND,
+        budget=budget,
+    )
+
+
+_SESSION_START = "090000"
+_SESSION_CLOSE = "153000"
+
+
+async def fetch_session(
+    trade_date: str, ticker: str, *, max_pages: int = _MAX_PAGES
+) -> list[dict]:
+    """지정 날짜의 09:00~15:30 분봉. 마감 커서에서 09:00까지 역방향으로 민다.
+
+    **요청 날짜와 다른 봉은 버린다.** KIS가 휴장일 요청을 가장 가까운 거래일로
+    조용히 대체하고, 커서가 09:00을 넘어가면 전일 봉이 섞인다. 이 필터가 없으면
+    워밍업이 엉뚱한 날 봉을 먹고, 틀렸다는 신호도 남지 않는다.
+
+    한 페이지가 약 30봉이라 전 세션은 14페이지 안팎이다.
+    """
+    budget = kis_rest.CallBudget(max_pages)
+    seen: dict[str, dict] = {}
+    cursor = _SESSION_CLOSE
+
+    for _ in range(max_pages):
+        response = await fetch_daily_minute_bars(
+            ticker, trade_date, budget=budget, hour_cursor=cursor
+        )
+        if str(response.get("rt_cd") or "") != "0":
+            raise MinuteBarError(
+                f"DAILY_MINUTE_FAILED msg_cd={response.get('msg_cd')!r}"
+            )
+        page, _issues = parse_minute_bars(response)
+        page = [b for b in page if b["date"] == trade_date]
+        fresh = [b for b in page if b["time"] not in seen]
+        if not fresh:
+            break
+        for bar in fresh:
+            seen[bar["time"]] = bar
+        earliest = min(b["time"] for b in fresh)
+        if earliest <= _SESSION_START:
+            break
+        cursor = earliest
+
+    return [seen[t] for t in sorted(seen)]

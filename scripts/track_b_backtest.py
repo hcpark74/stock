@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.strategy_backtest import BAR_CACHE_DIR, load_universes, read_cached_bars  # noqa: E402
 from scripts.track_b_rules import DEFAULT_PARAMS, RULES, build_context, resolve_exit  # noqa: E402
+from src import warmup as warmup_mod  # noqa: E402
 from src.modules import f1_selector  # noqa: E402
 
 SIGNAL_START = "093500"
@@ -38,6 +39,7 @@ def find_signal(
     ranked_tickers: list[str],
     rule_key: str,
     params: dict,
+    warmup_by_ticker: dict[str, list[dict]] | None = None,
 ) -> dict | None:
     """봉을 시간 순으로 훑어 첫 신호에서 멈춘다.
 
@@ -45,8 +47,9 @@ def find_signal(
     신호를 낼지 기다리는 해석은 실시간에 구현 불가라 쓰지 않는다.
     """
     rule = RULES[rule_key]
+    warm = warmup_by_ticker or {}
     contexts = {
-        t: build_context(bars, params)
+        t: build_context(bars, params, warmup=warm.get(t))
         for t, bars in bars_by_ticker.items()
         if bars
     }
@@ -82,11 +85,21 @@ def simulate_day(
     *,
     slippage: float = 0.0,
     depth: int = DEPTH,
+    warmup_by_ticker: dict[str, list[dict]] | None = None,
+    warmup_days: int = 1,
 ) -> dict | None:
-    """하루 한 건. 신호가 없거나 진입가가 없으면 None(미진입)이다."""
+    """하루 한 건. 신호가 없거나 진입가가 없으면 None(미진입)이다.
+
+    반환 행의 ``warmup_bars``·``warmed``는 실제로 진입한 종목의 워밍업 상태다
+    (``src.warmup.meta``) — 산출물만 보고도 어느 모드에서 나온 값인지 알 수
+    있어야 22거래일 기존 표본과 비교 가능하다(스펙 §8).
+    """
     ranked = f1_selector.rank_candidates(universe)[:depth]
     ranked_tickers = [str(r["ticker"]) for r in ranked if r.get("ticker")]
-    signal = find_signal(bars_by_ticker, ranked_tickers, rule_key, params)
+    signal = find_signal(
+        bars_by_ticker, ranked_tickers, rule_key, params,
+        warmup_by_ticker=warmup_by_ticker,
+    )
     if signal is None:
         return None
 
@@ -99,6 +112,8 @@ def simulate_day(
         return None
 
     exit_ = resolve_exit(bars, entry_idx, entry_price)
+    warm = (warmup_by_ticker or {}).get(signal["ticker"]) or []
+    warmup_state = warmup_mod.meta(warm, warmup_days)
     return {
         "date": date,
         "ticker": signal["ticker"],
@@ -110,6 +125,8 @@ def simulate_day(
         "reason": exit_["high_first"]["reason"],
         "exit_time": exit_["high_first"]["exit_time"],
         "pct": exit_["pct"],
+        "warmup_bars": warmup_state["warmup_bars"],
+        "warmed": warmup_state["warmed"],
     }
 
 
@@ -149,12 +166,16 @@ def run_axis(
     params: dict,
     *,
     slippage: float = 0.0,
+    warmup: dict[str, dict[str, list[dict]]] | None = None,
+    warmup_days: int = 1,
 ) -> list[dict]:
     rows = []
+    warm = warmup or {}
     for date in sorted(universes):
         result = simulate_day(
             date, universes[date], bars.get(date, {}), rule_key, params,
-            slippage=slippage,
+            slippage=slippage, warmup_by_ticker=warm.get(date),
+            warmup_days=warmup_days,
         )
         if result is not None:
             rows.append(result)
@@ -166,11 +187,13 @@ def sign_stability(
     bars: dict[str, dict[str, list[dict]]],
     rule_key: str,
     params: dict,
+    warmup: dict[str, dict[str, list[dict]]] | None = None,
 ) -> list[int]:
     """체결 가정 셋에서의 합계 부호. 하나라도 다르면 관문 2 탈락이다."""
     signs = []
     for slip in SLIPPAGES:
-        rows = run_axis(universes, bars, rule_key, params, slippage=slip)
+        rows = run_axis(universes, bars, rule_key, params,
+                        slippage=slip, warmup=warmup)
         total = sum(r["pct"] for r in rows if r["pct"] is not None)
         signs.append(0 if total == 0 else (1 if total > 0 else -1))
     return signs
@@ -229,6 +252,47 @@ def gate_report(axis_results: dict[str, dict], a_daily: dict[str, float]) -> dic
     return report
 
 
+def previous_trading_date(dates: list[str], date: str) -> str | None:
+    """실제 거래일 목록에서 바로 앞 날짜.
+
+    달력을 쓰지 않는다 — 대체공휴일(20260817)처럼 유니버스에 없는 날을
+    자동으로 건너뛴다.
+    """
+    ordered = sorted(dates)
+    if date not in ordered:
+        return None
+    i = ordered.index(date)
+    return ordered[i - 1] if i > 0 else None
+
+
+def load_warmup(
+    date: str, ticker: str, dates: list[str], days: int,
+    cache_dir: Path = BAR_CACHE_DIR,
+) -> list[dict]:
+    """전 거래일 봉을 시간 순으로 이어 붙인다.
+
+    요청한 ``days``일을 가장 가까운 전 거래일부터 거슬러 올라가며 채우다가
+    캐시에 없는 날을 만나면 그 자리에서 멈추고 그때까지 모은 봉만 돌려준다 —
+    ``days=3``인데 이틀 전 파일이 없으면 하루치만 돌아온다. 그러니 반환값은
+    "0봉 아니면 요청한 만큼"이 아니라 0봉부터 요청 일수 전체 분량까지 어디든
+    될 수 있다. 그 길이가 지표를 데우기에 충분한지는 여기서 판정하지 않는다
+    — 소비하는 쪽이 ``warmup.usable()``로 문턱(``WARMUP_MIN_BARS``)을 적용한다.
+    """
+    if days <= 0:
+        return []
+    out: list[dict] = []
+    cursor = date
+    for _ in range(days):
+        cursor = previous_trading_date(dates, cursor)
+        if cursor is None:
+            break
+        cached = read_cached_bars(cursor, ticker, cache_dir)
+        if not cached:
+            break
+        out = sorted(cached, key=lambda r: r["time"]) + out
+    return out
+
+
 def load_bars_for(
     universes: dict[str, list[dict]], *, depth: int = DEPTH,
     cache_dir: Path = BAR_CACHE_DIR,
@@ -277,25 +341,61 @@ def a_daily_from_baseline() -> dict[str, float | None]:
     return daily
 
 
+def count_warmed(warmup_by_date: dict[str, dict[str, list[dict]]]) -> int:
+    """실제로 데워진 쌍의 수 — 봉 수가 아니라 실행 시점과 같은 판정을 쓴다.
+
+    한때 이 자리가 ``len(rows) >= WARMUP_MIN_BARS``였다. 개수 문턱이 하한보다 높던
+    동안에는 우연히 같은 값을 찍었지만, 하한이 수렴 요건으로 내려간 뒤로는 "봉이
+    그만큼 있다"는 뜻일 뿐이라 오전만 긴 파일을 데운 것으로 과다 보고한다.
+    """
+    return sum(
+        1
+        for day in warmup_by_date.values()
+        for rows in day.values()
+        if warmup_mod.covers_session(rows)
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="트랙 B 진입 규칙 비교")
     parser.add_argument("--depth", type=int, default=DEPTH)
+    parser.add_argument(
+        "--warmup-days", type=int, default=1,
+        help="지표에 먹일 전 거래일 수. 0이면 구 동작(일 단위 초기화)",
+    )
     parser.add_argument("--out", default="", help="결과 JSON 경로")
     args = parser.parse_args(argv)
 
     universes = load_universes()
     bars, stats = load_bars_for(universes, depth=args.depth)
+    dates = sorted(universes)
+    warmup = {
+        date: {
+            ticker: load_warmup(date, ticker, dates, args.warmup_days)
+            for ticker in day
+        }
+        for date, day in bars.items()
+    }
+    warmed_pairs = count_warmed(warmup)
+    total_pairs = sum(len(day) for day in warmup.values())
     print(f"표본: {len(bars)}거래일 / 쌍 {stats['pairs']} "
           f"(없음 {stats['missing']}, 09:00~09:30만 {stats['partial']})")
+    print(f"워밍업: {args.warmup_days}일 요청 / 실제 데운 쌍 "
+          f"{warmed_pairs}/{total_pairs}")
     if stats["missing"] + stats["partial"] > 0:
         print("  ! 전 세션 봉이 없는 쌍이 있다. track_b_backfill.py 를 먼저 돌린다.")
 
     axis_results = {}
     for key in sorted(RULES):
-        rows = run_axis(universes, bars, key, DEFAULT_PARAMS)
+        rows = run_axis(
+            universes, bars, key, DEFAULT_PARAMS,
+            warmup=warmup, warmup_days=args.warmup_days,
+        )
         axis_results[key] = {
             "rows": rows,
-            "slippage_signs": sign_stability(universes, bars, key, DEFAULT_PARAMS),
+            "slippage_signs": sign_stability(
+                universes, bars, key, DEFAULT_PARAMS, warmup=warmup
+            ),
         }
 
     report = gate_report(axis_results, a_daily_from_baseline())
@@ -314,8 +414,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.out:
         Path(args.out).write_text(
-            json.dumps({"report": report, "axes": axis_results},
-                       ensure_ascii=False, indent=2),
+            json.dumps(
+                {
+                    "report": report,
+                    "axes": axis_results,
+                    "warmup_days": args.warmup_days,
+                },
+                ensure_ascii=False, indent=2,
+            ),
             encoding="utf-8",
         )
         print(f"\n결과: {args.out}")

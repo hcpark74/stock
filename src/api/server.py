@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
 from src import bars, db, indicators, live, readiness, state
+from src import warmup as warmup_mod
 from src.api import kis_rest
 from src.api.status_logic import (
     f1_summary_from_rows as _f1_summary_from_rows,
@@ -976,8 +977,8 @@ async def api_f1() -> JSONResponse:
 
 _BARS_DATE_RE = re.compile(r"^\d{8}$")
 _BARS_TICKER_RE = re.compile(r"^[A-Za-z0-9]{1,12}$")
-# 정규장 1분 봉은 하루 391개다. 그 몇 배 위를 상한으로 둔다 — 이 위의 기간은
-# 오타이지 의도가 아니다.
+# 정규장 1분 봉은 하루 381개다(연속매매 380 + 단일가 종가 1). 그 몇 배 위를 상한으로
+# 둔다 — 이 위의 기간은 오타이지 의도가 아니다.
 _BARS_MAX_PERIOD = 2000
 
 
@@ -1060,6 +1061,7 @@ async def api_bars(
     track: str = "B",
     date: str = "",
     ticker: str = "",
+    prev: str = "",
     sma: int = 20,
     fast: int = 12,
     slow: int = 26,
@@ -1099,22 +1101,40 @@ async def api_bars(
                 rows = []
                 source = "empty"
 
+    # 지표 워밍업 — 전 거래일 봉을 앞에 붙여 09:00부터 증권사와 같은 값을 낸다.
+    # 캔들은 당일 것만 돌려준다. 화면이 전일 봉을 그리면 안 된다.
+    warm: list = []
+    if rows and prev and _BARS_DATE_RE.match(prev) and target:
+        try:
+            warm = json.loads(
+                bars.bars_path(prev, target).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            warm = []
+    warmed_rows, offset = warmup_mod.combine(warmup_mod.usable(warm), rows)
+
+    def _sma(period: int, field: str = "close") -> list:
+        if not rows:
+            return []
+        return indicators.sma(warmed_rows, period, field=field)[offset:]
+
     return JSONResponse({
         "date": trade_date,
         "ticker": target,
         "track": track,
         "bars": rows,
         "indicators": {
-            "sma": indicators.sma(rows, sma) if rows else [],
-            "macd": indicators.macd(rows, fast, slow, signal) if rows else [],
-            "ma": {
-                str(p): indicators.sma(rows, p) for p in _BARS_MA_PERIODS
-            } if rows else {},
+            "sma": _sma(sma),
+            "macd": (
+                indicators.macd(warmed_rows, fast, slow, signal)[offset:]
+                if rows else []
+            ),
+            "ma": {str(p): _sma(p) for p in _BARS_MA_PERIODS} if rows else {},
             "vol_ma": {
-                str(p): indicators.sma(rows, p, field="volume")
-                for p in _BARS_VOL_MA_PERIODS
+                str(p): _sma(p, field="volume") for p in _BARS_VOL_MA_PERIODS
             } if rows else {},
         },
+        "warmup": warmup_mod.meta(warm, days=1 if warm else 0),
         "meta": {
             "bar_count": len(rows),
             "confirmed_count": sum(1 for r in rows if r.get("confirmed")),

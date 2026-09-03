@@ -22,8 +22,8 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from src import live, state, warmup
 from src.api import kis_minute_bars
-from src import live, state
 from src.modules import tick_capture
 from src.utils.logger import log
 from src.utils.spike_filter import SpikeFilter
@@ -329,6 +329,16 @@ _CORRECT_INTERVAL_SEC = 60.0
 _IDLE_STOP_SEC = 600.0
 _workers: dict[tuple[str, str], asyncio.Task] = {}
 
+def _is_complete_session(rows: list[dict]) -> bool:
+    """전 거래일 세션으로 봐도 되는가 — 워밍업과 같은 판정을 쓴다.
+
+    한때 이 자리에 별도의 봉 수 문턱이 있었다. "다시 받을 가치가 있는가"와
+    "데운 셈 칠 것인가"가 다른 질문이라고 봤기 때문인데, 두 답이 갈리면
+    재요청해도 끝내 못 쓰는 세션이 생긴다. ``covers_session``은 개장~마감을
+    덮었는지로 판정하므로 무거래 분이 섞인 정상 세션도 한 번만 받는다.
+    """
+    return warmup.covers_session(rows)
+
 
 def should_correct(now: datetime, *, a_holding: bool, ws_stale: bool) -> bool:
     """분봉 API를 지금 호출해도 되는가.
@@ -339,6 +349,66 @@ def should_correct(now: datetime, *, a_holding: bool, ws_stale: bool) -> bool:
     if kis_minute_bars.in_forbidden_window(now):
         return False
     return not (a_holding and ws_stale)
+
+
+async def ensure_warmup(
+    date: str, ticker: str, prev_date: str, now: datetime | None = None
+) -> bool:
+    """전 거래일 봉을 디스크에 확보한다. 지표 워밍업이 이 파일을 읽는다.
+
+    금지창(09:00~09:11)에는 부르지 않는다 — A의 진입 창을 지키는 가드가
+    워밍업보다 우선한다. 트랙 B의 판정이 빨라도 09:35이라 지연 로드가 판정을
+    늦추지 않는다(스펙 §6.2).
+
+    ``date``는 워밍업을 요청한 당일 거래일(로깅용), ``prev_date``는 그 워밍업이
+    가져오는 전 거래일이다 — 읽고 쓰는 파일은 ``prev_date`` 것이다. 빈 응답은
+    파일로 남기지 않는다 — 남기면 다음 호출이 '이미 있다'고 보고 영영 다시
+    받지 않는다.
+
+    파일이 있다는 사실만으로 확보로 치지 않는다. ``data/bars/``는 실시간
+    레코더도 같이 쓰는 저장소라, 트랙 B가 09:01에 마감한 종목의 20봉짜리
+    스텁을 여기 남겨 두는 일이 흔하다(``_close_previous``). 그 쌍은 하필
+    어제 추적했던, 오늘 다시 나올 가능성이 가장 높은 종목이다 — 존재만 보면
+    바로 그 쌍이 영영 데워지지 않는다. 완결성은 ``_is_complete_session``
+    하나가 판정한다.
+    """
+    now = now or datetime.now(KST)
+    path = bars_path(prev_date, ticker)
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            existing = []
+        if _is_complete_session(existing):
+            return True
+        log("TRACK_B_WARMUP_PARTIAL_REFETCH", level="INFO",
+            date=date, ticker=ticker, prev_date=prev_date, bars=len(existing))
+    if kis_minute_bars.in_forbidden_window(now):
+        return False
+    try:
+        rows = await kis_minute_bars.fetch_session(prev_date, ticker)
+    except Exception as exc:  # noqa: BLE001 — 워밍업 실패는 판정을 막지 않는다
+        log("TRACK_B_WARMUP_FAILED", level="WARN",
+            date=date, ticker=ticker, prev_date=prev_date, error=repr(exc))
+        return False
+    if not rows:
+        log("TRACK_B_WARMUP_EMPTY", level="INFO",
+            date=date, ticker=ticker, prev_date=prev_date)
+        return False
+    if not _is_complete_session(rows):
+        log("TRACK_B_WARMUP_TRUNCATED", level="WARN",
+            date=date, ticker=ticker, prev_date=prev_date, bars=len(rows))
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 — 쓰기 실패도 판정을 막지 않는다
+        log("TRACK_B_WARMUP_FAILED", level="WARN",
+            date=date, ticker=ticker, prev_date=prev_date, error=repr(exc))
+        return False
+    log("TRACK_B_WARMUP_READY", level="INFO",
+        date=date, ticker=ticker, prev_date=prev_date, bars=len(rows))
+    return True
 
 
 def _merge_official(bar: dict | None, official: dict) -> dict:

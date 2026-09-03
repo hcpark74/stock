@@ -10,6 +10,13 @@
 
 **Spec:** [docs/superpowers/specs/2026-09-01-indicator-warmup-design.md](../specs/2026-09-01-indicator-warmup-design.md)
 
+> **정정 (2026-09-01, 실행 중 발견).** 이 계획서 곳곳의 `WARMUP_MIN_BARS = 391`과
+> "`warmed`는 `warmup_bars >= 391`일 때 참"은 틀렸다. 15:20~15:30은 단일가라 한 세션은
+> 381봉이고, 391은 어떤 날도 넘지 못해 워밍업이 아예 적용되지 않았다. 완결성은 개수가
+> 아니라 개장~마감 도달과 중간 공백으로 판정한다(`warmup.covers_session`), 수렴 하한은
+> 228봉이다. 계획서 본문은 그때의 지시로 남긴다 — 실제 코드는 `src/warmup.py`와
+> `docs/INDICATOR_WARMUP_VERIFY_20260901.md`를 본다.
+
 ## Global Constraints
 
 - **`src/indicators.py`는 수정 금지.** 이 계획의 어떤 태스크도 이 파일을 건드리지 않는다
@@ -593,7 +600,10 @@ from src import warmup as warmup_mod  # noqa: E402
 - [ ] **Step 7: 구 동작 재현을 확인한다**
 
 Run: `./.venv/Scripts/python.exe scripts/track_b_backtest.py --depth 1 --warmup-days 0`
-Expected: `[R1] 진입 8일 / 판정 8일`, `[R2] 진입 13일`, `[R3] 진입 22일` — 유니버스 재분석 §3의 랭크 1 열과 **정확히 같아야 한다.** 다르면 Task 2·3의 배선이 틀린 것이다.
+
+**판정 기준은 고정된 숫자가 아니라 불변식이다** — `--warmup-days 0`의 출력이 이 변경 **이전 코드**를 같은 캐시로 돌린 출력과 같아야 한다. 유니버스 재분석 §3의 8/13/22는 캐시가 22거래일이던 시점의 값이고, 그 뒤 백필로 20260831이 들어와 캐시가 23거래일이 됐다. **캐시는 계속 자라므로 리터럴을 회귀선으로 쓸 수 없다.**
+
+확인 방법: 변경분을 stash하고 같은 명령을 돌려 숫자를 적어둔 뒤, stash를 되살려 다시 돌려 두 출력이 같은지 본다. 2026-09-01 시점 23거래일 캐시에서의 값은 **R1 9일 / R2 14일 / R3 23일**이다. 숫자가 이와 달라도 stash 대조가 일치하면 통과다 — 그 사이 캐시가 또 자란 것이다. stash 대조가 **어긋나면** 배선이 틀린 것이므로 숫자를 맞추지 말고 BLOCKED로 보고한다.
 
 - [ ] **Step 8: 전체 스위트**
 
@@ -626,45 +636,57 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 `tests/test_track_b_backfill.py` 끝에 추가한다.
 
 ```python
-def test_needed_pairs_adds_the_previous_session_for_warmup(tmp_path):
-    """워밍업 1일이면 각 종목의 전 거래일 쌍이 대상에 추가된다."""
-    import json
-    for date in ("20260814", "20260818"):
-        (tmp_path / f"{date}_090000.jsonl").write_text(
-            json.dumps({
-                "ticker": "005930", "gap_pct": 5.0, "expected_amount": 1e10,
-            }) + "\n",
-            encoding="utf-8",
-        )
+def _snapshot(tmp_path, date, tickers):
+    """스냅샷 한 장을 만든다.
 
-    cold = track_b_backfill.needed_pairs(depth=1, snapshot_dir=tmp_path,
+    load_universes 는 MIN_UNIVERSE_ROWS(30) 미만인 스냅샷을 통째로 버린다
+    (scripts/strategy_backtest.py:70). 기존 테스트가 쓰는 패딩 방식을 그대로
+    따라 30행을 채운다.
+    """
+    rows = [{
+        "ticker": t, "gap_pct": 0.05, "prev_close": 1000,
+        "expected_amount": 5_000_000_000, "avg_amount_5d": 1_000_000_000,
+    } for t in tickers]
+    while len(rows) < 30:
+        filler = dict(rows[0])
+        filler["ticker"] = f"9{len(rows):05d}"
+        rows.append(filler)
+    (tmp_path / f"{date}_090100.jsonl").write_text(
+        "
+".join(json.dumps(r, ensure_ascii=False) for r in rows),
+        encoding="utf-8",
+    )
+
+
+def test_needed_pairs_adds_the_previous_session_for_warmup(tmp_path):
+    """워밍업 1일이면 각 날짜의 종목이 전 거래일 쌍에도 들어간다.
+
+    두 날의 스냅샷을 같게 만들어, 랭킹 내부 구현에 기대지 않고 집합 관계만
+    본다 — 어느 종목이 랭크 1인지는 이 테스트의 관심사가 아니다.
+    """
+    for date in ("20260814", "20260818"):
+        _snapshot(tmp_path, date, ["005930", "000660"])
+
+    cold = track_b_backfill.needed_pairs(depth=5, snapshot_dir=tmp_path,
                                          warmup_days=0)
-    hot = track_b_backfill.needed_pairs(depth=1, snapshot_dir=tmp_path,
+    hot = track_b_backfill.needed_pairs(depth=5, snapshot_dir=tmp_path,
                                         warmup_days=1)
 
-    assert "005930" in cold["20260818"]
-    # 20260818의 워밍업은 20260814다. 그날 쌍에 같은 종목이 들어간다.
-    assert "005930" in hot["20260814"]
-    assert set(hot) >= set(cold)
+    assert set(cold) == {"20260814", "20260818"}
+    # 20260818의 워밍업은 20260814다. 그날 쌍이 08-18의 종목을 흡수한다.
+    assert hot["20260814"] >= cold["20260818"]
+    assert hot["20260818"] == cold["20260818"]
 
 
 def test_needed_pairs_warmup_does_not_invent_days_outside_the_universe(tmp_path):
     """유니버스의 첫 날은 그 앞이 없다 — 없는 날짜를 만들어내면 안 된다."""
-    import json
-    (tmp_path / "20260814_090000.jsonl").write_text(
-        json.dumps({
-            "ticker": "005930", "gap_pct": 5.0, "expected_amount": 1e10,
-        }) + "\n",
-        encoding="utf-8",
-    )
+    _snapshot(tmp_path, "20260814", ["005930"])
 
-    pairs = track_b_backfill.needed_pairs(depth=1, snapshot_dir=tmp_path,
+    pairs = track_b_backfill.needed_pairs(depth=5, snapshot_dir=tmp_path,
                                           warmup_days=1)
 
     assert set(pairs) == {"20260814"}
 ```
-
-> 구현자 주의: 이 파일의 기존 테스트가 스냅샷 픽스처를 어떻게 만드는지 먼저 읽는다. `load_universes`가 `MIN_UNIVERSE_ROWS`(30) 미만인 스냅샷을 버린다면 위 픽스처의 행 수를 30개 이상으로 늘려야 한다 — `scripts/strategy_backtest.py:70`을 확인하고 필요하면 `_snapshot(tmp_path, date, tickers)` 같은 헬퍼로 30행을 만든다.
 
 - [ ] **Step 2: 실패를 확인한다**
 
@@ -1154,7 +1176,7 @@ Expected:
 - [ ] **Step 3: 구 동작 재현을 다시 확인한다**
 
 Run: `./.venv/Scripts/python.exe scripts/track_b_backtest.py --depth 1 --warmup-days 0`
-Expected: R1 8일 / R2 13일 / R3 22일 — Task 3 Step 7과 같다
+Expected: Task 3 Step 7이 기록한 값과 같다. 캐시가 그 사이 자랐다면 값이 커질 수 있으므로, 리터럴이 아니라 **같은 캐시에서 변경 전 코드와 일치하는가**로 판정한다
 
 - [ ] **Step 4: 워밍업 기준으로 재계산한다**
 

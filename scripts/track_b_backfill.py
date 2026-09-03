@@ -41,6 +41,8 @@ from scripts.strategy_backtest import (  # noqa: E402
     read_cached_bars,
     write_cached_bars,
 )
+from scripts.track_b_backtest import previous_trading_date  # noqa: E402
+from src import warmup  # noqa: E402
 from src.api import kis_rest  # noqa: E402
 from src.api.kis_minute_bars import parse_minute_bars  # noqa: E402
 from src.api.kis_rest import RequestBudgetExceeded  # noqa: E402
@@ -53,7 +55,8 @@ KST = ZoneInfo("Asia/Seoul")
 EARLIEST_BACKFILL = time(15, 40)
 
 SESSION_START = "090000"
-# 09:00~15:30 = 391봉. 페이지당 30봉이라 14페이지면 닿는다. 한 장 여유.
+# 한 세션은 연속매매 380봉 + 종가 1봉 = 381봉이다(15:20~15:30은 단일가라 봉이 없다).
+# 페이지당 30봉이라 13페이지면 닿는다. 두 장 여유.
 MAX_PAGES = 15
 
 
@@ -129,8 +132,15 @@ async def fetch_session_bars(
     return bars
 
 
-def needed_pairs(depth: int = 5, snapshot_dir: Path | None = None) -> dict[str, set[str]]:
-    """날짜별 F1 랭크 1~depth 종목. 운영 랭킹 함수를 그대로 쓴다."""
+def needed_pairs(
+    depth: int = 5, snapshot_dir: Path | None = None, warmup_days: int = 0
+) -> dict[str, set[str]]:
+    """날짜별 F1 랭크 1~depth 종목. 운영 랭킹 함수를 그대로 쓴다.
+
+    ``warmup_days``가 0보다 크면 각 종목의 전 거래일 쌍을 함께 대상에 넣는다.
+    지표 워밍업이 그 봉을 필요로 하는데, 그 종목이 그날 F1 상위에 없었으면
+    캐시에 없기 때문이다(스펙 §5.1).
+    """
     universes = (
         load_universes(snapshot_dir) if snapshot_dir is not None else load_universes()
     )
@@ -140,12 +150,26 @@ def needed_pairs(depth: int = 5, snapshot_dir: Path | None = None) -> dict[str, 
         tickers = {str(r["ticker"]) for r in ranked if r.get("ticker")}
         if tickers:
             needed[date] = tickers
+
+    if warmup_days > 0:
+        dates = sorted(universes)
+        for date in list(needed):
+            cursor = date
+            for _ in range(warmup_days):
+                cursor = previous_trading_date(dates, cursor)
+                if cursor is None:
+                    break
+                needed.setdefault(cursor, set()).update(needed[date])
     return needed
 
 
-def is_session_complete(bars: list[dict] | None, min_bars: int = 300) -> bool:
-    """이미 전 세션이 채워진 쌍은 건너뛴다. 31봉짜리는 채운다."""
-    return bool(bars) and len(bars) >= min_bars
+def is_session_complete(bars: list[dict] | None) -> bool:
+    """이미 전 세션이 채워진 쌍은 건너뛴다. 31봉짜리는 채운다.
+
+    봉 수가 아니라 개장~마감을 덮었는지로 본다 — 거래가 뜸한 종목은 완전한
+    하루도 265봉이라, 개수로 자르면 그런 쌍을 매번 다시 받는다.
+    """
+    return bool(bars) and warmup.covers_session(bars)
 
 
 async def backfill(
@@ -204,9 +228,13 @@ async def main_async(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-calls", type=int, default=1600)
     parser.add_argument("--interval", type=float, default=1.2)
     parser.add_argument("--dry-run", action="store_true", help="호출 없이 계획만 출력")
+    parser.add_argument(
+        "--warmup-days", type=int, default=1,
+        help="지표 워밍업에 필요한 전 거래일도 함께 채운다. 0이면 채우지 않는다",
+    )
     args = parser.parse_args(argv)
 
-    needed = needed_pairs(args.depth)
+    needed = needed_pairs(args.depth, warmup_days=args.warmup_days)
     pairs = sum(len(v) for v in needed.values())
     print(f"대상 {len(needed)}거래일 / {pairs}쌍 (랭크 1~{args.depth})")
     if args.dry_run:

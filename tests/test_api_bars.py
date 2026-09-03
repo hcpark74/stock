@@ -276,3 +276,58 @@ def test_a_gap_without_usable_prices_still_reports_the_missing_minutes():
 
     assert gaps[0]["missing"] == 4
     assert gaps[0]["jump_pct"] is None
+
+
+def test_api_bars_reports_warmup_state_when_no_previous_day_exists(tmp_path):
+    """전일 파일이 없으면 warmed=False로 정직하게 남긴다."""
+    (tmp_path / "20260901_005930.json").write_text(json.dumps([
+        {"time": "090000", "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1},
+    ]), encoding="utf-8")
+
+    body = client.get("/api/bars?date=20260901&ticker=005930").json()
+
+    assert body["warmup"] == {"warmup_days": 0, "warmup_bars": 0, "warmed": False}
+    assert len(body["indicators"]["sma"]) == len(body["bars"])
+
+
+def test_api_bars_indicator_arrays_stay_aligned_with_the_day(tmp_path):
+    """워밍업이 있어도 지표 배열은 당일 봉 길이로 잘려 나오고, 캔들은 당일 것뿐이다."""
+    prev = [{"time": f"09{m:02d}00", "open": 10, "high": 10, "low": 10,
+             "close": 10.0 + m, "volume": 5} for m in range(60)]
+    today = [{"time": f"09{m:02d}00", "open": 20, "high": 20, "low": 20,
+              "close": 20.0 + m, "volume": 5} for m in range(3)]
+    (tmp_path / "20260831_005930.json").write_text(json.dumps(prev), encoding="utf-8")
+    (tmp_path / "20260901_005930.json").write_text(json.dumps(today), encoding="utf-8")
+
+    body = client.get(
+        "/api/bars?date=20260901&ticker=005930&prev=20260831"
+    ).json()
+
+    assert body["warmup"]["warmup_bars"] == 60
+    assert body["warmup"]["warmed"] is False      # 60 < WARMUP_MIN_BARS
+    assert len(body["bars"]) == 3
+    assert len(body["indicators"]["sma"]) == 3
+    assert len(body["indicators"]["macd"]) == 3
+    assert len(body["indicators"]["ma"]["5"]) == 3
+    assert len(body["indicators"]["vol_ma"]["5"]) == 3
+
+
+def test_api_bars_degrades_to_unwarmed_when_prev_file_is_missing_or_malformed(tmp_path):
+    """prev가 가리키는 파일이 없거나 깨져 있어도 에러 없이 미워밍업으로 남는다."""
+    today = [{"time": "090000", "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1}]
+    (tmp_path / "20260901_005930.json").write_text(json.dumps(today), encoding="utf-8")
+    (tmp_path / "20260830_005930.json").write_text("{not valid json", encoding="utf-8")
+
+    missing = client.get(
+        "/api/bars?date=20260901&ticker=005930&prev=20260828"
+    )
+    malformed = client.get(
+        "/api/bars?date=20260901&ticker=005930&prev=20260830"
+    )
+
+    for res in (missing, malformed):
+        assert res.status_code == 200
+        body = res.json()
+        assert body["warmup"] == {"warmup_days": 0, "warmup_bars": 0, "warmed": False}
+        assert len(body["bars"]) == 1
+        assert len(body["indicators"]["sma"]) == 1
