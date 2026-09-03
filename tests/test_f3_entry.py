@@ -6252,3 +6252,119 @@ async def test_pyramid_abnormal_fill_high_gap_low_amount_triggers_guard(monkeypa
     # 공유 체결후 평가기가 고갭 유동성 부족을 방어 사유로 명시해야 한다.
     guard = [k for e, k in events if e == "SLIPPAGE_GUARD" and k.get("phase") == "PYRAMID"]
     assert guard and "HIGH_GAP_AMOUNT_LOW" in guard[-1]["guard_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_rejected_twice_confirms_fill_before_unconfirmed(monkeypatch):
+    """취소가 두 번 다 거부되면 UNCERTAIN 직전에 체결을 한 번 더 확인한다.
+
+    체결조회는 주문 직후 수 초간 빈 응답을 준다. 그 사이 취소는 기체결 때문에
+    거부되므로, 짧은 폴링 창만 보고 UNCERTAIN을 내면 이미 잡힌 포지션을
+    '취소 실패'로 오분류한다(20260902 004310).
+    """
+    filled = {
+        "status": "FILLED",
+        "order_qty": 216,
+        "fill_qty": 216,
+        "remaining_qty": 0,
+        "fill_price": 8_625,
+    }
+    cancels: list[int] = []
+
+    async def cancel(*_args, **_kwargs):
+        cancels.append(1)
+        return {
+            "rt_cd": "1",
+            "msg_cd": "40330000",
+            "msg1": "모의투자 정정/취소할 수량이 없습니다.",
+        }
+
+    async def snapshot(*_args, **_kwargs):
+        # 재시도 취소까지 거부된 뒤에야 체결조회가 따라잡는다.
+        return filled if len(cancels) >= 2 else None
+
+    monkeypatch.setattr(f3, "F3_ENTRY_CANCEL_CONFIRM_FILL_SEC", 0.05)
+    monkeypatch.setattr(f3, "_cancel_order", cancel)
+    monkeypatch.setattr(f3, "_fetch_order_fill_snapshot", snapshot)
+    events = []
+    monkeypatch.setattr(f3, "log", lambda event, **k: events.append((event, k)))
+
+    outcome, reconciled = await f3._cancel_entry_order_confirmed(
+        "0000003447",
+        "00950",
+        "PAPER",
+        "004310",
+        1,
+        2,
+        expected_qty=216,
+    )
+
+    assert outcome == "FILLED"
+    assert reconciled["fill_qty"] == 216
+    assert reconciled["fill_price"] == 8_625
+    assert not [e for e, _ in events if e == "ENTRY_CANCEL_UNCONFIRMED"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_rejected_twice_without_fill_stays_unconfirmed(monkeypatch):
+    """마지막 확인에도 체결이 없으면 UNCERTAIN을 유지한다(fail-closed)."""
+
+    async def cancel(*_args, **_kwargs):
+        return {"rt_cd": "1", "msg_cd": "40330000", "msg1": "취소할 수량이 없습니다."}
+
+    monkeypatch.setattr(f3, "F3_ENTRY_CANCEL_CONFIRM_FILL_SEC", 0.05)
+    monkeypatch.setattr(f3, "_cancel_order", cancel)
+    monkeypatch.setattr(f3, "_fetch_order_fill_snapshot", AsyncMock(return_value=None))
+    events = []
+    monkeypatch.setattr(f3, "log", lambda event, **k: events.append((event, k)))
+
+    outcome, reconciled = await f3._cancel_entry_order_confirmed(
+        "0000003447",
+        "00950",
+        "PAPER",
+        "004310",
+        1,
+        2,
+        expected_qty=216,
+    )
+
+    assert outcome == "UNCERTAIN"
+    assert reconciled is None
+    assert [e for e, _ in events if e == "ENTRY_CANCEL_UNCONFIRMED"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_rejected_twice_keeps_partial_fill_unconfirmed(monkeypatch):
+    """부분체결만 확인되면 전량 체결이 아니므로 UNCERTAIN을 유지한다."""
+    partial = {
+        "status": "PARTIAL",
+        "order_qty": 216,
+        "fill_qty": 100,
+        "remaining_qty": 116,
+        "fill_price": 8_625,
+    }
+    cancels: list[int] = []
+
+    async def cancel(*_args, **_kwargs):
+        cancels.append(1)
+        return {"rt_cd": "1", "msg_cd": "40330000", "msg1": "취소할 수량이 없습니다."}
+
+    async def snapshot(*_args, **_kwargs):
+        return partial if len(cancels) >= 2 else None
+
+    monkeypatch.setattr(f3, "F3_ENTRY_CANCEL_CONFIRM_FILL_SEC", 0.05)
+    monkeypatch.setattr(f3, "_cancel_order", cancel)
+    monkeypatch.setattr(f3, "_fetch_order_fill_snapshot", snapshot)
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+
+    outcome, _reconciled = await f3._cancel_entry_order_confirmed(
+        "0000003447",
+        "00950",
+        "PAPER",
+        "004310",
+        1,
+        2,
+        expected_qty=216,
+    )
+
+    assert outcome == "UNCERTAIN"

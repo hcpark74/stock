@@ -69,7 +69,9 @@ F3_ENTRY_MAX_ATTEMPTS = max(1, int(os.getenv("F3_ENTRY_MAX_ATTEMPTS", "2")))
 F3_ENTRY_RETRY_DELAY_SEC = float(os.getenv("F3_ENTRY_RETRY_DELAY_SEC", "0.5"))
 F3_ENTRY_CANCEL_RELEASE_WAIT_SEC = float(os.getenv("F3_ENTRY_CANCEL_RELEASE_WAIT_SEC", "1.5"))
 # 취소 거부 시 기체결 여부를 재확인하는 폴링 창 — 취소 거부의 흔한 원인이 기체결이다.
-F3_ENTRY_CANCEL_CONFIRM_FILL_SEC = float(os.getenv("F3_ENTRY_CANCEL_CONFIRM_FILL_SEC", "2.0"))
+# 실측 체결조회(inquire-daily-ccld) 왕복은 0.7~3.3초(20260827~20260902)다. 2초 창은
+# 느린 날 한 번도 완주하지 못해 무조건 빈손으로 끝났다. 최악 실측치의 두 배를 준다.
+F3_ENTRY_CANCEL_CONFIRM_FILL_SEC = float(os.getenv("F3_ENTRY_CANCEL_CONFIRM_FILL_SEC", "6.5"))
 F3_ENTRY_RETRY_DEADLINE = os.getenv("F3_ENTRY_RETRY_DEADLINE", "09:11:00")
 # 우선 계측(shadow)만 수행한다. 초과해도 신규 주문을 차단하지 않으며 실제
 # 분포를 확인한 뒤 별도 변경으로 enforcement를 활성화한다.
@@ -2623,6 +2625,33 @@ async def _cancel_entry_order_confirmed(
             ),
         )
         return "CANCELLED", reconciled
+
+    # 재시도 취소까지 거부됐다. 거부의 가장 흔한 원인은 기체결인데, 체결조회는
+    # 주문 직후 수 초간 빈 응답을 준다. 앞선 폴링 창이 그 지연보다 짧으면 체결을
+    # 못 보고 UNCERTAIN이 된다. 하루를 접기 전에 마지막으로 한 번 더 대조한다 —
+    # 두 번째 취소 거부까지 왕복한 만큼 시간이 더 흘렀으므로 이제는 잡힐 수 있다.
+    final_fill = _more_complete_fill(
+        fill,
+        await _fetch_order_fill_snapshot(
+            order_id,
+            ticker=ticker,
+            expected_qty=expected_qty,
+        ),
+    )
+    if final_fill and (
+        expected_qty is None or int(final_fill.get("fill_qty") or 0) >= expected_qty
+    ):
+        log(
+            "ENTRY_CANCEL_REJECTED_FILLED",
+            level="WARN",
+            ticker=ticker,
+            order_id=order_id,
+            entry_attempt=attempt,
+            fill_price=final_fill["fill_price"],
+            fill_qty=final_fill["fill_qty"],
+            confirmed_after="CANCEL_RETRY",
+        )
+        return "FILLED", final_fill
 
     log(
         "ENTRY_CANCEL_UNCONFIRMED",
