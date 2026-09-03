@@ -145,6 +145,7 @@ EVENT_LABELS = {
     "F3_FINAL_PICK": "F3 최종 종목 선정(F3 Final Pick)",
     "F3_ENTRY_BLOCKED": "F3 진입 차단(F3 Entry Blocked)",
     "F3_DEADLINE_PARSE_ERROR": "F3 마감시각 파싱 오류(F3 Deadline Parse Error)",
+    "ENTRY_CASH_BASIS": "진입 수량 산정 기준 현금(Entry Cash Basis)",
     "ENTRY_ORDER_SENT": "진입 주문 전송(Entry Order Sent)",
     "ENTRY_PRE_ORDER_WAIT": "진입 주문 전 대기(Entry Pre-order Wait)",
     "ENTRY_RETRY_START": "진입 재시도 시작(Entry Retry Start)",

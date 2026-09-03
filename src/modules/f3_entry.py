@@ -1421,6 +1421,7 @@ async def _run_single(
         return
 
     # ── 잔고 조회 및 수량 산정 ────────────────────────────────────────
+    prefetched_buyable: dict | None = None
     if _picked_is_funded(picked, ticker):
         cash = float(picked["cash"])
         total_amount = int(picked["total_amount"])
@@ -1430,12 +1431,26 @@ async def _run_single(
         if not _before_deadline(_entry_retry_deadline()):
             await _block_entry_deadline_passed(ticker, "BEFORE_BALANCE_QUERY")
             return
-        cash = await _available_cash_for_entry()
+        # 종목별 주문가능 조회를 산정 앞으로 당긴다. 주문 루프가 1차 시도에서
+        # 이 결과를 재사용하므로 09:01 창에서 API 왕복은 늘지 않는다.
+        prefetched_buyable = await _fetch_buyable_qty(ticker, mode)
+        cash, cash_basis = _entry_cash_basis(prefetched_buyable)
         if cash is None:
-            s.day_skip = True
-            s.close_reason = "BALANCE_QUERY_FAILED"
-            await _alert_balance_query_failed(ticker, candidate_tickers)
-            return
+            cash = await _available_cash_for_entry()
+            if cash is None:
+                s.day_skip = True
+                s.close_reason = "BALANCE_QUERY_FAILED"
+                await _alert_balance_query_failed(ticker, candidate_tickers)
+                return
+        log(
+            "ENTRY_CASH_BASIS",
+            level="INFO",
+            ticker=ticker,
+            cash=cash,
+            cash_basis=cash_basis,
+            alloc_ratio=ALLOC_RATIO,
+            ord_psbl_cash=float((prefetched_buyable or {}).get("ord_psbl_cash") or 0.0),
+        )
         total_amount = int(cash * ALLOC_RATIO)
         total_qty = int(total_amount / expected_price) if expected_price else 0
     if total_qty == 0:
@@ -1466,6 +1481,9 @@ async def _run_single(
             return "QTY_ZERO"
         s.day_skip = True
         s.close_reason = "INSUFFICIENT_BALANCE"
+        # 다른 두 INSUFFICIENT_BALANCE 종료와 같이 디스크를 최종 값으로 맞춘다.
+        # 여기만 빠져 있으면 재시작 복구가 메모리와 다른 사유를 읽는다.
+        await _persist_terminal_or_log("INSUFFICIENT_BALANCE")
         await db.record_skip(
             _today(),
             "ENTRY_FAIL",
@@ -1545,7 +1563,10 @@ async def _run_single(
             )
             if early_reject_reason is not None:
                 return early_reject_reason
-        buyable = await _fetch_buyable_qty(ticker, mode)
+        if attempt == 1 and prefetched_buyable is not None:
+            buyable = prefetched_buyable
+        else:
+            buyable = await _fetch_buyable_qty(ticker, mode)
         if buyable.get("query_failed"):
             _log_entry_blocked(
                 ticker,
@@ -2540,6 +2561,25 @@ async def _run_single(
 
 
 # ── 헬퍼 ─────────────────────────────────────────────────────────────
+
+
+def _entry_cash_basis(buyable: dict | None) -> tuple[float | None, str]:
+    """수량 산정에 쓸 현금과 그 출처.
+
+    ord_psbl_cash는 브로커가 "지금 실제로 얼마 쓸 수 있는가"에 직접 답한 값이다.
+    잔고 요약의 dnca_tot_amt는 미결제 매수대금을 반영하지 않아 장부에만 남은
+    금액을 그대로 부른다 — 20260709에 장부는 10,064,148인데 실제 주문가능액은
+    119,940이었고, 장부값으로 잡은 수량은 주문가능금액 부족으로 거부됐다.
+
+    값이 없거나 0이면 None을 돌려 기존 잔고 요약 경로로 물러난다. 이 필드를
+    주지 않는 계좌·모드에서 수량 0으로 막히면 그것이 회귀다.
+    """
+    if not buyable or buyable.get("query_failed"):
+        return None, "BALANCE_SUMMARY"
+    cash = float(buyable.get("ord_psbl_cash") or 0.0)
+    if cash <= 0:
+        return None, "BALANCE_SUMMARY"
+    return cash, "ORD_PSBL_CASH"
 
 
 def _is_confirmed_full_fill(fill: dict | None, expected_qty: int | None) -> bool:

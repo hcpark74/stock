@@ -35,13 +35,25 @@ def _mock_final_quote(monkeypatch, ask_price: float) -> None:
     )
 
 
-def _buyable(qty: int = 999_999, amt: float = 999_999_999.0) -> dict:
+def _buyable(
+    qty: int = 999_999,
+    amt: float = 999_999_999.0,
+    ord_psbl_cash: float = 0.0,
+) -> dict:
+    """주문가능 조회 응답. 기본값은 수량·금액 어느 쪽도 제약이 아닌 상태다.
+
+    ord_psbl_cash 기본값이 0인 것은 "브로커가 이 필드를 주지 않았다"는 뜻이고,
+    그러면 수량 산정은 _fetch_available_cash 로 물러난다. 대부분의 테스트가
+    현금을 그쪽으로 통제하므로 기본값을 0으로 두어야 각 테스트가 의도한 예산을
+    그대로 쓴다. 실제 주문가능액으로 산정되는 경로는 이 값을 명시하는
+    테스트에서 검증한다.
+    """
     return {
         "nrcvb_buy_qty": qty,
         "nrcvb_buy_amt": amt,
         "max_buy_qty": qty,
         "max_buy_amt": amt,
-        "ord_psbl_cash": amt,
+        "ord_psbl_cash": ord_psbl_cash,
     }
 
 
@@ -1778,7 +1790,9 @@ async def test_entry_qty_is_clamped_by_buyable_quantity(monkeypatch):
     monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(1000.0, 970.0)))
     monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=10_000.0))
     monkeypatch.setattr(
-        f3, "_fetch_buyable_qty", AsyncMock(return_value=_buyable(qty=5, amt=5_000.0))
+        f3,
+        "_fetch_buyable_qty",
+        AsyncMock(return_value=_buyable(qty=5, amt=5_000.0, ord_psbl_cash=10_000.0)),
     )
     monkeypatch.setattr(f3, "_send_buy", send_buy)
     monkeypatch.setattr(
@@ -1793,7 +1807,7 @@ async def test_entry_qty_is_clamped_by_buyable_quantity(monkeypatch):
 
     await f3.run()
 
-    assert send_buy.await_args.args == ("006340", 4, "PAPER")
+    assert send_buy.await_args.args == ("006340", 5, "PAPER")
     clamped = [kwargs for event, kwargs in events if event == "ENTRY_QTY_CLAMPED"][-1]
     assert clamped["planned_qty"] == 9
     assert clamped["buyable_qty"] == 5
@@ -1801,10 +1815,10 @@ async def test_entry_qty_is_clamped_by_buyable_quantity(monkeypatch):
     assert clamped["level"] == "WARN"
     assert clamped["reduction_pct"] == pytest.approx(44.44)
     assert clamped["warn_threshold_pct"] == 20.0
-    limit_sized = [kwargs for event, kwargs in events if event == "ENTRY_QTY_SIZED_AT_LIMIT"][-1]
-    assert limit_sized["planned_qty"] == 5
-    assert limit_sized["limit_buyable_qty"] == 4
-    assert limit_sized["order_qty"] == 4
+    # 산정과 지정가 클램프가 같은 ord_psbl_cash를 쓰므로 둘이 크게 벌어지지
+    # 않는다. 지정가 예산이 크게 깎는 경우는 잔고 요약으로 물러난 경로에서만
+    # 나오고, 그쪽은 test_entry_quantity_clamped_to_limit_price_budget이 본다.
+    assert not [kwargs for event, kwargs in events if event == "ENTRY_QTY_SIZED_AT_LIMIT"]
 
 
 @pytest.mark.asyncio
@@ -6470,3 +6484,126 @@ async def test_cancel_rejected_then_filled_marks_confirmation_stage(monkeypatch)
     assert outcome == "FILLED"
     stages = [k.get("confirmed_after") for e, k in events if e == "ENTRY_CANCEL_REJECTED_FILLED"]
     assert stages == ["CANCEL_POLL"]
+
+
+def test_entry_cash_basis_prefers_orderable_cash():
+    """수량 산정은 브로커가 답한 실제 주문가능액을 쓴다."""
+    cash, basis = f3._entry_cash_basis(
+        {"query_failed": False, "ord_psbl_cash": 9_412_327.0, "nrcvb_buy_qty": 873}
+    )
+    assert cash == 9_412_327.0
+    assert basis == "ORD_PSBL_CASH"
+
+
+def test_entry_cash_basis_falls_back_when_orderable_cash_absent():
+    """0이거나 조회가 실패하면 잔고 요약 경로로 물러난다.
+
+    값이 안 오는 계좌·모드에서 수량 0으로 막히면 그것이 회귀다.
+    """
+    assert f3._entry_cash_basis({"query_failed": False, "ord_psbl_cash": 0.0}) == (
+        None,
+        "BALANCE_SUMMARY",
+    )
+    assert f3._entry_cash_basis({"query_failed": True, "ord_psbl_cash": 5.0}) == (
+        None,
+        "BALANCE_SUMMARY",
+    )
+    assert f3._entry_cash_basis(None) == (None, "BALANCE_SUMMARY")
+
+
+@pytest.mark.asyncio
+async def test_run_single_sizes_from_orderable_cash_not_balance_summary(monkeypatch):
+    """잔고 요약이 훨씬 큰 값을 불러도 수량은 실제 주문가능액을 따른다.
+
+    dnca_tot_amt는 미결제 매수대금을 반영하지 않아 장부에만 남은 금액을 그대로
+    부른다(20260709: 장부 10,064,148 / 실제 119,940). 그 값으로 수량을 잡으면
+    주문이 거부된다.
+    """
+    _reset_state()
+    events = []
+    send_buy = AsyncMock(
+        return_value={
+            "rt_cd": "0",
+            "msg_cd": "MCA00000",
+            "msg1": "OK",
+            "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
+        }
+    )
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(4_660.0, 4_490.0)))
+    # 장부값은 100배로 부풀려 둔다 — 이 값을 따라가면 테스트가 깨진다.
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=100_000_000.0))
+    monkeypatch.setattr(
+        f3,
+        "_fetch_buyable_qty",
+        AsyncMock(return_value=_buyable(ord_psbl_cash=1_000_000.0)),
+    )
+    monkeypatch.setattr(
+        f3,
+        "_fetch_final_entry_quote",
+        AsyncMock(return_value=_entry_quote(4_690)),
+    )
+    monkeypatch.setattr(f3, "_send_buy", send_buy)
+    monkeypatch.setattr(
+        f3, "_poll_fill", AsyncMock(return_value={"fill_price": 4_690, "fill_qty": 200})
+    )
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "record_order", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "update_order_fill", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+
+    await f3.run()
+
+    # 1,000,000 × 0.95 / 4,660 = 203 계획, 지정가 예산으로 200 제출.
+    sized = [k for e, k in events if e == "ENTRY_QTY_SIZED_AT_LIMIT"][-1]
+    assert sized["planned_qty"] == 203
+    assert send_buy.await_args.args[1] == 200
+    basis = [k for e, k in events if e == "ENTRY_CASH_BASIS"][-1]
+    assert basis["cash_basis"] == "ORD_PSBL_CASH"
+    assert basis["cash"] == 1_000_000.0
+
+
+@pytest.mark.asyncio
+async def test_run_single_queries_buyable_qty_once_on_first_attempt(monkeypatch):
+    """산정용 조회를 앞으로 당겨도 API 왕복이 늘지 않는다.
+
+    09:01 창에서 왕복 한 번은 그대로 지연이다. 주문 루프는 이미 받아둔 결과를
+    재사용해야 한다.
+    """
+    _reset_state()
+    buyable = AsyncMock(
+        return_value=_buyable(ord_psbl_cash=1_000_000.0)
+    )
+    monkeypatch.setattr(f3, "F3_ENTRY_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(4_660.0, 4_490.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=1_000_000.0))
+    monkeypatch.setattr(f3, "_fetch_buyable_qty", buyable)
+    monkeypatch.setattr(f3, "_fetch_final_entry_quote", AsyncMock(return_value=_entry_quote(4_690)))
+    monkeypatch.setattr(
+        f3,
+        "_send_buy",
+        AsyncMock(
+            return_value={
+                "rt_cd": "0",
+                "msg_cd": "MCA00000",
+                "msg1": "OK",
+                "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        f3, "_poll_fill", AsyncMock(return_value={"fill_price": 4_690, "fill_qty": 200})
+    )
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "record_order", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "update_order_fill", AsyncMock())
+    monkeypatch.setattr(f3.db, "record_skip", AsyncMock())
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+
+    await f3.run()
+
+    assert buyable.await_count == 1
