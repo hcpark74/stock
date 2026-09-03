@@ -2542,6 +2542,23 @@ async def _run_single(
 # ── 헬퍼 ─────────────────────────────────────────────────────────────
 
 
+def _is_confirmed_full_fill(fill: dict | None, expected_qty: int | None) -> bool:
+    """전량 체결로 확정할 수 있는 스냅샷인지 판정한다.
+
+    수량이 맞아도 체결가가 0이면 확정하지 않는다. 브로커가 누적수량만 주고
+    금액·평균가를 아직 못 채운 행이 있는데, 그대로 set_holding(0.0)이 되면
+    F4의 스탑·트레일링 계산이 통째로 무너진다. 가격을 모르면 UNCERTAIN으로
+    넘겨 recover_pending_entry의 INVALID_FILL_PRICE 검사에 맡기는 편이 낫다.
+    """
+    if not fill:
+        return False
+    if expected_qty is not None and int(fill.get("fill_qty") or 0) < expected_qty:
+        return False
+    # expected_qty=None은 현재 호출부에서 도달하지 않는다(모두 int를 넘긴다).
+    # 방어적으로만 남겨 두며, 이 경우에도 가격 검사는 동일하게 적용한다.
+    return float(fill.get("fill_price") or 0.0) > 0.0
+
+
 async def _cancel_entry_order_confirmed(
     order_id: str,
     org_no: str,
@@ -2591,7 +2608,7 @@ async def _cancel_entry_order_confirmed(
         expected_qty=expected_qty,
     )
     fill = _more_complete_fill(known_fill, fill)
-    if fill and (expected_qty is None or int(fill.get("fill_qty") or 0) >= expected_qty):
+    if _is_confirmed_full_fill(fill, expected_qty):
         log(
             "ENTRY_CANCEL_REJECTED_FILLED",
             level="WARN",
@@ -2600,6 +2617,7 @@ async def _cancel_entry_order_confirmed(
             entry_attempt=attempt,
             fill_price=fill["fill_price"],
             fill_qty=fill["fill_qty"],
+            confirmed_after="CANCEL_POLL",
         )
         return "FILLED", fill
 
@@ -2630,17 +2648,27 @@ async def _cancel_entry_order_confirmed(
     # 주문 직후 수 초간 빈 응답을 준다. 앞선 폴링 창이 그 지연보다 짧으면 체결을
     # 못 보고 UNCERTAIN이 된다. 하루를 접기 전에 마지막으로 한 번 더 대조한다 —
     # 두 번째 취소 거부까지 왕복한 만큼 시간이 더 흘렀으므로 이제는 잡힐 수 있다.
-    final_fill = _more_complete_fill(
-        fill,
-        await _fetch_order_fill_snapshot(
+    # 조회가 실패해도 여기서 예외를 올리면 안 된다. 호출부의 day_skip·CRIT
+    # 알림·pending 복구가 통째로 건너뛰어지고 체결된 포지션이 ENTERING인 채
+    # F4 추적 밖에 남는다. 확인에 실패하면 원래대로 UNCERTAIN으로 떨어진다.
+    try:
+        late_snapshot = await _fetch_order_fill_snapshot(
             order_id,
             ticker=ticker,
             expected_qty=expected_qty,
-        ),
-    )
-    if final_fill and (
-        expected_qty is None or int(final_fill.get("fill_qty") or 0) >= expected_qty
-    ):
+        )
+    except Exception as exc:  # noqa: BLE001 — 확인 실패가 안전장치를 막으면 안 된다
+        log(
+            "ENTRY_CANCEL_CONFIRM_ERROR",
+            level="WARN",
+            ticker=ticker,
+            order_id=order_id,
+            entry_attempt=attempt,
+            error=repr(exc),
+        )
+        late_snapshot = None
+    final_fill = _more_complete_fill(fill, late_snapshot)
+    if _is_confirmed_full_fill(final_fill, expected_qty):
         log(
             "ENTRY_CANCEL_REJECTED_FILLED",
             level="WARN",

@@ -155,6 +155,7 @@ EVENT_LABELS = {
     "ENTRY_CANCEL_SENT": "진입 주문 취소 전송(Entry Cancel Sent)",
     "ENTRY_CANCEL_RETRY": "진입 주문 취소 재시도(Entry Cancel Retry)",
     "ENTRY_CANCEL_REJECTED_FILLED": "취소 거부 후 체결 확인(Entry Cancel Rejected But Filled)",
+    "ENTRY_CANCEL_CONFIRM_ERROR": "진입 취소 최종 체결 확인 실패(Entry Cancel Confirm Error)",
     "ENTRY_CANCEL_UNCONFIRMED": "진입 주문 취소 확인 실패(Entry Cancel Unconfirmed)",
     "ENTRY_PENDING_PERSIST_ERROR": "진입 주문 복구정보 저장 실패(Entry Pending Persist Error)",
     "ENTRY_DB_DEGRADED": "진입 후 DB 감사기록 장애(Entry DB Degraded)",

@@ -6303,6 +6303,8 @@ async def test_cancel_rejected_twice_confirms_fill_before_unconfirmed(monkeypatc
     assert reconciled["fill_qty"] == 216
     assert reconciled["fill_price"] == 8_625
     assert not [e for e, _ in events if e == "ENTRY_CANCEL_UNCONFIRMED"]
+    stages = [k.get("confirmed_after") for e, k in events if e == "ENTRY_CANCEL_REJECTED_FILLED"]
+    assert stages == ["CANCEL_RETRY"]
 
 
 @pytest.mark.asyncio
@@ -6314,7 +6316,8 @@ async def test_cancel_rejected_twice_without_fill_stays_unconfirmed(monkeypatch)
 
     monkeypatch.setattr(f3, "F3_ENTRY_CANCEL_CONFIRM_FILL_SEC", 0.05)
     monkeypatch.setattr(f3, "_cancel_order", cancel)
-    monkeypatch.setattr(f3, "_fetch_order_fill_snapshot", AsyncMock(return_value=None))
+    snapshot = AsyncMock(return_value=None)
+    monkeypatch.setattr(f3, "_fetch_order_fill_snapshot", snapshot)
     events = []
     monkeypatch.setattr(f3, "log", lambda event, **k: events.append((event, k)))
 
@@ -6331,6 +6334,8 @@ async def test_cancel_rejected_twice_without_fill_stays_unconfirmed(monkeypatch)
     assert outcome == "UNCERTAIN"
     assert reconciled is None
     assert [e for e, _ in events if e == "ENTRY_CANCEL_UNCONFIRMED"]
+    # 폴링 1회 + 포기 직전 최종 확인 1회. 최종 확인을 지우면 여기서 걸린다.
+    assert snapshot.await_count >= 2
 
 
 @pytest.mark.asyncio
@@ -6368,3 +6373,100 @@ async def test_cancel_rejected_twice_keeps_partial_fill_unconfirmed(monkeypatch)
     )
 
     assert outcome == "UNCERTAIN"
+
+
+@pytest.mark.asyncio
+async def test_cancel_final_fill_check_failure_stays_unconfirmed(monkeypatch):
+    """마지막 체결 확인이 실패해도 UNCERTAIN으로 떨어진다 — 예외를 올리지 않는다.
+
+    이 지점은 취소 확인의 최종 안전장치다. 여기서 예외가 새면 호출부의
+    day_skip·CRIT 알림·pending 복구가 통째로 건너뛰어지고, 체결된 포지션이
+    ENTERING인 채 F4 추적 밖에 남는다.
+    """
+
+    async def cancel(*_args, **_kwargs):
+        return {"rt_cd": "1", "msg_cd": "40330000", "msg1": "취소할 수량이 없습니다."}
+
+    snapshot = AsyncMock(side_effect=RuntimeError("ccld query down"))
+    monkeypatch.setattr(f3, "F3_ENTRY_CANCEL_CONFIRM_FILL_SEC", 0.05)
+    monkeypatch.setattr(f3, "_cancel_order", cancel)
+    monkeypatch.setattr(f3, "_fetch_order_fill_snapshot", snapshot)
+    events = []
+    monkeypatch.setattr(f3, "log", lambda event, **k: events.append((event, k)))
+
+    outcome, reconciled = await f3._cancel_entry_order_confirmed(
+        "0000003447", "00950", "PAPER", "004310", 1, 2, expected_qty=216
+    )
+
+    assert outcome == "UNCERTAIN"
+    assert reconciled is None
+    assert [e for e, _ in events if e == "ENTRY_CANCEL_CONFIRM_ERROR"]
+    assert [e for e, _ in events if e == "ENTRY_CANCEL_UNCONFIRMED"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_rejected_twice_rejects_zero_fill_price(monkeypatch):
+    """수량이 맞아도 체결가가 0이면 FILLED로 보지 않는다.
+
+    set_holding(0.0)은 F4의 스탑 계산을 통째로 망친다. 가격을 모르면
+    UNCERTAIN으로 넘겨 recover_pending_entry의 INVALID_FILL_PRICE 검사에 맡긴다.
+    """
+    cancels: list[int] = []
+
+    async def cancel(*_args, **_kwargs):
+        cancels.append(1)
+        return {"rt_cd": "1", "msg_cd": "40330000", "msg1": "취소할 수량이 없습니다."}
+
+    async def snapshot(*_args, **_kwargs):
+        if len(cancels) < 2:
+            return None
+        return {
+            "status": "FILLED",
+            "order_qty": 216,
+            "fill_qty": 216,
+            "remaining_qty": 0,
+            "fill_price": 0.0,
+        }
+
+    monkeypatch.setattr(f3, "F3_ENTRY_CANCEL_CONFIRM_FILL_SEC", 0.05)
+    monkeypatch.setattr(f3, "_cancel_order", cancel)
+    monkeypatch.setattr(f3, "_fetch_order_fill_snapshot", snapshot)
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+
+    outcome, _reconciled = await f3._cancel_entry_order_confirmed(
+        "0000003447", "00950", "PAPER", "004310", 1, 2, expected_qty=216
+    )
+
+    assert outcome == "UNCERTAIN"
+
+
+@pytest.mark.asyncio
+async def test_cancel_rejected_then_filled_marks_confirmation_stage(monkeypatch):
+    """첫 폴링에서 체결이 잡히면 confirmed_after=CANCEL_POLL로 남는다.
+
+    ENTRY_CANCEL_REJECTED_FILLED는 이제 두 지점에서 나온다. 어느 쪽이 잡았는지
+    로그만 보고 구분할 수 있어야 창 길이 조정의 효과를 사후에 측정할 수 있다.
+    """
+    filled = {
+        "status": "FILLED",
+        "order_qty": 216,
+        "fill_qty": 216,
+        "remaining_qty": 0,
+        "fill_price": 8_625,
+    }
+
+    async def cancel(*_args, **_kwargs):
+        return {"rt_cd": "1", "msg_cd": "40330000", "msg1": "취소할 수량이 없습니다."}
+
+    monkeypatch.setattr(f3, "_cancel_order", cancel)
+    monkeypatch.setattr(f3, "_fetch_order_fill_snapshot", AsyncMock(return_value=filled))
+    events = []
+    monkeypatch.setattr(f3, "log", lambda event, **k: events.append((event, k)))
+
+    outcome, _reconciled = await f3._cancel_entry_order_confirmed(
+        "0000003447", "00950", "PAPER", "004310", 1, 2, expected_qty=216
+    )
+
+    assert outcome == "FILLED"
+    stages = [k.get("confirmed_after") for e, k in events if e == "ENTRY_CANCEL_REJECTED_FILLED"]
+    assert stages == ["CANCEL_POLL"]
